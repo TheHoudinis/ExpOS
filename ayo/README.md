@@ -4,6 +4,33 @@
 are persistent Forms identified by FIN and scoped to a Dimension; they are not
 archives copied into Unix-style directories.
 
+## Interactive catalog
+
+Running `ayo` without a command opens the Package Form deck:
+
+```sh
+./bin/ayo --authority operator
+```
+
+Choose a package number/name to preview and install it. The TUI searches with
+`/text`, shows details with `d NAME`, lists installed Forms with `i`, and
+removes with `x NAME`. Dependencies are resolved before confirmation and the
+entire plan commits as one transaction. The built-in starter catalog works
+offline.
+
+Remote registries are metadata catalogs because HexaOS packages are Forms, not
+file archives:
+
+```sh
+./bin/ayo --authority operator \
+  --registry https://packages.example/ayo-v2.json \
+  --registry-key BASE64_ED25519_PUBLIC_KEY
+```
+
+Remote sources must use HTTPS, remain below 2 MiB, and include a valid SHA-256
+checksum for every Package Form. When a public key is supplied, the complete
+catalog must also pass Ed25519 signature verification.
+
 Implemented command vocabulary (unchanged from the philosophy):
 
 - `slap` activates or revises a Package Form after dependency validation;

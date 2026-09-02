@@ -62,13 +62,72 @@ func (manager Manager) Slap(name, version string, capabilities, dependencies []s
 }
 
 func (manager Manager) SlapSpec(spec InstallSpec) error {
+	if err := validateInstallSpec(spec, manager.Dimension); err != nil {
+		return err
+	}
+	return manager.mutate("slap", func(state *model.State) (string, string, error) {
+		fin, err := applyInstallSpec(state, manager.Dimension, spec)
+		return fin, "activated " + spec.Name + "@" + spec.Version, err
+	})
+}
+
+// InstallPlan activates a dependency-ordered set in one transaction. Either
+// every Package Form is committed, or none of them are.
+func (manager Manager) InstallPlan(specs []InstallSpec) error {
+	if len(specs) == 0 {
+		return errors.New("install plan is empty")
+	}
+	seen := make(map[string]bool)
+	for _, spec := range specs {
+		if err := validateInstallSpec(spec, manager.Dimension); err != nil {
+			return err
+		}
+		key := strings.ToLower(spec.Name)
+		if seen[key] {
+			return fmt.Errorf("install plan contains duplicate Package Form %s", spec.Name)
+		}
+		seen[key] = true
+	}
+	return manager.mutate("slap-plan", func(state *model.State) (string, string, error) {
+		pending := append([]InstallSpec(nil), specs...)
+		installed := 0
+		for len(pending) > 0 {
+			progress := false
+			for index := 0; index < len(pending); {
+				spec := pending[index]
+				if err := checkDependencies(*state, manager.Dimension, spec.Dependencies); err != nil {
+					index++
+					continue
+				}
+				if _, err := applyInstallSpec(state, manager.Dimension, spec); err != nil {
+					return "", "", err
+				}
+				pending = append(pending[:index], pending[index+1:]...)
+				installed++
+				progress = true
+			}
+			if !progress {
+				return "", "", fmt.Errorf("dependency plan is cyclic or unresolved near %s", pending[0].Name)
+			}
+		}
+		return "", fmt.Sprintf("activated %d Package Forms", installed), nil
+	})
+}
+
+func validateInstallSpec(spec InstallSpec, dimension string) error {
 	if strings.TrimSpace(spec.Name) == "" || strings.TrimSpace(spec.Version) == "" {
 		return errors.New("slap needs a Package Form name and version")
+	}
+	if len(spec.Name) > 32 || !isASCII(spec.Name) {
+		return errors.New("Package Form names must be 1-32 ASCII characters")
+	}
+	if strings.ContainsAny(spec.Name, "@/\\") {
+		return errors.New("Package Form names cannot contain @, /, or \\")
 	}
 	if _, err := parseVersion(spec.Version); err != nil {
 		return err
 	}
-	if err := checkCompatibility(spec.Compatibility, manager.Dimension); err != nil {
+	if err := checkCompatibility(spec.Compatibility, dimension); err != nil {
 		return err
 	}
 	if strings.EqualFold(spec.PIMP["activation"], "denied") {
@@ -79,37 +138,48 @@ func (manager Manager) SlapSpec(spec InstallSpec) error {
 			return err
 		}
 	}
-	return manager.mutate("slap", func(state *model.State) (string, string, error) {
-		if err := checkDependencies(*state, manager.Dimension, spec.Dependencies); err != nil {
-			return "", "", err
+	return nil
+}
+
+func isASCII(value string) bool {
+	for _, character := range value {
+		if character > 0x7f {
+			return false
 		}
-		now := time.Now().UTC()
-		if existing, err := state.Find(spec.Name, manager.Dimension); err == nil {
-			existing.Version, existing.Active, existing.DesiredActive = spec.Version, true, true
-			existing.Hidden, existing.Excluded, existing.LastError = false, false, ""
-			existing.Capabilities = unique(spec.Capabilities)
-			existing.ProvidedForms = unique(spec.ProvidedForms)
-			existing.Dependencies = unique(spec.Dependencies)
-			existing.Compatibility = unique(spec.Compatibility)
-			existing.PIMP = cloneMap(spec.PIMP)
-			existing.Revision++
-			existing.UpdatedAt = now
-			return existing.FIN, "updated " + existing.Name + "@" + existing.Version, nil
-		}
-		fin, err := model.NewFIN()
-		if err != nil {
-			return "", "", err
-		}
-		state.Packages = append(state.Packages, model.PackageForm{
-			FIN: fin, Name: spec.Name, Version: spec.Version, Dimension: manager.Dimension,
-			Active: true, DesiredActive: true, Revision: 1,
-			Capabilities: unique(spec.Capabilities), ProvidedForms: unique(spec.ProvidedForms),
-			Dependencies: unique(spec.Dependencies), Compatibility: unique(spec.Compatibility),
-			PIMP: cloneMap(spec.PIMP), InstalledAt: now, UpdatedAt: now,
-		})
-		state.Sort()
-		return fin, "activated " + spec.Name + "@" + spec.Version, nil
+	}
+	return true
+}
+
+func applyInstallSpec(state *model.State, dimension string, spec InstallSpec) (string, error) {
+	if err := checkDependencies(*state, dimension, spec.Dependencies); err != nil {
+		return "", err
+	}
+	now := time.Now().UTC()
+	if existing, err := state.Find(spec.Name, dimension); err == nil {
+		existing.Version, existing.Active, existing.DesiredActive = spec.Version, true, true
+		existing.Hidden, existing.Excluded, existing.LastError = false, false, ""
+		existing.Capabilities = unique(spec.Capabilities)
+		existing.ProvidedForms = unique(spec.ProvidedForms)
+		existing.Dependencies = unique(spec.Dependencies)
+		existing.Compatibility = unique(spec.Compatibility)
+		existing.PIMP = cloneMap(spec.PIMP)
+		existing.Revision++
+		existing.UpdatedAt = now
+		return existing.FIN, nil
+	}
+	fin, err := model.NewFIN()
+	if err != nil {
+		return "", err
+	}
+	state.Packages = append(state.Packages, model.PackageForm{
+		FIN: fin, Name: spec.Name, Version: spec.Version, Dimension: dimension,
+		Active: true, DesiredActive: true, Revision: 1,
+		Capabilities: unique(spec.Capabilities), ProvidedForms: unique(spec.ProvidedForms),
+		Dependencies: unique(spec.Dependencies), Compatibility: unique(spec.Compatibility),
+		PIMP: cloneMap(spec.PIMP), InstalledAt: now, UpdatedAt: now,
 	})
+	state.Sort()
+	return fin, nil
 }
 
 func (manager Manager) Yeet(identity string) error { return manager.YeetForce(identity, false) }
@@ -429,6 +499,11 @@ func satisfies(version, constraint string) (bool, error) {
 	default:
 		return cmp == 0, nil
 	}
+}
+
+// VersionSatisfies exposes ayo's compatibility rules to registry planners.
+func VersionSatisfies(version, constraint string) (bool, error) {
+	return satisfies(version, constraint)
 }
 
 func parseVersion(raw string) ([3]int, error) {

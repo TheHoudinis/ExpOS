@@ -1,15 +1,18 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"hexaos.dev/ayo/internal/catalog"
 	"hexaos.dev/ayo/internal/manager"
 	"hexaos.dev/ayo/internal/model"
 	"hexaos.dev/ayo/internal/store"
+	"hexaos.dev/ayo/internal/tui"
 )
 
 func main() { os.Exit(run(os.Args[1:])) }
@@ -20,12 +23,10 @@ func run(arguments []string) int {
 	statePath := flags.String("state", defaultStatePath(), "development HexaFS bridge state")
 	authority := flags.String("authority", "power", "operator, power, or guest")
 	dimension := flags.String("dimension", "Stable", "active Dimension")
+	registrySource := flags.String("registry", os.Getenv("AYO_REGISTRY"), "HTTPS URL or local ayo catalog JSON")
+	registryKey := flags.String("registry-key", os.Getenv("AYO_REGISTRY_KEY"), "base64 Ed25519 registry public key")
+	plainTUI := flags.Bool("plain", false, "do not clear the screen while using the TUI")
 	if err := flags.Parse(arguments); err != nil {
-		return 2
-	}
-	args := flags.Args()
-	if len(args) == 0 {
-		usage()
 		return 2
 	}
 	level := model.Authority(strings.ToLower(*authority))
@@ -34,6 +35,19 @@ func run(arguments []string) int {
 		return 2
 	}
 	ayo := manager.Manager{Store: store.JSONBridge{Path: *statePath}, Authority: level, Dimension: *dimension}
+	args := flags.Args()
+	if len(args) == 0 || args[0] == "tui" {
+		loaded, err := catalog.Load(context.Background(), *registrySource, *registryKey)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "ayo:", err)
+			return 1
+		}
+		if err := (tui.App{Manager: ayo, Catalog: loaded, Input: os.Stdin, Output: os.Stdout, Plain: *plainTUI}).Run(); err != nil {
+			fmt.Fprintln(os.Stderr, "ayo:", err)
+			return 1
+		}
+		return 0
+	}
 	command, operands := args[0], args[1:]
 	var err error
 	switch command {
@@ -232,7 +246,11 @@ func defaultStatePath() string {
 func usage() {
 	fmt.Fprintln(os.Stderr, `ayo v2 — HexaOS Package Form manager
 
-usage: ayo [--authority operator|power|guest] [--dimension Stable] COMMAND
+usage: ayo [--authority operator|power|guest] [--dimension Stable]
+       ayo [global options] COMMAND
+
+No command opens the interactive package catalog. Use --authority operator to install.
+Registry options: --registry HTTPS_URL --registry-key BASE64_ED25519_KEY --plain
 
 commands: slap yeet glance chill fix ghost manifest highfive dodge vibecheck flex
 

@@ -124,3 +124,27 @@ func TestCompatibilityAndPIMPPolicyAreEnforced(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestInstallPlanResolvesUnorderedDependenciesAtomically(t *testing.T) {
+	storage := &memoryStore{}
+	ayo := Manager{Store: storage, Authority: model.Operator, Dimension: "Stable"}
+	plan := []InstallSpec{
+		{Name: "Browser", Version: "1.0.0", Dependencies: []string{"Network@>=2.0.0"}},
+		{Name: "Network", Version: "2.1.0"},
+	}
+	if err := ayo.InstallPlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	state, _ := storage.Load()
+	if len(state.Packages) != 2 || state.Sequence != 1 {
+		t.Fatalf("plan was not one transaction: %#v", state)
+	}
+	broken := []InstallSpec{{Name: "BadUI", Version: "1.0.0", Dependencies: []string{"Missing@>=1.0.0"}}}
+	if err := ayo.InstallPlan(broken); err == nil {
+		t.Fatal("unresolved plan was committed")
+	}
+	state, _ = storage.Load()
+	if len(state.Packages) != 2 || state.Sequence != 1 {
+		t.Fatalf("failed plan leaked state: %#v", state)
+	}
+}

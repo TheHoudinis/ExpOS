@@ -94,6 +94,17 @@ impl RelationshipGraph {
             .flatten()
             .any(|entry| entry.target == target)
     }
+
+    pub fn involves(&self, fin: Fin) -> bool {
+        self.entries
+            .iter()
+            .flatten()
+            .any(|entry| entry.source == fin || entry.target == fin)
+    }
+
+    pub fn count(&self) -> usize {
+        self.entries.iter().flatten().count()
+    }
 }
 
 impl Default for RelationshipGraph {
@@ -132,6 +143,8 @@ mod tests {
                 .next(),
             None
         );
+        assert!(graph.involves(source));
+        assert_eq!(graph.count(), 1);
         assert!(graph.referenced(target));
     }
 }

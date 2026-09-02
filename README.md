@@ -14,7 +14,8 @@ projects without making either legacy architecture the new system model:
   revocable requester-bound Form Handles, typed relationships, safe Form
   reclamation, and transactional HexaFS metadata.
 - `ayo/` is an entirely Go implementation of the native Package Form manager,
-  including constraints, reconciliation, checkpoints and crash recovery.
+  including an interactive catalog TUI, HTTPS registries, dependency plans,
+  constraints, reconciliation, checkpoints and crash recovery.
 
 The current image boots a real 64-bit kernel into an interactive command
 environment. It accepts input from both the QEMU window keyboard and COM1 in
@@ -35,6 +36,17 @@ make ayo        # test and build the Go package manager
 make all        # all of the above
 ```
 
+Open the package catalog and select a Form by number or name:
+
+```sh
+./ayo/bin/ayo --authority operator
+```
+
+`Browser`, for example, resolves and installs its complete dependency plan in
+one atomic transaction. A remote checksummed catalog can be selected with
+`--registry https://.../catalog.json`; `--registry-key` additionally requires
+an Ed25519 signature.
+
 To boot interactively:
 
 ```sh
@@ -47,11 +59,12 @@ that launched QEMU. The current command environment supports:
 ```text
 help clear echo about status whoami
 forms packages dimensions inspect journal policy handles relationships
-mkform retire activate grant revoke pimp relate
+mkform retire activate reclaim resolve grant revoke handlecheck pimp
+relate unrelate
 ayo reboot shutdown
 ```
 
-The alpha.4 shell also ports the practical HexaOS 7.2 command layer: Form
+The alpha.5 shell also ports the practical HexaOS 7.2 command layer: Form
 content (`write`, `append`, `cat`, `head`, `copy`, `move`, `delete/recover`,
 `hexdump`, hashes), hardware inspection, calculator/string/math tools,
 Dimensions, history, system diagnostics, and the original fun utilities.

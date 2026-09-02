@@ -1,6 +1,6 @@
 # HexaOS feature coverage
 
-HexaOS v8.0.0-alpha.4 uses two runnable environments during migration. `make
+HexaOS v8.0.0-alpha.5 uses two runnable environments during migration. `make
 run` boots the new x86_64 Form-native kernel. `make run-alpha` boots the original
 32-bit Diamond II system with its existing storage image.
 
@@ -8,10 +8,10 @@ run` boots the new x86_64 Form-native kernel. `make run-alpha` boots the origina
 
 | Area | Commands / behavior |
 |---|---|
-| Forms | `mkform`, `forms/list`, `inspect/fin`, `view/cat`, `write`, `append`, `head`, `copy`, `move`, `delete`, `recover`, `retire`, `activate`, `hexdump`, `du`, `df`, `shasum`, `which`; typed `relate`/`relationships` |
+| Forms | `mkform`, `forms/list`, `inspect/fin`, exact `resolve`, `view/cat`, `write`, `append`, `head`, `copy`, `move`, `delete`, `recover`, `retire`, `activate`, guarded `reclaim`, `hexdump`, `du`, `df`, `shasum`, `which`; typed `relate`/`unrelate`/`relationships` |
 | Dimensions and policy | `dimensions`, `makedim`, `policy`, `pimp`, `journal` |
-| Capabilities | `grant`, `revoke`, `handles` with requester-bound, scoped, expiring Form Handles |
-| Packages | `Ayo` boot Package Form, `packages`, and Go `ayo v2` with all 11 commands, version constraints, dependency protection, reconciliation, capability merges, checksummed manifests and bridge recovery |
+| Capabilities | `grant`, `revoke`, `handles`, and `handlecheck` with requester-bound, scoped, expiring Form Handles |
+| Packages | `Ayo` boot Package Form, `packages`, and Go `ayo v2` with interactive TUI, offline/HTTPS catalogs, checksums/signatures, atomic dependency plans, all 11 commands, version constraints, dependency protection, reconciliation, capability merges, manifests and recovery |
 | Hardware | `date/clock`, `cpuinfo`, `lspci`, `mem/free`, VGA and COM1 consoles, PS/2 and serial input |
 | System | `status`, `kstat`, `ps`, `dmesg/bootlog`, `ifconfig`, `netstat`, `mode`, `history`, `uptime`, `env`, `whoami`, `reboot`, `shutdown` |
 | Utilities | `calc`, `factor`, `len`, `hex`, `reverse/rev`, `tolower`, `toupper`, `rand`, `dice`, `ascii`, `palette`, `morse`, `sleep`, `true`, `false` |

@@ -52,6 +52,9 @@ firmware / GRUB (temporary)
   core.
 - Relationships are typed, FIN-to-FIN and optionally Dimension-scoped; package
   dependencies use the same model instead of paths.
+- The Go ayo catalog maps verified registry metadata into Package Forms. A
+  dependency plan is validated and committed as one state transaction rather
+  than downloading archives into paths.
 - PIMP accepts only known keys and typed values. DIESE never silently resolves
   an equal-precedence conflict.
 - HexaFS transaction commit validates all staged records and capacity before

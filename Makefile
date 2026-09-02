@@ -39,8 +39,12 @@ check: $(ISO)
 	grep -q "Ayo.*package" $(BUILD)/serial.log
 	grep -q "Ayo --configured-by--> Root" $(BUILD)/serial.log
 	grep -q "Browser --depends-on--> Ayo" $(BUILD)/serial.log
+	grep -q "DIESE exact resolution" $(BUILD)/serial.log
+	grep -q "Removed 'Browser' --depends-on--> 'Ayo'" $(BUILD)/serial.log
+	grep -q "Reclaimed 'Scratch'" $(BUILD)/serial.log
 	grep -q "Created and bound 'Browser'" $(BUILD)/serial.log
 	grep -q "Granted Handle" $(BUILD)/serial.log
+	grep -q "Handle #2 authorizes execute for requester 'Root'" $(BUILD)/serial.log
 	grep -q "^42" $(BUILD)/serial.log
 	grep -q "HexaOS Forms can carry structured state and revisions" $(BUILD)/serial.log
 	grep -q "NotesBackup" $(BUILD)/serial.log

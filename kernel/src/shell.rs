@@ -232,6 +232,7 @@ impl Shell {
                 println!("[ok] x86_64 long mode, VGA, COM1");
                 println!("[ok] Root Form + Stable Dimension");
                 println!("[ok] PIMP/DIESE + Handle #1 + HexaFS journal #1");
+                println!("[ok] Ayo Package Form + typed relationship graph");
                 println!("[ok] interactive command environment");
                 true
             }
@@ -310,6 +311,10 @@ impl Shell {
                 self.which(words.next());
                 true
             }
+            "resolve" => {
+                self.resolve(words.next());
+                true
+            }
             "inspect" | "fin" => {
                 self.inspect(words.next());
                 true
@@ -322,12 +327,20 @@ impl Shell {
                 self.set_lifecycle(words.next(), Lifecycle::Active);
                 true
             }
+            "reclaim" => {
+                self.reclaim(words.next());
+                true
+            }
             "grant" => {
                 self.grant(words.next(), words.next());
                 true
             }
             "revoke" => {
                 self.revoke(words.next());
+                true
+            }
+            "handlecheck" => {
+                self.handlecheck(words.next(), words.next(), words.next());
                 true
             }
             "pimp" => {
@@ -342,11 +355,16 @@ impl Shell {
                 self.list_relationships(words.next());
                 true
             }
+            "unrelate" => {
+                self.unrelate(words.next(), words.next(), words.next());
+                true
+            }
             "ayo" => {
                 println!("ayo v2 is registered as Package Form {}.", AYO_FIN);
                 println!("Commands: slap yeet glance chill fix ghost manifest highfive dodge");
                 println!("          vibecheck flex");
-                println!("Host bridge: ./ayo/bin/ayo --authority operator <command>");
+                println!("Host TUI: ./ayo/bin/ayo --authority operator");
+                println!("CLI:      ./ayo/bin/ayo --authority operator <command>");
                 true
             }
             "legacy" | "games" => {
@@ -382,10 +400,11 @@ impl Shell {
         println!("  forms packages dimensions makedim inspect journal policy handles history");
         println!("  mkform <name> [service|interface|package|driver|data|policy]");
         println!("  view/cat write append head delete recover move copy");
-        println!("  hexdump du shasum df which retire activate");
+        println!("  hexdump du shasum df which resolve retire activate reclaim");
         println!("  grant <name> <read|execute|configure|relate|retire|package>");
-        println!("  revoke <handle-id>  pimp <name> <key=value>");
-        println!("  relate <source> <kind> <target>  relationships <source>");
+        println!("  revoke <id>  handlecheck <id> <requester> <operation>");
+        println!("  pimp <name> <key=value>");
+        println!("  relate/unrelate <source> <kind> <target>  relationships <source>");
         println!("  ayo legacy games reboot shutdown");
         println!("  date clock cpuinfo lspci neofetch sysinfo mem free env uptime ps");
         println!("  kstat dmesg bootlog ifconfig netstat mode");
@@ -409,6 +428,7 @@ impl Shell {
         println!("architecture: x86_64 Form-native alpha");
         println!("Dimension: Stable  authority: Operator");
         println!("active Forms: {}  active Handles: {}", active, handle_count);
+        println!("typed relationships: {}", self.relationships.count());
         println!("journal sequence: {}", self.journal_sequence);
     }
 
@@ -573,6 +593,45 @@ impl Shell {
         }
         if count == 0 {
             println!("No visible relationships from '{}'.", source_identity);
+        }
+    }
+
+    fn unrelate(
+        &mut self,
+        source_identity: Option<&str>,
+        raw_kind: Option<&str>,
+        target_identity: Option<&str>,
+    ) {
+        let (Some(source_identity), Some(raw_kind), Some(target_identity)) =
+            (source_identity, raw_kind, target_identity)
+        else {
+            println!("usage: unrelate <source> <kind> <target>");
+            return;
+        };
+        let (Some(source), Some(target), Some(kind)) = (
+            self.find_form(source_identity).map(|form| form.fin),
+            self.find_form(target_identity).map(|form| form.fin),
+            parse_relationship_kind(raw_kind),
+        ) else {
+            println!("Relationship endpoints and kind must resolve exactly.");
+            return;
+        };
+        let relationship = Relationship {
+            source,
+            target,
+            kind,
+            dimension: Some(self.report.stable_fin),
+        };
+        if self.relationships.remove(relationship) {
+            self.commit_action();
+            println!(
+                "Removed '{}' --{}--> '{}'.",
+                source_identity,
+                relationship_name(kind),
+                target_identity
+            );
+        } else {
+            println!("No matching relationship exists in Stable.");
         }
     }
 
@@ -836,6 +895,78 @@ impl Shell {
         }
     }
 
+    fn resolve(&self, identity: Option<&str>) {
+        let Some(identity) = identity else {
+            println!("usage: resolve <Form-name>");
+            return;
+        };
+        let Some(form) = self.find_form(identity) else {
+            println!(
+                "DIESE resolution: no visible binding for '{}' in Stable.",
+                identity
+            );
+            return;
+        };
+        println!("DIESE exact resolution:");
+        println!("  name={} FIN={}", form.name, form.fin);
+        println!(
+            "  kind={} state={} Dimension=Stable",
+            kind_name(form.kind),
+            lifecycle_name(form.lifecycle)
+        );
+        println!(
+            "  relationship-participation={}",
+            self.relationships.involves(form.fin)
+        );
+    }
+
+    fn reclaim(&mut self, identity: Option<&str>) {
+        let Some(identity) = identity else {
+            println!("usage: reclaim <retired-Form-name>");
+            return;
+        };
+        let Some(index) = self.find_form_index(identity) else {
+            println!("No Form named '{}'.", identity);
+            return;
+        };
+        let form = self.forms[index].unwrap();
+        if form.kind == FormKind::Root {
+            println!("DIESE denied: Root identity cannot be reclaimed.");
+            return;
+        }
+        if form.lifecycle != Lifecycle::Retired {
+            println!(
+                "Reclaim requires a retired Form; '{}' is {}.",
+                identity,
+                lifecycle_name(form.lifecycle)
+            );
+            return;
+        }
+        if self.relationships.involves(form.fin) {
+            println!(
+                "DIESE denied: remove all FIN relationships before reclaiming '{}'.",
+                identity
+            );
+            return;
+        }
+        if self.handles.iter().flatten().any(|handle| {
+            !handle.revoked && (handle.target == form.fin || handle.requester == form.fin)
+        }) {
+            println!(
+                "DIESE denied: revoke active Handles involving '{}' before reclamation.",
+                identity
+            );
+            return;
+        }
+        self.forms[index] = None;
+        self.content[index] = FormContent::empty();
+        self.commit_action();
+        println!(
+            "Reclaimed '{}' after lifecycle and relationship checks. FIN {} is no longer bound.",
+            identity, form.fin
+        );
+    }
+
     fn set_lifecycle(&mut self, identity: Option<&str>, lifecycle: Lifecycle) {
         let Some(identity) = identity else {
             println!("usage: retire|activate <Form-name>");
@@ -876,17 +1007,9 @@ impl Shell {
             return;
         };
         let target = form.fin;
-        let operations = match operation {
-            "read" => Operations::READ,
-            "execute" => Operations::EXECUTE,
-            "configure" => Operations::CONFIGURE,
-            "relate" => Operations::RELATE,
-            "retire" => Operations::RETIRE,
-            "package" => Operations::PACKAGE,
-            other => {
-                println!("Unknown operation '{}'.", other);
-                return;
-            }
+        let Some(operations) = parse_operation(operation) else {
+            println!("Unknown operation '{}'.", operation);
+            return;
         };
         let Ok(handle) = self.broker.issue_for(
             self.report.root_fin,
@@ -933,15 +1056,55 @@ impl Shell {
     }
 
     fn list_handles(&self) {
-        println!("ID   STATE     OPS    TARGET FIN");
+        println!("ID   STATE     OPS    REQUESTER FIN                        TARGET FIN");
         for handle in self.handles.iter().flatten() {
             println!(
-                "{:<4} {:<9} 0x{:02X}   {}",
+                "{:<4} {:<9} 0x{:02X}   {}  {}",
                 handle.id,
                 if handle.revoked { "revoked" } else { "active" },
                 handle.operations.bits(),
+                handle.requester,
                 handle.target
             );
+        }
+    }
+
+    fn handlecheck(&self, raw_id: Option<&str>, requester: Option<&str>, operation: Option<&str>) {
+        let (Some(id), Some(requester), Some(operation)) = (
+            raw_id.and_then(|value| value.parse::<u32>().ok()),
+            requester,
+            operation,
+        ) else {
+            println!("usage: handlecheck <id> <requester-Form> <operation>");
+            return;
+        };
+        let Some(requester_fin) = self.find_form(requester).map(|form| form.fin) else {
+            println!("Requester Form '{}' is not visible.", requester);
+            return;
+        };
+        let Some(handle) = self.handles.iter().flatten().find(|handle| handle.id == id) else {
+            println!("Handle #{} does not exist.", id);
+            return;
+        };
+        let Some(operation) = parse_operation(operation) else {
+            println!("Unknown Handle operation.");
+            return;
+        };
+        match self.broker.authorize_requester(
+            id,
+            requester_fin,
+            handle.target,
+            self.report.stable_fin,
+            operation,
+            crate::hardware::timestamp(),
+        ) {
+            Ok(()) => println!(
+                "Handle #{} authorizes {} for requester '{}'.",
+                id,
+                operation_name(operation),
+                requester
+            ),
+            Err(error) => println!("DIESE denied Handle #{}: {:?}.", id, error),
         }
     }
 
@@ -1095,13 +1258,17 @@ fn is_shell_command(name: &str) -> bool {
             | "shasum"
             | "df"
             | "which"
+            | "resolve"
             | "retire"
             | "activate"
+            | "reclaim"
             | "grant"
             | "revoke"
+            | "handlecheck"
             | "pimp"
             | "relate"
             | "relationships"
+            | "unrelate"
             | "ayo"
             | "legacy"
             | "games"
@@ -1109,6 +1276,36 @@ fn is_shell_command(name: &str) -> bool {
             | "shutdown"
             | "halt"
     )
+}
+
+fn parse_operation(raw: &str) -> Option<Operations> {
+    match raw {
+        "read" => Some(Operations::READ),
+        "execute" => Some(Operations::EXECUTE),
+        "configure" => Some(Operations::CONFIGURE),
+        "relate" => Some(Operations::RELATE),
+        "retire" => Some(Operations::RETIRE),
+        "package" => Some(Operations::PACKAGE),
+        _ => None,
+    }
+}
+
+fn operation_name(operation: Operations) -> &'static str {
+    if operation == Operations::READ {
+        "read"
+    } else if operation == Operations::EXECUTE {
+        "execute"
+    } else if operation == Operations::CONFIGURE {
+        "configure"
+    } else if operation == Operations::RELATE {
+        "relate"
+    } else if operation == Operations::RETIRE {
+        "retire"
+    } else if operation == Operations::PACKAGE {
+        "package"
+    } else {
+        "unknown"
+    }
 }
 
 fn parse_relationship_kind(raw: &str) -> Option<RelationshipKind> {
