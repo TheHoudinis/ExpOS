@@ -484,7 +484,7 @@ impl Shell {
         println!("  mkform <name> [service|interface|package|driver|data|policy]");
         println!("  view/cat write append head delete recover move copy");
         println!("  hexdump du shasum df which resolve retire activate reclaim");
-        println!("  grant <name> <read|execute|configure|relate|retire|package>");
+        println!("  grant <name> <read|execute|configure|relate|retire|package|display|input>");
         println!("  revoke <id>  handlecheck <id> <requester> <operation>");
         println!("  pimp <name> <key=value>");
         println!("  relate/unrelate <source> <kind> <target>  relationships <source>");
@@ -1380,6 +1380,8 @@ fn parse_operation(raw: &str) -> Option<Operations> {
         "relate" => Some(Operations::RELATE),
         "retire" => Some(Operations::RETIRE),
         "package" => Some(Operations::PACKAGE),
+        "display" => Some(Operations::DISPLAY),
+        "input" => Some(Operations::INPUT),
         _ => None,
     }
 }
@@ -1397,6 +1399,10 @@ fn operation_name(operation: Operations) -> &'static str {
         "retire"
     } else if operation == Operations::PACKAGE {
         "package"
+    } else if operation == Operations::DISPLAY {
+        "display"
+    } else if operation == Operations::INPUT {
+        "input"
     } else {
         "unknown"
     }

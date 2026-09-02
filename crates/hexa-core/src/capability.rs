@@ -20,6 +20,8 @@ impl Operations {
     pub const RELATE: Self = Self(1 << 3);
     pub const RETIRE: Self = Self(1 << 4);
     pub const PACKAGE: Self = Self(1 << 5);
+    pub const DISPLAY: Self = Self(1 << 6);
+    pub const INPUT: Self = Self(1 << 7);
 
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
@@ -35,6 +37,7 @@ impl Operations {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FormHandle {
     pub id: u32,
+    pub parent_id: u32,
     pub requester: Fin,
     pub target: Fin,
     pub dimension: Fin,
@@ -52,6 +55,7 @@ pub enum CapabilityError {
     Expired,
     WrongDimension,
     OperationDenied,
+    Amplification,
 }
 
 pub struct CapabilityBroker {
@@ -112,9 +116,56 @@ impl CapabilityBroker {
             .ok_or(CapabilityError::Full)?;
         let handle = FormHandle {
             id: self.next_id,
+            parent_id: 0,
             requester,
             target,
             dimension,
+            operations,
+            valid_until_tick,
+            revoked: false,
+        };
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        *slot = Some(handle);
+        Ok(handle)
+    }
+
+    /// Derive a narrower Handle without consulting ambient authority. A
+    /// delegated Handle can never add operations, outlive its parent, change
+    /// target/Dimension, or survive revocation of the parent chain.
+    pub fn delegate(
+        &mut self,
+        parent_id: u32,
+        requester: Fin,
+        operations: Operations,
+        valid_until_tick: u64,
+        tick: u64,
+    ) -> Result<FormHandle, CapabilityError> {
+        let parent = self
+            .handles
+            .iter()
+            .flatten()
+            .find(|handle| handle.id == parent_id)
+            .copied()
+            .ok_or(CapabilityError::NotFound)?;
+        self.authorize(parent.id, parent.target, parent.dimension, operations, tick)?;
+        if requester.is_zero()
+            || operations == Operations::NONE
+            || !parent.operations.contains(operations)
+            || valid_until_tick > parent.valid_until_tick
+        {
+            return Err(CapabilityError::Amplification);
+        }
+        let slot = self
+            .handles
+            .iter_mut()
+            .find(|slot| slot.is_none())
+            .ok_or(CapabilityError::Full)?;
+        let handle = FormHandle {
+            id: self.next_id,
+            parent_id: parent.id,
+            requester,
+            target: parent.target,
+            dimension: parent.dimension,
             operations,
             valid_until_tick,
             revoked: false,
@@ -176,13 +227,28 @@ impl CapabilityBroker {
     }
 
     pub fn revoke(&mut self, id: u32) -> Result<(), CapabilityError> {
-        let handle = self
-            .handles
-            .iter_mut()
-            .flatten()
-            .find(|handle| handle.id == id)
-            .ok_or(CapabilityError::NotFound)?;
-        handle.revoked = true;
+        if !self.handles.iter().flatten().any(|handle| handle.id == id) {
+            return Err(CapabilityError::NotFound);
+        }
+        let mut changed = true;
+        while changed {
+            changed = false;
+            let snapshot = self.handles;
+            for (index, handle) in snapshot.iter().enumerate() {
+                let Some(handle) = handle else { continue };
+                let parent_revoked = handle.parent_id != 0
+                    && snapshot
+                        .iter()
+                        .flatten()
+                        .any(|parent| parent.id == handle.parent_id && parent.revoked);
+                if (handle.id == id || parent_revoked) && !handle.revoked {
+                    if let Some(stored) = self.handles[index].as_mut() {
+                        stored.revoked = true;
+                        changed = true;
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -254,6 +320,43 @@ mod tests {
                 1
             ),
             Err(CapabilityError::Denied)
+        );
+    }
+
+    #[test]
+    fn delegation_is_narrow_and_parent_revocation_cascades() {
+        let display = Fin::from_u128(21);
+        let stable = Fin::from_u128(22);
+        let browser = Fin::from_u128(23);
+        let mut broker = CapabilityBroker::new();
+        let root = broker
+            .issue_for(
+                Fin::from_u128(20),
+                Authority::Operator,
+                display,
+                stable,
+                Operations::DISPLAY.union(Operations::INPUT),
+                100,
+            )
+            .unwrap();
+        let child = broker
+            .delegate(root.id, browser, Operations::DISPLAY, 80, 1)
+            .unwrap();
+        assert_eq!(child.parent_id, root.id);
+        assert_eq!(
+            broker.delegate(
+                child.id,
+                Fin::from_u128(24),
+                Operations::DISPLAY.union(Operations::INPUT),
+                80,
+                1,
+            ),
+            Err(CapabilityError::OperationDenied)
+        );
+        broker.revoke(root.id).unwrap();
+        assert_eq!(
+            broker.authorize_requester(child.id, browser, display, stable, Operations::DISPLAY, 2,),
+            Err(CapabilityError::Revoked)
         );
     }
 }

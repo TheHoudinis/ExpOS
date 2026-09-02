@@ -49,7 +49,9 @@ firmware / GRUB (temporary)
   are not Unix UID aliases.
 - Handles carry requester and target FINs, allowed operations, Dimension,
   expiry and revocation state. No file descriptor abstraction appears in the
-  core.
+  core. A Handle can derive only narrower children: delegation cannot add an
+  operation, extend expiry, or change target/Dimension, and revoking a parent
+  recursively revokes its descendants.
 - Relationships are typed, FIN-to-FIN and optionally Dimension-scoped; package
   dependencies use the same model instead of paths.
 - The Go ayo catalog maps verified registry metadata into Package Forms. A
@@ -60,11 +62,13 @@ firmware / GRUB (temporary)
   mutate pending state, report damage, and publish atomically with `commit`.
   Focus, configure, frame-complete and key events are routed back to the owning
   FIN. The alpha renderer targets the mapped Bochs/QEMU XRGB framebuffer.
-- The desktop creates separate Browser, Terminal, Forms, Packages, Settings and
-  System surfaces, plus Root, panel and launcher surfaces. Visibility changes,
-  focus transitions and movement are published through HexaDisplay commits.
-  Leaving graphics restores the VGA mode 3 register set before the kernel
-  redraws its text console.
+- The Hyprland-inspired desktop creates separate Browser, Terminal, Forms,
+  Packages, Settings and System surfaces, plus Root, panel and launcher
+  surfaces. Three workspaces provide master-stack tiling, floating/fullscreen
+  windows and overview. Each application receives a child Handle containing
+  only Display and Input rights; the compositor checks it before visibility,
+  geometry, commit or key routing. Leaving graphics restores the VGA mode 3
+  register set before the kernel redraws its text console.
 - The Browser is an Interface Form above HexaDisplay. Its current document
   engine intentionally accepts local `hexa://` and `data:text/html` resources;
   external HTTPS, CSS and JavaScript are not claimed while the v8 network and

@@ -4,6 +4,10 @@ browser
 q
 desktop
 help
+float
+float
+full
+full
 exit
 goabi
 shutdown

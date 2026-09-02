@@ -1,11 +1,17 @@
 use crate::{
     framebuffer,
-    input::{Input, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP},
+    input::{
+        Input, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_SUPER_BROWSER, KEY_SUPER_CLOSE, KEY_SUPER_CYCLE,
+        KEY_SUPER_DOWN, KEY_SUPER_FLOAT, KEY_SUPER_FULLSCREEN, KEY_SUPER_LAUNCHER, KEY_SUPER_LEFT,
+        KEY_SUPER_OVERVIEW, KEY_SUPER_RIGHT, KEY_SUPER_TERMINAL, KEY_SUPER_UP,
+        KEY_SUPER_WORKSPACE_1, KEY_SUPER_WORKSPACE_2, KEY_SUPER_WORKSPACE_3, KEY_UP,
+    },
     slog,
 };
 use framebuffer::color;
 use hexa_core::{
-    BufferFormat, BufferHandle, DisplayServer, Document, Fin, NodeKind, Rect, SurfaceRole,
+    Authority, BufferFormat, BufferHandle, CapabilityBroker, DisplayServer, Document, Fin,
+    NodeKind, Operations, Rect, SurfaceRole,
 };
 
 pub const DISPLAY_FIN: Fin = Fin::from_u128(0x4449_5350_4C41_5900_0000_0000_0000_0001);
@@ -19,6 +25,9 @@ pub const SYSTEM_FIN: Fin = Fin::from_u128(0x5359_5354_454D_0000_0000_0000_0000_
 const APP_COUNT: usize = 6;
 const APP_WIDTH: u16 = 704;
 const APP_HEIGHT: u16 = 466;
+const BUFFER_WIDTH: u16 = 780;
+const BUFFER_HEIGHT: u16 = 510;
+const STABLE_FIN: Fin = Fin::from_u128(0x4449_4D00_0000_0000_0000_0000_0000_0001);
 
 const HOME: &str = "<title>Hexa Home</title><h1>Welcome to ExpOS</h1><p>A Form native desktop where identity capability state and relationships are first class.</p><h2>Explore locally</h2><a href='hexa://about'>1 About this browser</a><a href='hexa://packages'>2 Package Forms</a><a href='hexa://system'>3 System status</a><p>Use 1 2 3 or H inside Browser. External navigation is safely restricted.</p>";
 const ABOUT: &str = "<title>About</title><h1>Hexa Browser</h1><p>This native Interface Form parses bounded local HTML and renders it through HexaDisplay.</p><p>Surface state is owner scoped and becomes visible only after an atomic commit.</p><p>HTTPS CSS JavaScript and media are intentionally not claimed before networking isolation and a complete web engine exist.</p><a href='hexa://home'>H Home</a>";
@@ -89,14 +98,44 @@ impl AppKind {
             Self::System => "I",
         }
     }
+
+    const fn summary(self) -> &'static str {
+        match self {
+            Self::Browser => "LOCAL HTML + POLICY NAVIGATION",
+            Self::Terminal => "COMMAND INTERFACE FORM",
+            Self::Forms => "FIN REGISTRY + RELATIONSHIPS",
+            Self::Packages => "AYO CATALOG + TRANSACTIONS",
+            Self::Settings => "PIMP SESSION SPECIFICATIONS",
+            Self::System => "KERNEL + CAPABILITY SCOPE",
+        }
+    }
+
+    const fn accent(self) -> u32 {
+        match self {
+            Self::Browser => color::CYAN,
+            Self::Terminal => color::GREEN,
+            Self::Forms => color::PURPLE,
+            Self::Packages => 0x00F4_B942,
+            Self::Settings => 0x00E9_69A7,
+            Self::System => color::RED,
+        }
+    }
 }
 
 struct DesktopState {
     server: DisplayServer,
+    broker: CapabilityBroker,
     app_surfaces: [u32; APP_COUNT],
+    app_handles: [u32; APP_COUNT],
+    app_workspaces: [u8; APP_COUNT],
+    app_open: [bool; APP_COUNT],
+    app_floating: [bool; APP_COUNT],
     launcher_surface: u32,
     active: AppKind,
+    workspace: u8,
     launcher_open: bool,
+    overview_open: bool,
+    fullscreen: bool,
     document: Document,
     terminal_line: [u8; 64],
     terminal_len: usize,
@@ -113,6 +152,19 @@ impl DesktopState {
             AppKind::Terminal
         };
         let mut server = DisplayServer::new();
+        let mut broker = CapabilityBroker::new();
+        let compositor_handle = broker
+            .issue_for(
+                DISPLAY_FIN,
+                Authority::Operator,
+                DISPLAY_FIN,
+                STABLE_FIN,
+                Operations::DISPLAY
+                    .union(Operations::INPUT)
+                    .union(Operations::CONFIGURE),
+                u64::MAX,
+            )
+            .expect("compositor capability");
         let background = server
             .create_surface(
                 DISPLAY_FIN,
@@ -131,24 +183,38 @@ impl DesktopState {
             .expect("desktop panel surface");
 
         let mut app_surfaces = [0; APP_COUNT];
+        let mut app_handles = [0; APP_COUNT];
         for (index, app) in AppKind::ALL.iter().copied().enumerate() {
-            let x = 48 + ((index % 3) as i16 * 10);
-            let y = 58 + ((index % 2) as i16 * 10);
+            let primary = if index < 2 {
+                app == active
+            } else {
+                index % 2 == 0
+            };
+            let rect = if primary {
+                Rect::new(18, 58, 500, 498)
+            } else {
+                Rect::new(528, 58, 254, 498)
+            };
             let surface = server
-                .create_surface(
-                    app.owner(),
-                    app.title(),
-                    SurfaceRole::Window,
-                    Rect::new(x, y, APP_WIDTH, APP_HEIGHT),
-                )
+                .create_surface(app.owner(), app.title(), SurfaceRole::Window, rect)
                 .expect("built-in application surface");
             let _ = server.attach(
                 app.owner(),
                 surface,
-                buffer((index + 3) as u32, app.owner(), APP_WIDTH, APP_HEIGHT),
+                buffer((index + 3) as u32, app.owner(), BUFFER_WIDTH, BUFFER_HEIGHT),
             );
-            let _ = server.set_visible(app.owner(), surface, app == active);
+            let _ = server.set_visible(app.owner(), surface, index < 2);
             app_surfaces[index] = surface;
+            app_handles[index] = broker
+                .delegate(
+                    compositor_handle.id,
+                    app.owner(),
+                    Operations::DISPLAY.union(Operations::INPUT),
+                    u64::MAX,
+                    0,
+                )
+                .expect("application display capability")
+                .id;
         }
 
         let launcher_surface = server
@@ -178,10 +244,18 @@ impl DesktopState {
 
         Self {
             server,
+            broker,
             app_surfaces,
+            app_handles,
+            app_workspaces: [1, 1, 2, 2, 3, 3],
+            app_open: [true; APP_COUNT],
+            app_floating: [false; APP_COUNT],
             launcher_surface,
             active,
+            workspace: 1,
             launcher_open: false,
+            overview_open: false,
+            fullscreen: false,
             document: Document::parse("hexa://home", HOME).expect("built-in home document"),
             terminal_line: [0; 64],
             terminal_len: 0,
@@ -195,31 +269,129 @@ impl DesktopState {
         self.app_surfaces[self.active.index()]
     }
 
-    fn switch_to(&mut self, next: AppKind) {
-        if self.active != next {
-            let previous = self.active;
-            let _ = self.server.set_visible(
-                previous.owner(),
-                self.app_surfaces[previous.index()],
-                false,
-            );
-            let _ = self
-                .server
-                .commit(previous.owner(), self.app_surfaces[previous.index()]);
-            self.active = next;
-            let _ = self
-                .server
-                .set_visible(next.owner(), self.app_surfaces[next.index()], true);
-            let _ = self
-                .server
-                .commit(next.owner(), self.app_surfaces[next.index()]);
+    fn authorized(&self, app: AppKind, operation: Operations) -> bool {
+        self.broker
+            .authorize_requester(
+                self.app_handles[app.index()],
+                app.owner(),
+                DISPLAY_FIN,
+                STABLE_FIN,
+                operation,
+                0,
+            )
+            .is_ok()
+    }
+
+    fn route_key(&mut self, key: u8) {
+        if self.authorized(self.active, Operations::INPUT) {
+            let _ = self.server.route_key(key);
         }
+    }
+
+    fn app_is_visible(&self, app: AppKind) -> bool {
+        self.app_open[app.index()]
+            && self.app_workspaces[app.index()] == self.workspace
+            && (!self.fullscreen || app == self.active)
+    }
+
+    fn sync_visibility(&mut self) {
+        for app in AppKind::ALL {
+            if !self.authorized(app, Operations::DISPLAY) {
+                continue;
+            }
+            let id = self.app_surfaces[app.index()];
+            let _ = self
+                .server
+                .set_visible(app.owner(), id, self.app_is_visible(app));
+            let _ = self.server.commit(app.owner(), id);
+        }
+    }
+
+    fn switch_to(&mut self, next: AppKind) {
+        self.app_open[next.index()] = true;
+        self.app_workspaces[next.index()] = self.workspace;
+        self.active = next;
+        self.fullscreen = false;
         self.close_launcher();
+        self.overview_open = false;
+        self.sync_visibility();
+        self.arrange_windows();
         let _ = self.server.focus(self.active_surface());
     }
 
     fn cycle_app(&mut self) {
-        self.switch_to(AppKind::ALL[(self.active.index() + 1) % APP_COUNT]);
+        for offset in 1..=APP_COUNT {
+            let next = AppKind::ALL[(self.active.index() + offset) % APP_COUNT];
+            if self.app_open[next.index()] && self.app_workspaces[next.index()] == self.workspace {
+                self.active = next;
+                self.arrange_windows();
+                let _ = self.server.focus(self.active_surface());
+                return;
+            }
+        }
+    }
+
+    fn switch_workspace(&mut self, workspace: u8) {
+        if !(1..=3).contains(&workspace) || workspace == self.workspace {
+            return;
+        }
+        self.workspace = workspace;
+        self.fullscreen = false;
+        self.overview_open = false;
+        let next = AppKind::ALL
+            .iter()
+            .copied()
+            .find(|app| self.app_open[app.index()] && self.app_workspaces[app.index()] == workspace)
+            .unwrap_or(AppKind::Terminal);
+        self.app_open[next.index()] = true;
+        self.app_workspaces[next.index()] = workspace;
+        self.active = next;
+        self.sync_visibility();
+        self.arrange_windows();
+        let _ = self.server.focus(self.active_surface());
+    }
+
+    fn close_active(&mut self) {
+        self.app_open[self.active.index()] = false;
+        self.fullscreen = false;
+        let replacement = AppKind::ALL.iter().copied().find(|app| {
+            self.app_open[app.index()] && self.app_workspaces[app.index()] == self.workspace
+        });
+        let next = replacement.unwrap_or(AppKind::Terminal);
+        if replacement.is_none() {
+            self.app_open[next.index()] = true;
+            self.app_workspaces[next.index()] = self.workspace;
+        }
+        self.active = next;
+        self.sync_visibility();
+        self.arrange_windows();
+        let _ = self.server.focus(self.active_surface());
+    }
+
+    fn toggle_fullscreen(&mut self) {
+        self.fullscreen = !self.fullscreen;
+        self.sync_visibility();
+        self.arrange_windows();
+        let _ = self.server.focus(self.active_surface());
+    }
+
+    fn toggle_floating(&mut self) {
+        self.fullscreen = false;
+        let index = self.active.index();
+        self.app_floating[index] = !self.app_floating[index];
+        if self.app_floating[index] && self.authorized(self.active, Operations::DISPLAY) {
+            let _ = self.server.set_geometry(
+                self.active.owner(),
+                self.active_surface(),
+                Rect::new(76, 78, 650, 452),
+            );
+            let _ = self
+                .server
+                .commit(self.active.owner(), self.active_surface());
+        }
+        self.sync_visibility();
+        self.arrange_windows();
+        let _ = self.server.focus(self.active_surface());
     }
 
     fn toggle_launcher(&mut self) {
@@ -246,6 +418,9 @@ impl DesktopState {
     }
 
     fn move_active(&mut self, dx: i16, dy: i16) {
+        if !self.app_floating[self.active.index()] {
+            self.toggle_floating();
+        }
         let id = self.active_surface();
         let owner = self.active.owner();
         let Some(rect) = self.server.surface(id).map(|surface| surface.current.rect) else {
@@ -257,6 +432,75 @@ impl DesktopState {
         let y = (rect.y as i32 + dy as i32).clamp(48, max_y) as i16;
         let _ = self.server.set_position(owner, id, x, y);
         let _ = self.server.commit(owner, id);
+    }
+
+    fn arrange_windows(&mut self) {
+        if self.fullscreen {
+            self.set_app_geometry(self.active, Rect::new(14, 48, 772, 510));
+            return;
+        }
+
+        let tiled_count = AppKind::ALL
+            .iter()
+            .filter(|app| {
+                self.app_open[app.index()]
+                    && self.app_workspaces[app.index()] == self.workspace
+                    && !self.app_floating[app.index()]
+            })
+            .count();
+        let master = if !self.app_floating[self.active.index()] {
+            Some(self.active)
+        } else {
+            AppKind::ALL.iter().copied().find(|app| {
+                self.app_open[app.index()]
+                    && self.app_workspaces[app.index()] == self.workspace
+                    && !self.app_floating[app.index()]
+            })
+        };
+
+        if let Some(master) = master {
+            let rect = if tiled_count == 1 {
+                Rect::new(18, 56, 764, 500)
+            } else {
+                Rect::new(18, 56, 500, 500)
+            };
+            self.set_app_geometry(master, rect);
+        }
+        if tiled_count > 1 {
+            let stack_count = tiled_count - 1;
+            let stack_height = (500 - (stack_count.saturating_sub(1) * 8)) / stack_count;
+            let mut stack_index = 0;
+            for app in AppKind::ALL {
+                if Some(app) == master
+                    || !self.app_open[app.index()]
+                    || self.app_workspaces[app.index()] != self.workspace
+                    || self.app_floating[app.index()]
+                {
+                    continue;
+                }
+                let y = 56 + stack_index as i16 * (stack_height as i16 + 8);
+                self.set_app_geometry(app, Rect::new(526, y, 256, stack_height as u16));
+                stack_index += 1;
+            }
+        }
+    }
+
+    fn set_app_geometry(&mut self, app: AppKind, rect: Rect) {
+        if !self.authorized(app, Operations::DISPLAY) {
+            return;
+        }
+        let id = self.app_surfaces[app.index()];
+        let _ = self.server.set_geometry(app.owner(), id, rect);
+        let _ = self.server.commit(app.owner(), id);
+    }
+
+    fn current_window_count(&self) -> usize {
+        AppKind::ALL
+            .iter()
+            .filter(|app| {
+                self.app_open[app.index()] && self.app_workspaces[app.index()] == self.workspace
+            })
+            .count()
     }
 
     fn navigate(&mut self, url: &str, source: &str) {
@@ -289,6 +533,10 @@ impl DesktopState {
                     TerminalAction::Message(message) => self.set_terminal_message(message),
                     TerminalAction::Clear => self.terminal_message_len = 0,
                     TerminalAction::Switch(app) => self.switch_to(app),
+                    TerminalAction::Workspace(workspace) => self.switch_workspace(workspace),
+                    TerminalAction::Float => self.toggle_floating(),
+                    TerminalAction::Fullscreen => self.toggle_fullscreen(),
+                    TerminalAction::Overview => self.overview_open = true,
                     TerminalAction::Exit => self.should_exit = true,
                 }
             }
@@ -310,6 +558,10 @@ enum TerminalAction {
     Message(&'static str),
     Clear,
     Switch(AppKind),
+    Workspace(u8),
+    Float,
+    Fullscreen,
+    Overview,
     Exit,
 }
 
@@ -329,7 +581,7 @@ pub fn run(input: &mut Input, start_browser: bool) {
             core::hint::spin_loop();
             continue;
         };
-        let _ = desktop.server.route_key(key);
+        desktop.route_key(key);
 
         if key == 0x1B {
             if desktop.launcher_open {
@@ -338,9 +590,14 @@ pub fn run(input: &mut Input, start_browser: bool) {
                 render(&desktop);
                 continue;
             }
+            if desktop.overview_open {
+                desktop.overview_open = false;
+                render(&desktop);
+                continue;
+            }
             break;
         }
-        if key == b'\x60' || key == b'~' {
+        if key == b'\x60' || key == b'~' || key == KEY_SUPER_LAUNCHER {
             desktop.toggle_launcher();
             render(&desktop);
             continue;
@@ -353,6 +610,32 @@ pub fn run(input: &mut Input, start_browser: bool) {
             continue;
         }
         match key {
+            KEY_SUPER_TERMINAL => desktop.switch_to(AppKind::Terminal),
+            KEY_SUPER_BROWSER => desktop.switch_to(AppKind::Browser),
+            KEY_SUPER_CLOSE => desktop.close_active(),
+            KEY_SUPER_CYCLE | KEY_SUPER_LEFT | KEY_SUPER_RIGHT => desktop.cycle_app(),
+            KEY_SUPER_UP => {
+                let workspace = if desktop.workspace == 1 {
+                    3
+                } else {
+                    desktop.workspace - 1
+                };
+                desktop.switch_workspace(workspace);
+            }
+            KEY_SUPER_DOWN => {
+                let workspace = if desktop.workspace == 3 {
+                    1
+                } else {
+                    desktop.workspace + 1
+                };
+                desktop.switch_workspace(workspace);
+            }
+            KEY_SUPER_FULLSCREEN => desktop.toggle_fullscreen(),
+            KEY_SUPER_FLOAT => desktop.toggle_floating(),
+            KEY_SUPER_OVERVIEW => desktop.overview_open = !desktop.overview_open,
+            KEY_SUPER_WORKSPACE_1 => desktop.switch_workspace(1),
+            KEY_SUPER_WORKSPACE_2 => desktop.switch_workspace(2),
+            KEY_SUPER_WORKSPACE_3 => desktop.switch_workspace(3),
             b'\t' => desktop.cycle_app(),
             KEY_LEFT => desktop.move_active(-12, 0),
             KEY_RIGHT => desktop.move_active(12, 0),
@@ -412,7 +695,7 @@ fn terminal_action(command: &[u8]) -> TerminalAction {
     let trimmed = trim_ascii(command);
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case(b"help") {
         TerminalAction::Message(
-            "COMMANDS: STATUS FORMS PACKAGES BROWSER SETTINGS SYSTEM CLEAR EXIT",
+            "COMMANDS: STATUS FORMS PACKAGES BROWSER SETTINGS SYSTEM WS1 WS2 WS3 FLOAT FULL OVERVIEW CLEAR EXIT",
         )
     } else if trimmed.eq_ignore_ascii_case(b"status") {
         TerminalAction::Message("EXPOS ONLINE. HEXADISPLAY V1. NETWORK RESTRICTED.")
@@ -426,6 +709,18 @@ fn terminal_action(command: &[u8]) -> TerminalAction {
         TerminalAction::Switch(AppKind::Settings)
     } else if trimmed.eq_ignore_ascii_case(b"system") {
         TerminalAction::Switch(AppKind::System)
+    } else if trimmed.eq_ignore_ascii_case(b"ws1") {
+        TerminalAction::Workspace(1)
+    } else if trimmed.eq_ignore_ascii_case(b"ws2") {
+        TerminalAction::Workspace(2)
+    } else if trimmed.eq_ignore_ascii_case(b"ws3") {
+        TerminalAction::Workspace(3)
+    } else if trimmed.eq_ignore_ascii_case(b"float") {
+        TerminalAction::Float
+    } else if trimmed.eq_ignore_ascii_case(b"full") || trimmed.eq_ignore_ascii_case(b"fullscreen") {
+        TerminalAction::Fullscreen
+    } else if trimmed.eq_ignore_ascii_case(b"overview") {
+        TerminalAction::Overview
     } else if trimmed.eq_ignore_ascii_case(b"clear") {
         TerminalAction::Clear
     } else if trimmed.eq_ignore_ascii_case(b"exit") || trimmed.eq_ignore_ascii_case(b"shell") {
@@ -468,23 +763,45 @@ fn render(desktop: &DesktopState) {
     }
     draw_panel(desktop);
 
-    let rect = desktop
-        .server
-        .surface(desktop.active_surface())
-        .map(|surface| surface.current.rect)
-        .unwrap_or(Rect::new(48, 58, APP_WIDTH, APP_HEIGHT));
-    draw_window(rect, desktop.active.title());
-    match desktop.active {
-        AppKind::Browser => draw_browser(rect, &desktop.document),
-        AppKind::Terminal => draw_terminal(rect, desktop),
-        AppKind::Forms => draw_forms(rect),
-        AppKind::Packages => draw_packages(rect),
-        AppKind::Settings => draw_settings(rect),
-        AppKind::System => draw_system(rect, desktop),
+    if desktop.overview_open {
+        draw_overview(desktop);
+    } else {
+        for app in AppKind::ALL {
+            if app != desktop.active && desktop.app_is_visible(app) {
+                draw_app(desktop, app, false);
+            }
+        }
+        if desktop.app_is_visible(desktop.active) {
+            draw_app(desktop, desktop.active, true);
+        }
     }
     draw_dock(desktop);
     if desktop.launcher_open {
         draw_launcher(desktop);
+    }
+}
+
+fn draw_app(desktop: &DesktopState, app: AppKind, focused: bool) {
+    let rect = desktop
+        .server
+        .surface(desktop.app_surfaces[app.index()])
+        .map(|surface| surface.current.rect)
+        .unwrap_or(Rect::new(48, 58, APP_WIDTH, APP_HEIGHT));
+    draw_window(rect, app.title(), focused, desktop.app_handles[app.index()]);
+    let responsive_full = matches!(app, AppKind::Browser | AppKind::Terminal)
+        && rect.width >= 480
+        && rect.height >= 430;
+    if responsive_full || (rect.width >= 620 && rect.height >= 430) {
+        match app {
+            AppKind::Browser => draw_browser(rect, &desktop.document),
+            AppKind::Terminal => draw_terminal(rect, desktop),
+            AppKind::Forms => draw_forms(rect),
+            AppKind::Packages => draw_packages(rect),
+            AppKind::Settings => draw_settings(rect),
+            AppKind::System => draw_system(rect, desktop),
+        }
+    } else {
+        draw_compact_app(rect, app, desktop, focused);
     }
 }
 
@@ -494,26 +811,135 @@ fn draw_panel(desktop: &DesktopState) {
     framebuffer::rect(16, 10, 22, 22, color::PURPLE);
     framebuffer::text(22, 17, "H", color::WHITE, 1);
     framebuffer::text(50, 12, "EXPOS", color::WHITE, 2);
-    framebuffer::text(120, 14, desktop.active.title(), color::CYAN, 1);
-    framebuffer::text(602, 14, "FORM NATIVE", color::MUTED, 1);
+    framebuffer::text(120, 14, "HYPRFORM", color::CYAN, 1);
+    for workspace in 1..=3 {
+        let x = 230 + (workspace - 1) * 42;
+        framebuffer::rect(
+            x,
+            9,
+            32,
+            24,
+            if desktop.workspace == workspace as u8 {
+                color::PURPLE
+            } else {
+                0x0028_2E42
+            },
+        );
+        draw_number(x + 13, 17, workspace as u64, color::WHITE);
+    }
+    framebuffer::text(
+        382,
+        14,
+        if desktop.fullscreen {
+            "FULLSCREEN"
+        } else if desktop.app_floating[desktop.active.index()] {
+            "FLOATING"
+        } else {
+            "MASTER TILE"
+        },
+        color::MUTED,
+        1,
+    );
+    framebuffer::text(510, 14, "WIN", color::MUTED, 1);
+    draw_number(538, 14, desktop.current_window_count() as u64, color::CYAN);
+    framebuffer::text(586, 14, "CAPABILITY COMPOSITOR", color::MUTED, 1);
     framebuffer::rect(730, 14, 8, 8, color::GREEN);
     framebuffer::text(746, 14, "ONLINE", color::WHITE, 1);
 }
 
-fn draw_window(rect: Rect, title: &str) {
+fn draw_window(rect: Rect, title: &str, focused: bool, handle_id: u32) {
     let x = rect.x as i32;
     let y = rect.y as i32;
     let width = rect.width as i32;
     let height = rect.height as i32;
     framebuffer::rect(x - 7, y + 7, width + 14, height + 7, 0x0005_0710);
     framebuffer::rect(x, y, width, height, color::WINDOW);
-    framebuffer::outline(x, y, width, height, color::PURPLE);
+    framebuffer::outline(
+        x,
+        y,
+        width,
+        height,
+        if focused {
+            color::PURPLE
+        } else {
+            color::BORDER
+        },
+    );
+    if focused {
+        framebuffer::outline(x - 2, y - 2, width + 4, height + 4, 0x006D_49C9);
+    }
     framebuffer::rect(x, y, width, 38, color::PANEL);
     framebuffer::rect(x + 15, y + 14, 10, 10, color::RED);
     framebuffer::rect(x + 33, y + 14, 10, 10, 0x00F4_B942);
     framebuffer::rect(x + 51, y + 14, 10, 10, color::GREEN);
-    framebuffer::text(x + 78, y + 13, title, color::WHITE, 1);
-    framebuffer::text(x + width - 147, y + 13, "FORM WINDOW", color::MUTED, 1);
+    framebuffer::text(x + 72, y + 13, title, color::WHITE, 1);
+    if width >= 390 {
+        framebuffer::text(x + width - 104, y + 13, "CAP", color::MUTED, 1);
+        draw_number(x + width - 78, y + 13, handle_id as u64, color::GREEN);
+    }
+}
+
+fn draw_compact_app(rect: Rect, app: AppKind, desktop: &DesktopState, focused: bool) {
+    let x = rect.x as i32;
+    let y = rect.y as i32;
+    let width = rect.width as i32;
+    let height = rect.height as i32;
+    let dark = app == AppKind::Terminal;
+    framebuffer::rect(
+        x + 12,
+        y + 48,
+        width - 24,
+        height - 63,
+        if dark { 0x0008_0B12 } else { 0x00EA_EDF4 },
+    );
+    framebuffer::rect(x + 25, y + 66, 6, 54, app.accent());
+    framebuffer::text(
+        x + 44,
+        y + 68,
+        app.title(),
+        app.accent(),
+        if width >= 380 { 2 } else { 1 },
+    );
+    if width >= 330 {
+        framebuffer::text(
+            x + 44,
+            y + 98,
+            app.summary(),
+            if dark { color::MUTED } else { color::INK },
+            1,
+        );
+    }
+    framebuffer::text(
+        x + 28,
+        y + 145,
+        if focused { "FOCUSED" } else { "VISIBLE" },
+        if focused { color::GREEN } else { color::MUTED },
+        1,
+    );
+    framebuffer::text(x + 28, y + 168, "WORKSPACE", color::MUTED, 1);
+    draw_number(
+        x + 112,
+        y + 168,
+        desktop.app_workspaces[app.index()] as u64,
+        color::WHITE,
+    );
+    framebuffer::text(x + 28, y + 191, "HANDLE", color::MUTED, 1);
+    draw_number(
+        x + 91,
+        y + 191,
+        desktop.app_handles[app.index()] as u64,
+        color::CYAN,
+    );
+    if height >= 330 {
+        framebuffer::text(
+            x + 28,
+            y + height - 84,
+            "SUPER+F FULLSCREEN",
+            color::MUTED,
+            1,
+        );
+        framebuffer::text(x + 28, y + height - 62, "SUPER+V FLOAT", color::MUTED, 1);
+    }
 }
 
 fn draw_browser(rect: Rect, document: &Document) {
@@ -812,14 +1238,17 @@ fn app_footer(rect: Rect, text: &str) {
 fn draw_dock(desktop: &DesktopState) {
     framebuffer::rect(0, 568, 800, 32, color::PANEL);
     framebuffer::rect(0, 568, 800, 1, 0x0030_374C);
-    framebuffer::text(18, 580, "\x60 APPS", color::WHITE, 1);
-    let mut x = 105;
+    framebuffer::text(18, 580, "SUPER+SPACE", color::WHITE, 1);
+    let mut x = 130;
     for app in AppKind::ALL {
         if app == desktop.active {
-            framebuffer::rect(x - 7, 575, 82, 19, color::PURPLE);
+            framebuffer::rect(x - 7, 574, 91, 20, color::PURPLE);
+        }
+        if desktop.app_open[app.index()] {
+            framebuffer::rect(x - 2, 576, 4, 4, app.accent());
         }
         framebuffer::text(
-            x,
+            x + 7,
             581,
             app.shortcut(),
             if app == desktop.active {
@@ -830,7 +1259,7 @@ fn draw_dock(desktop: &DesktopState) {
             1,
         );
         framebuffer::text(
-            x + 12,
+            x + 19,
             581,
             app.title(),
             if app == desktop.active {
@@ -840,7 +1269,79 @@ fn draw_dock(desktop: &DesktopState) {
             },
             1,
         );
+        draw_number(
+            x + 74,
+            581,
+            desktop.app_workspaces[app.index()] as u64,
+            color::MUTED,
+        );
         x += 108;
+    }
+}
+
+fn draw_overview(desktop: &DesktopState) {
+    framebuffer::rect(28, 58, 744, 488, 0x0012_1728);
+    framebuffer::outline(28, 58, 744, 488, color::PURPLE);
+    framebuffer::text(50, 80, "FORM OVERVIEW", color::WHITE, 2);
+    framebuffer::text(
+        50,
+        108,
+        "SUPER+O CLOSE  SUPER+1..3 WORKSPACE  SUPER+Q CLOSE WINDOW",
+        color::MUTED,
+        1,
+    );
+    for (index, app) in AppKind::ALL.iter().copied().enumerate() {
+        let column = index % 3;
+        let row = index / 3;
+        let x = 50 + column as i32 * 238;
+        let y = 140 + row as i32 * 176;
+        framebuffer::rect(
+            x,
+            y,
+            216,
+            150,
+            if app == desktop.active {
+                0x0035_285E
+            } else {
+                0x0022_293B
+            },
+        );
+        framebuffer::outline(
+            x,
+            y,
+            216,
+            150,
+            if app == desktop.active {
+                color::PURPLE
+            } else {
+                color::BORDER
+            },
+        );
+        framebuffer::rect(x + 14, y + 15, 8, 38, app.accent());
+        framebuffer::text(x + 34, y + 17, app.title(), color::WHITE, 1);
+        framebuffer::text(x + 34, y + 40, app.summary(), color::MUTED, 1);
+        framebuffer::text(x + 14, y + 82, "WORKSPACE", color::MUTED, 1);
+        draw_number(
+            x + 98,
+            y + 82,
+            desktop.app_workspaces[app.index()] as u64,
+            color::CYAN,
+        );
+        framebuffer::text(
+            x + 14,
+            y + 108,
+            if desktop.app_open[app.index()] {
+                "OPEN + CAP GRANTED"
+            } else {
+                "CLOSED"
+            },
+            if desktop.app_open[app.index()] {
+                color::GREEN
+            } else {
+                color::RED
+            },
+            1,
+        );
     }
 }
 

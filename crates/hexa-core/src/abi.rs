@@ -50,13 +50,14 @@ impl AbiRequest {
             return Err(AbiStatus::Invalid);
         }
         let operation = match self.call {
-            AbiCall::Log | AbiCall::FormResolve | AbiCall::EventPoll => Operations::READ,
+            AbiCall::Log | AbiCall::FormResolve => Operations::READ,
+            AbiCall::EventPoll => Operations::INPUT,
             AbiCall::HandleAuthorize => Operations::EXECUTE,
             AbiCall::SurfaceCreate
             | AbiCall::BufferAttach
             | AbiCall::SurfaceDamage
-            | AbiCall::SurfaceCommit
-            | AbiCall::BrowserNavigate => Operations::EXECUTE,
+            | AbiCall::SurfaceCommit => Operations::DISPLAY,
+            AbiCall::BrowserNavigate => Operations::EXECUTE,
             AbiCall::PackageTransaction => Operations::PACKAGE,
         };
         if self.handle_id == 0 && !matches!(self.call, AbiCall::Log) {
@@ -79,7 +80,7 @@ mod tests {
             handle_id: 3,
             arguments: [0; 6],
         };
-        assert_eq!(request.validate(), Ok(Operations::EXECUTE));
+        assert_eq!(request.validate(), Ok(Operations::DISPLAY));
         assert_eq!(
             AbiRequest {
                 version: 2,

@@ -7,11 +7,27 @@ pub const KEY_UP: u8 = 0x80;
 pub const KEY_DOWN: u8 = 0x81;
 pub const KEY_LEFT: u8 = 0x82;
 pub const KEY_RIGHT: u8 = 0x83;
+pub const KEY_SUPER_LAUNCHER: u8 = 0x90;
+pub const KEY_SUPER_TERMINAL: u8 = 0x91;
+pub const KEY_SUPER_BROWSER: u8 = 0x92;
+pub const KEY_SUPER_CLOSE: u8 = 0x93;
+pub const KEY_SUPER_CYCLE: u8 = 0x94;
+pub const KEY_SUPER_FULLSCREEN: u8 = 0x95;
+pub const KEY_SUPER_FLOAT: u8 = 0x96;
+pub const KEY_SUPER_OVERVIEW: u8 = 0x97;
+pub const KEY_SUPER_WORKSPACE_1: u8 = 0x98;
+pub const KEY_SUPER_WORKSPACE_2: u8 = 0x99;
+pub const KEY_SUPER_WORKSPACE_3: u8 = 0x9A;
+pub const KEY_SUPER_LEFT: u8 = 0x9B;
+pub const KEY_SUPER_RIGHT: u8 = 0x9C;
+pub const KEY_SUPER_UP: u8 = 0x9D;
+pub const KEY_SUPER_DOWN: u8 = 0x9E;
 
 pub struct Input {
     shift: bool,
     caps_lock: bool,
     extended: bool,
+    super_key: bool,
 }
 
 impl Input {
@@ -20,6 +36,7 @@ impl Input {
             shift: false,
             caps_lock: false,
             extended: false,
+            super_key: false,
         }
     }
 
@@ -44,10 +61,30 @@ impl Input {
         if self.extended {
             self.extended = false;
             return match scancode {
-                0x48 => Some(KEY_UP),
-                0x50 => Some(KEY_DOWN),
-                0x4B => Some(KEY_LEFT),
-                0x4D => Some(KEY_RIGHT),
+                0x5B => {
+                    self.super_key = true;
+                    None
+                }
+                0xDB => {
+                    self.super_key = false;
+                    None
+                }
+                0x48 => Some(if self.super_key { KEY_SUPER_UP } else { KEY_UP }),
+                0x50 => Some(if self.super_key {
+                    KEY_SUPER_DOWN
+                } else {
+                    KEY_DOWN
+                }),
+                0x4B => Some(if self.super_key {
+                    KEY_SUPER_LEFT
+                } else {
+                    KEY_LEFT
+                }),
+                0x4D => Some(if self.super_key {
+                    KEY_SUPER_RIGHT
+                } else {
+                    KEY_RIGHT
+                }),
                 _ => None,
             };
         }
@@ -123,7 +160,29 @@ impl Input {
             0x39 => b' ',
             _ => return None,
         };
-        Some(apply_modifiers(base, self.shift, self.caps_lock))
+        let key = apply_modifiers(base, self.shift, self.caps_lock);
+        if self.super_key {
+            super_binding(key)
+        } else {
+            Some(key)
+        }
+    }
+}
+
+fn super_binding(key: u8) -> Option<u8> {
+    match key.to_ascii_lowercase() {
+        b' ' => Some(KEY_SUPER_LAUNCHER),
+        b'\n' => Some(KEY_SUPER_TERMINAL),
+        b'b' => Some(KEY_SUPER_BROWSER),
+        b'q' => Some(KEY_SUPER_CLOSE),
+        b'\t' => Some(KEY_SUPER_CYCLE),
+        b'f' => Some(KEY_SUPER_FULLSCREEN),
+        b'v' => Some(KEY_SUPER_FLOAT),
+        b'o' => Some(KEY_SUPER_OVERVIEW),
+        b'1' => Some(KEY_SUPER_WORKSPACE_1),
+        b'2' => Some(KEY_SUPER_WORKSPACE_2),
+        b'3' => Some(KEY_SUPER_WORKSPACE_3),
+        _ => None,
     }
 }
 

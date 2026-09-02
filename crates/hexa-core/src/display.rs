@@ -206,6 +206,28 @@ impl DisplayServer {
         Ok(())
     }
 
+    pub fn set_geometry(
+        &mut self,
+        owner: Fin,
+        surface_id: u32,
+        rect: Rect,
+    ) -> Result<(), DisplayError> {
+        if rect.width == 0 || rect.height == 0 {
+            return Err(DisplayError::Invalid);
+        }
+        let surface = self.owned_mut(owner, surface_id)?;
+        if surface
+            .pending
+            .buffer
+            .is_some_and(|buffer| buffer.width < rect.width || buffer.height < rect.height)
+        {
+            return Err(DisplayError::BufferSizeMismatch);
+        }
+        surface.pending.rect = rect;
+        surface.pending.damage = Some(Rect::new(0, 0, rect.width, rect.height));
+        Ok(())
+    }
+
     pub fn set_visible(
         &mut self,
         owner: Fin,
@@ -424,5 +446,42 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| event.kind == DisplayEventKind::Key && event.value == b'x' as u64));
+    }
+
+    #[test]
+    fn geometry_is_atomic_and_cannot_outgrow_its_buffer() {
+        let owner = Fin::from_u128(8);
+        let mut display = DisplayServer::new();
+        let surface = display
+            .create_surface(
+                owner,
+                "Terminal",
+                SurfaceRole::Window,
+                Rect::new(0, 0, 640, 480),
+            )
+            .unwrap();
+        display
+            .attach(
+                owner,
+                surface,
+                BufferHandle {
+                    id: 1,
+                    owner,
+                    width: 704,
+                    height: 500,
+                    format: BufferFormat::Xrgb8888,
+                },
+            )
+            .unwrap();
+        display
+            .set_geometry(owner, surface, Rect::new(20, 30, 500, 400))
+            .unwrap();
+        assert_eq!(display.surface(surface).unwrap().current.rect.width, 640);
+        display.commit(owner, surface).unwrap();
+        assert_eq!(display.surface(surface).unwrap().current.rect.width, 500);
+        assert_eq!(
+            display.set_geometry(owner, surface, Rect::new(0, 0, 705, 400)),
+            Err(DisplayError::BufferSizeMismatch)
+        );
     }
 }
