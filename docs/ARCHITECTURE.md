@@ -55,6 +55,19 @@ firmware / GRUB (temporary)
 - The Go ayo catalog maps verified registry metadata into Package Forms. A
   dependency plan is validated and committed as one state transaction rather
   than downloading archives into paths.
+- HexaDisplay uses a Wayland-like ownership model without copying Wayland's
+  Unix socket/file-descriptor ABI: clients own surfaces and Buffer Handles,
+  mutate pending state, report damage, and publish atomically with `commit`.
+  Focus, configure, frame-complete and key events are routed back to the owning
+  FIN. The alpha renderer targets the mapped Bochs/QEMU XRGB framebuffer.
+- The Browser is an Interface Form above HexaDisplay. Its current document
+  engine intentionally accepts local `hexa://` and `data:text/html` resources;
+  external HTTPS, CSS and JavaScript are not claimed while the v8 network and
+  isolation layers remain unbound.
+- Go ABI v1 gives Go clients stable call numbers and request/response layouts
+  for Forms, Handles, display surfaces, events, browser navigation and package
+  transactions. The Go SDK and emulator are runnable today; native Go binary
+  loading still depends on the execution-context loader and scheduler.
 - PIMP accepts only known keys and typed values. DIESE never silently resolves
   an equal-precedence conflict.
 - HexaFS transaction commit validates all staged records and capacity before

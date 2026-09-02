@@ -16,6 +16,11 @@ projects without making either legacy architecture the new system model:
 - `ayo/` is an entirely Go implementation of the native Package Form manager,
   including an interactive catalog TUI, HTTPS registries, dependency plans,
   constraints, reconciliation, checkpoints and crash recovery.
+- `HexaDisplay` is a native 800x600 graphical server with Form-owned surfaces,
+  buffers, damage, atomic commits, focus, z-order, hit testing and input events.
+- `Browser` is a native graphical Interface Form with a bounded local HTML
+  parser, document renderer, links and policy-explained network restrictions.
+- `sdk/go/` defines and tests the capability-gated HexaOS Go ABI v1.
 
 The current image boots a real 64-bit kernel into an interactive command
 environment. It accepts input from both the QEMU window keyboard and COM1 in
@@ -61,10 +66,11 @@ help clear echo about status whoami
 forms packages dimensions inspect journal policy handles relationships
 mkform retire activate reclaim resolve grant revoke handlecheck pimp
 relate unrelate
+desktop browser displayinfo goabi
 ayo reboot shutdown
 ```
 
-The alpha.5 shell also ports the practical HexaOS 7.2 command layer: Form
+The alpha.6 shell also ports the practical HexaOS 7.2 command layer: Form
 content (`write`, `append`, `cat`, `head`, `copy`, `move`, `delete/recover`,
 `hexdump`, hashes), hardware inspection, calculator/string/math tools,
 Dimensions, history, system diagnostics, and the original fun utilities.
@@ -72,6 +78,11 @@ Dimensions, history, system diagnostics, and the original fun utilities.
 Forms, Handles, Dimensions, and PIMP changes made in the v8 shell are currently
 in-memory and reset at reboot. Persistent HexaFS block integration is the next
 native storage phase.
+
+Type `browser` or `desktop` in the booted kernel to enter the graphical
+HexaDisplay session. Inside it, use `1`, `2`, and `3` to navigate local pages,
+`N` to see the network-policy diagnostic, `Tab` to change focus, and `Q` to
+return to the command environment.
 
 The complete 32-bit Diamond II environment remains runnable while its deeper
 drivers and games are ported:
@@ -95,6 +106,7 @@ make legacy-alpha-check
 | `boot/`, `kernel/` | transitional Multiboot2 loader and x86_64 kernel |
 | `crates/hexa-core/` | platform-independent trusted HexaOS semantics |
 | `ayo/` | Go Package Form manager and development HexaFS bridge |
+| `sdk/go/` | Go ABI v1 client SDK and deterministic kernel emulator |
 | `docs/PHILOSOPHY.txt` | source architecture specification |
 | `docs/ARCHITECTURE.md` | implemented design and trust boundaries |
 | `docs/MIGRATION.md` | alpha subsystem port map and sequence |

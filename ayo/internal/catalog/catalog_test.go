@@ -18,7 +18,7 @@ func TestBuiltinBrowserResolvesCompleteFormPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"CoreTools", "Network", "Terminal", "Browser"}
+	want := []string{"CoreTools", "Network", "Terminal", "HexaDisplay", "Browser"}
 	if len(plan) != len(want) {
 		t.Fatalf("unexpected plan: %#v", plan)
 	}

@@ -1,6 +1,6 @@
 [package]
 name = "hexa-kernel"
-version = "8.0.0-alpha.5"
+version = "8.0.0-alpha.6"
 edition = "2021"
 
 # Bare-metal static library: linked together with boot/boot.asm by ld.

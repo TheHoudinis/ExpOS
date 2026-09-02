@@ -47,9 +47,11 @@ func Builtin() Catalog {
 		{Name: "CoreTools", Version: "1.0.0", Summary: "Form-native diagnostics and repair tools", Capabilities: []string{"inspect", "repair"}, ProvidedForms: []string{"Diagnostics"}, Compatibility: []string{"hexaos>=8.0.0"}},
 		{Name: "Network", Version: "2.1.0", Summary: "Network service Form and socket capability", Capabilities: []string{"network", "socket"}, ProvidedForms: []string{"NetworkService"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
 		{Name: "Terminal", Version: "1.2.0", Summary: "Interactive command Interface Form", Capabilities: []string{"execute", "render"}, ProvidedForms: []string{"TerminalInterface"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
-		{Name: "Browser", Version: "1.0.0", Summary: "Web Interface Form for the Network service", Capabilities: []string{"network", "render"}, ProvidedForms: []string{"BrowserInterface"}, Dependencies: []string{"Network@>=2.0.0", "Terminal@>=1.0.0"}},
+		{Name: "Browser", Version: "1.0.0", Summary: "Web Interface Form for the Network service", Capabilities: []string{"network", "render"}, ProvidedForms: []string{"BrowserInterface"}, Dependencies: []string{"Network@>=2.0.0", "Terminal@>=1.0.0", "HexaDisplay@>=1.0.0"}},
 		{Name: "HexaEdit", Version: "0.8.0", Summary: "Revision-aware Data Form editor", Capabilities: []string{"read", "configure"}, ProvidedForms: []string{"EditorInterface"}, Dependencies: []string{"Terminal@>=1.0.0"}},
 		{Name: "SystemScope", Version: "1.0.0", Summary: "Live Forms, Handles, and relationship viewer", Capabilities: []string{"inspect", "relate"}, ProvidedForms: []string{"SystemScopeInterface"}, Dependencies: []string{"Terminal@>=1.0.0"}},
+		{Name: "HexaDisplay", Version: "1.0.0", Summary: "Native surface composition and input service", Capabilities: []string{"render", "relate"}, ProvidedForms: []string{"DisplayService"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
+		{Name: "GoSDK", Version: "1.0.0", Summary: "HexaOS Go ABI bindings and Form test emulator", Capabilities: []string{"execute", "relate"}, ProvidedForms: []string{"GoABIClient"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
 	}}
 	for index := range catalog.Packages {
 		catalog.Packages[index].Checksum = packageChecksum(catalog.Packages[index])

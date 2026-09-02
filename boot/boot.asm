@@ -43,10 +43,15 @@ pdpt_table:
         resb 4096
 pd_table:
         resb 4096
+pd_high_table:
+        resb 4096
 
 align 16
 stack_bottom:
-        resb 65536
+        ; The graphical Form session uses fixed-capacity, allocation-free
+        ; document and surface state. Give those values room without letting
+        ; the downward-growing stack collide with the page tables.
+        resb 524288
 stack_top:
 
 ; ---------------------------------------------------------------------------
@@ -114,6 +119,12 @@ _start:
         or  eax, 0b11
         mov [pdpt_table], eax
 
+        ; pdpt[3] -> high identity map for 0xC0000000..0xFFFFFFFF.
+        ; The Bochs/QEMU linear framebuffer lives at 0xFD000000.
+        mov eax, pd_high_table
+        or  eax, 0b11
+        mov [pdpt_table + 3*8], eax
+
         ; pd[i] = i * 2MiB | PRESENT | WRITE | HUGE  (512 entries = 1 GiB)
         xor ecx, ecx
 .fill_pd:
@@ -124,6 +135,18 @@ _start:
         inc ecx
         cmp ecx, 512
         jne .fill_pd
+
+        ; Map the fourth GiB with 2 MiB pages for PCI MMIO/framebuffer access.
+        xor ecx, ecx
+.fill_pd_high:
+        mov eax, ecx
+        shl eax, 21
+        add eax, 0xC0000000
+        or  eax, 0b10000011
+        mov [pd_high_table + ecx*8], eax
+        inc ecx
+        cmp ecx, 512
+        jne .fill_pd_high
 
         ; ---- enter long mode -------------------------------------------
         mov eax, pml4_table

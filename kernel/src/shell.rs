@@ -2,6 +2,7 @@ use crate::{input::Input, port, print, println, slog, vga};
 use hexa_core::{
     Authority, BootReport, CapabilityBroker, Dimension, Fin, Form, FormHandle, FormKind, Lifecycle,
     Operations, PimpScope, PimpSpec, Relationship, RelationshipGraph, RelationshipKind, Text,
+    GO_ABI_VERSION,
 };
 
 const MAX_LINE: usize = 128;
@@ -11,6 +12,7 @@ const MAX_CONTENT: usize = 512;
 const MAX_DIMENSIONS: usize = 6;
 const MAX_HISTORY: usize = 8;
 const AYO_FIN: Fin = Fin::from_u128(0x4159_4F00_0000_0000_0000_0000_0000_0001);
+const GO_ABI_FIN: Fin = Fin::from_u128(0x474F_4142_4900_0000_0000_0000_0000_0001);
 
 pub fn run(report: BootReport) -> ! {
     let mut shell = Shell::new(report);
@@ -32,7 +34,7 @@ pub fn run(report: BootReport) -> ! {
             b'\n' => {
                 println!();
                 if let Ok(command) = core::str::from_utf8(&line[..length]) {
-                    shell.execute(command.trim());
+                    shell.execute(command.trim(), &mut input);
                 }
                 length = 0;
                 prompt();
@@ -75,6 +77,17 @@ impl Shell {
         let mut forms = [None; MAX_FORMS];
         forms[0] = Some(Form::new(report.root_fin, "Root", FormKind::Root));
         forms[1] = Some(Form::new(AYO_FIN, "Ayo", FormKind::Package));
+        forms[2] = Some(Form::new(
+            crate::desktop::DISPLAY_FIN,
+            "HexaDisplay",
+            FormKind::Service,
+        ));
+        forms[3] = Some(Form::new(
+            crate::desktop::BROWSER_FIN,
+            "Browser",
+            FormKind::Interface,
+        ));
+        forms[4] = Some(Form::new(GO_ABI_FIN, "GoABI", FormKind::Interface));
         let mut broker = CapabilityBroker::new();
         let boot_handle = broker
             .issue_for(
@@ -107,10 +120,52 @@ impl Shell {
                 dimension: Some(report.stable_fin),
             })
             .expect("the built-in PIMP relationship must fit");
+        for relationship in [
+            Relationship {
+                source: report.root_fin,
+                target: crate::desktop::DISPLAY_FIN,
+                kind: RelationshipKind::Contains,
+                dimension: Some(report.stable_fin),
+            },
+            Relationship {
+                source: crate::desktop::BROWSER_FIN,
+                target: crate::desktop::DISPLAY_FIN,
+                kind: RelationshipKind::DependsOn,
+                dimension: Some(report.stable_fin),
+            },
+            Relationship {
+                source: crate::desktop::DISPLAY_FIN,
+                target: crate::desktop::BROWSER_FIN,
+                kind: RelationshipKind::Provides,
+                dimension: Some(report.stable_fin),
+            },
+            Relationship {
+                source: AYO_FIN,
+                target: GO_ABI_FIN,
+                kind: RelationshipKind::DependsOn,
+                dimension: Some(report.stable_fin),
+            },
+        ] {
+            relationships
+                .relate(relationship)
+                .expect("built-in graphical relationship must fit");
+        }
         let mut content = [FormContent::empty(); MAX_FORMS];
         let ayo_description = b"ayo v2 Package Form manager; commands: slap yeet glance chill fix ghost manifest highfive dodge vibecheck flex";
         content[1].bytes[..ayo_description.len()].copy_from_slice(ayo_description);
         content[1].length = ayo_description.len() as u16;
+        seed_content(
+            &mut content[2],
+            b"HexaDisplay v1: owned surfaces, attach, damage, atomic commit, focus, z-order, hit testing, XRGB8888",
+        );
+        seed_content(
+            &mut content[3],
+            b"Browser Interface Form: bounded local HTML parser and native framebuffer document renderer",
+        );
+        seed_content(
+            &mut content[4],
+            b"Go ABI v1: versioned capability-gated Form, surface, browser, event, and package calls",
+        );
         Self {
             report,
             forms,
@@ -129,7 +184,7 @@ impl Shell {
         }
     }
 
-    fn execute(&mut self, line: &str) {
+    fn execute(&mut self, line: &str, input: &mut Input) {
         if line.is_empty() {
             return;
         }
@@ -239,6 +294,34 @@ impl Shell {
             "mode" => {
                 println!("active: VGA text 80x25, mirrored COM1 serial");
                 println!("legacy VBE framebuffer modes: make run-alpha");
+                true
+            }
+            "displayinfo" => {
+                println!("HexaDisplay protocol v1: surfaces attach damage commit focus hit-test");
+                println!(
+                    "framebuffer: 800x600 XRGB8888 available={}",
+                    crate::framebuffer::available()
+                );
+                println!("Display FIN={}", crate::desktop::DISPLAY_FIN);
+                true
+            }
+            "desktop" => {
+                crate::desktop::run(input, false);
+                true
+            }
+            "browser" => {
+                crate::desktop::run(input, true);
+                true
+            }
+            "goabi" => {
+                println!("HexaOS Go ABI v{} FIN={}", GO_ABI_VERSION, GO_ABI_FIN);
+                println!(
+                    "calls: resolve authorize surface attach damage commit event navigate package"
+                );
+                println!("SDK: sdk/go/hexa (host emulator tested)");
+                println!(
+                    "native Go execution loader: not connected; scheduler/loader work remains"
+                );
                 true
             }
             "whoami" => {
@@ -405,6 +488,7 @@ impl Shell {
         println!("  revoke <id>  handlecheck <id> <requester> <operation>");
         println!("  pimp <name> <key=value>");
         println!("  relate/unrelate <source> <kind> <target>  relationships <source>");
+        println!("  desktop browser displayinfo goabi");
         println!("  ayo legacy games reboot shutdown");
         println!("  date clock cpuinfo lspci neofetch sysinfo mem free env uptime ps");
         println!("  kstat dmesg bootlog ifconfig netstat mode");
@@ -1206,6 +1290,12 @@ impl FormContent {
     }
 }
 
+fn seed_content(content: &mut FormContent, value: &[u8]) {
+    let length = value.len().min(MAX_CONTENT);
+    content.bytes[..length].copy_from_slice(&value[..length]);
+    content.length = length as u16;
+}
+
 fn split_first(args: &str) -> Option<(&str, &str)> {
     let split = args.find(char::is_whitespace).unwrap_or(args.len());
     if split == 0 || split == args.len() {
@@ -1241,6 +1331,10 @@ fn is_shell_command(name: &str) -> bool {
             | "dmesg"
             | "bootlog"
             | "mode"
+            | "displayinfo"
+            | "desktop"
+            | "browser"
+            | "goabi"
             | "policy"
             | "handles"
             | "mkform"

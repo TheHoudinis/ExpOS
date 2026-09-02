@@ -5,8 +5,11 @@
 //! This crate deliberately exposes Forms, FINs, Dimensions and capability
 //! handles instead of paths, file descriptors, users, or POSIX permissions.
 
+mod abi;
+mod browser;
 mod capability;
 mod diese;
+mod display;
 mod fin;
 mod form;
 mod hexafs;
@@ -14,8 +17,14 @@ mod pimp;
 mod relationship;
 mod text;
 
+pub use abi::{AbiCall, AbiRequest, AbiResponse, AbiStatus, GO_ABI_VERSION};
+pub use browser::{BrowserError, BrowserText, Document, DocumentNode, NodeKind};
 pub use capability::{Authority, CapabilityBroker, FormHandle, Operations};
 pub use diese::{Diagnostic, Diese, Resolution};
+pub use display::{
+    BufferFormat, BufferHandle, DisplayError, DisplayEvent, DisplayEventKind, DisplayServer, Rect,
+    Surface, SurfaceRole, SurfaceState,
+};
 pub use fin::Fin;
 pub use form::{Dimension, Form, FormKind, FormRegistry, Lifecycle, Visibility};
 pub use hexafs::{HexaFs, Transaction};

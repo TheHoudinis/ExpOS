@@ -5,9 +5,9 @@ KERNEL_ELF := $(BUILD)/kernel.elf
 RUST_LIB   := target/$(TARGET)/release/libhexa_kernel.a
 QEMU       := qemu-system-x86_64 -m 256M
 
-.PHONY: all iso test check run debug clean legacy-alpha-check run-alpha ayo kernel-build
+.PHONY: all iso test check display-check run debug clean legacy-alpha-check run-alpha ayo go-sdk kernel-build
 
-all: test check ayo
+all: test check display-check ayo go-sdk
 
 test:
 	cargo test -p hexa-core
@@ -37,12 +37,14 @@ check: $(ISO)
 	grep -q "HEXA_SHELL_READY" $(BUILD)/serial.log
 	grep -q "HEXA_COMMAND_OK help" $(BUILD)/serial.log
 	grep -q "Ayo.*package" $(BUILD)/serial.log
+	grep -q "HexaDisplay.*service" $(BUILD)/serial.log
+	grep -q "GoABI.*interface" $(BUILD)/serial.log
 	grep -q "Ayo --configured-by--> Root" $(BUILD)/serial.log
-	grep -q "Browser --depends-on--> Ayo" $(BUILD)/serial.log
+	grep -q "DemoBrowser --depends-on--> Ayo" $(BUILD)/serial.log
 	grep -q "DIESE exact resolution" $(BUILD)/serial.log
-	grep -q "Removed 'Browser' --depends-on--> 'Ayo'" $(BUILD)/serial.log
+	grep -q "Removed 'DemoBrowser' --depends-on--> 'Ayo'" $(BUILD)/serial.log
 	grep -q "Reclaimed 'Scratch'" $(BUILD)/serial.log
-	grep -q "Created and bound 'Browser'" $(BUILD)/serial.log
+	grep -q "Created and bound 'DemoBrowser'" $(BUILD)/serial.log
 	grep -q "Granted Handle" $(BUILD)/serial.log
 	grep -q "Handle #2 authorizes execute for requester 'Root'" $(BUILD)/serial.log
 	grep -q "^42" $(BUILD)/serial.log
@@ -53,6 +55,15 @@ check: $(ISO)
 	grep -q "Notes is now active" $(BUILD)/serial.log
 	@echo ">>> HEXAOS SMOKE TEST PASSED <<<"
 
+display-check: $(ISO)
+	rm -f $(BUILD)/display-serial.log
+	timeout 20 $(QEMU) -device isa-debug-exit,iobase=0xf4,iosize=0x04 -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-display-input.txt > $(BUILD)/display-serial.log 2>&1 || true
+	grep -q "framebuffer: 800x600 XRGB8888 available=true" $(BUILD)/display-serial.log
+	grep -q "HEXA_DISPLAY_READY surfaces=3 commit=3" $(BUILD)/display-serial.log
+	grep -q "HEXA_DISPLAY_CLOSED" $(BUILD)/display-serial.log
+	grep -q "HexaOS Go ABI v1" $(BUILD)/display-serial.log
+	@echo ">>> HEXAOS DISPLAY TEST PASSED <<<"
+
 run: $(ISO)
 	$(QEMU) -cdrom $(ISO) -serial stdio -no-reboot
 
@@ -61,6 +72,9 @@ debug: $(ISO)
 
 ayo:
 	$(MAKE) -C ayo test build
+
+go-sdk:
+	GOCACHE=/tmp/hexaos-go-sdk-cache go -C sdk/go test ./...
 
 legacy-alpha-check:
 	$(MAKE) -C legacy/alpha32 clean all

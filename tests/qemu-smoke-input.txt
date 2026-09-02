@@ -11,11 +11,11 @@ calc 7 * 6
 factor 84
 makedim Development
 dimensions
-mkform Browser interface
-relate Browser depends Ayo
-relationships Browser
-resolve Browser
-unrelate Browser depends Ayo
+mkform DemoBrowser interface
+relate DemoBrowser depends Ayo
+relationships DemoBrowser
+resolve DemoBrowser
+unrelate DemoBrowser depends Ayo
 mkform Scratch data
 retire Scratch
 reclaim Scratch
@@ -29,7 +29,7 @@ shasum NotesBackup
 delete Notes
 recover Notes
 forms
-grant Browser execute
+grant DemoBrowser execute
 handles
 handlecheck 2 Root execute
 pimp Browser network=restricted

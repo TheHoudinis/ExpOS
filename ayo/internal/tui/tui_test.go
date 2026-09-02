@@ -23,10 +23,10 @@ func TestTUIInstallsSelectionAndDependencies(t *testing.T) {
 	if err := app.Run(); err != nil {
 		t.Fatal(err)
 	}
-	if len(storage.state.Packages) != 4 || storage.state.Sequence != 1 {
+	if len(storage.state.Packages) != 5 || storage.state.Sequence != 1 {
 		t.Fatalf("TUI plan did not commit atomically: %#v", storage.state)
 	}
-	if !strings.Contains(output.String(), "Installed Browser with 4 Form(s)") {
+	if !strings.Contains(output.String(), "Installed Browser with 5 Form(s)") {
 		t.Fatalf("missing success feedback: %s", output.String())
 	}
 }

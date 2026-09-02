@@ -11,6 +11,13 @@ pub unsafe fn inb(port: u16) -> u8 {
 }
 
 #[inline]
+pub unsafe fn inw(port: u16) -> u16 {
+    let value: u16;
+    core::arch::asm!("in ax, dx", in("dx") port, out("ax") value, options(nomem, nostack, preserves_flags));
+    value
+}
+
+#[inline]
 pub fn halt() {
     unsafe {
         core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));

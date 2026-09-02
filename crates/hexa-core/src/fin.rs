@@ -2,6 +2,7 @@ use core::fmt;
 
 /// Stable 128-bit Form Identification Number.
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
 pub struct Fin([u8; 16]);
 
 impl Fin {

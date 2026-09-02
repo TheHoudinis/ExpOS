@@ -1,6 +1,6 @@
 # HexaOS feature coverage
 
-HexaOS v8.0.0-alpha.5 uses two runnable environments during migration. `make
+HexaOS v8.0.0-alpha.6 uses two runnable environments during migration. `make
 run` boots the new x86_64 Form-native kernel. `make run-alpha` boots the original
 32-bit Diamond II system with its existing storage image.
 
@@ -12,6 +12,9 @@ run` boots the new x86_64 Form-native kernel. `make run-alpha` boots the origina
 | Dimensions and policy | `dimensions`, `makedim`, `policy`, `pimp`, `journal` |
 | Capabilities | `grant`, `revoke`, `handles`, and `handlecheck` with requester-bound, scoped, expiring Form Handles |
 | Packages | `Ayo` boot Package Form, `packages`, and Go `ayo v2` with interactive TUI, offline/HTTPS catalogs, checksums/signatures, atomic dependency plans, all 11 commands, version constraints, dependency protection, reconciliation, capability merges, manifests and recovery |
+| Graphics | `HexaDisplay` Service Form; 800x600 XRGB8888 Bochs/QEMU framebuffer; owned buffers/surfaces; attach, damage, atomic commit, configure/frame/focus/key events, z-order and hit testing; `desktop`, `displayinfo` |
+| Browser | Native `Browser` Interface Form; bounded local HTML title/heading/paragraph/list/link parsing and graphical rendering; `hexa://` navigation with DIESE/PIMP explanation for blocked external networking |
+| Go | Shared ABI v1 call numbers and validation in Rust, tested `sdk/go/hexa` client and emulator, `GoABI` Interface Form and `goabi` diagnostics |
 | Hardware | `date/clock`, `cpuinfo`, `lspci`, `mem/free`, VGA and COM1 consoles, PS/2 and serial input |
 | System | `status`, `kstat`, `ps`, `dmesg/bootlog`, `ifconfig`, `netstat`, `mode`, `history`, `uptime`, `env`, `whoami`, `reboot`, `shutdown` |
 | Utilities | `calc`, `factor`, `len`, `hex`, `reverse/rev`, `tolower`, `toupper`, `rand`, `dice`, `ascii`, `palette`, `morse`, `sleep`, `true`, `false` |
@@ -42,5 +45,6 @@ Dimension interfaces exist for them.
 ## Not claimed complete
 
 UEFI-native boot, persistent v8 HexaFS block I/O, preemptive v8 Form execution,
-native v8 networking, and GUI Interface Forms remain active migration work.
+native v8 networking, the Go execution-context loader, and a standards-complete
+web engine remain active migration work.
 ASL remains intentionally unspecified.

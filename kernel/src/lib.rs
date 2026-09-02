@@ -7,6 +7,8 @@
 #![no_main]
 
 mod compat;
+mod desktop;
+mod framebuffer;
 mod hardware;
 mod input;
 mod port;

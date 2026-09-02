@@ -1,0 +1,6 @@
+
+displayinfo
+browser
+q
+goabi
+shutdown
