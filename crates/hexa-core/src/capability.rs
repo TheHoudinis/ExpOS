@@ -35,6 +35,7 @@ impl Operations {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FormHandle {
     pub id: u32,
+    pub requester: Fin,
     pub target: Fin,
     pub dimension: Fin,
     pub operations: Operations,
@@ -74,6 +75,25 @@ impl CapabilityBroker {
         operations: Operations,
         valid_until_tick: u64,
     ) -> Result<FormHandle, CapabilityError> {
+        self.issue_for(
+            Fin::ZERO,
+            authority,
+            target,
+            dimension,
+            operations,
+            valid_until_tick,
+        )
+    }
+
+    pub fn issue_for(
+        &mut self,
+        requester: Fin,
+        authority: Authority,
+        target: Fin,
+        dimension: Fin,
+        operations: Operations,
+        valid_until_tick: u64,
+    ) -> Result<FormHandle, CapabilityError> {
         let permitted = match authority {
             Authority::Operator => true,
             Authority::Power => {
@@ -92,6 +112,7 @@ impl CapabilityBroker {
             .ok_or(CapabilityError::Full)?;
         let handle = FormHandle {
             id: self.next_id,
+            requester,
             target,
             dimension,
             operations,
@@ -128,6 +149,28 @@ impl CapabilityBroker {
         }
         if !handle.operations.contains(operation) {
             return Err(CapabilityError::OperationDenied);
+        }
+        Ok(())
+    }
+
+    pub fn authorize_requester(
+        &self,
+        id: u32,
+        requester: Fin,
+        target: Fin,
+        dimension: Fin,
+        operation: Operations,
+        tick: u64,
+    ) -> Result<(), CapabilityError> {
+        self.authorize(id, target, dimension, operation, tick)?;
+        let handle = self
+            .handles
+            .iter()
+            .flatten()
+            .find(|handle| handle.id == id)
+            .ok_or(CapabilityError::NotFound)?;
+        if handle.requester != requester {
+            return Err(CapabilityError::Denied);
         }
         Ok(())
     }
@@ -172,6 +215,45 @@ mod tests {
         assert_eq!(
             broker.authorize(handle.id, target, dimension, Operations::READ, 9),
             Err(CapabilityError::Revoked)
+        );
+    }
+
+    #[test]
+    fn requester_identity_is_part_of_authorization() {
+        let requester = Fin::from_u128(10);
+        let target = Fin::from_u128(11);
+        let dimension = Fin::from_u128(12);
+        let mut broker = CapabilityBroker::new();
+        let handle = broker
+            .issue_for(
+                requester,
+                Authority::Operator,
+                target,
+                dimension,
+                Operations::PACKAGE,
+                20,
+            )
+            .unwrap();
+        assert!(broker
+            .authorize_requester(
+                handle.id,
+                requester,
+                target,
+                dimension,
+                Operations::PACKAGE,
+                1
+            )
+            .is_ok());
+        assert_eq!(
+            broker.authorize_requester(
+                handle.id,
+                Fin::from_u128(99),
+                target,
+                dimension,
+                Operations::PACKAGE,
+                1
+            ),
+            Err(CapabilityError::Denied)
         );
     }
 }

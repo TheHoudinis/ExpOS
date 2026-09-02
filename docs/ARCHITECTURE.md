@@ -47,8 +47,11 @@ firmware / GRUB (temporary)
   a Dimension binding.
 - Operator, Power and Guest are authority inputs to capability decisions; they
   are not Unix UID aliases.
-- Handles carry allowed operations, target FIN, Dimension, expiry and
-  revocation state. No file descriptor abstraction appears in the core.
+- Handles carry requester and target FINs, allowed operations, Dimension,
+  expiry and revocation state. No file descriptor abstraction appears in the
+  core.
+- Relationships are typed, FIN-to-FIN and optionally Dimension-scoped; package
+  dependencies use the same model instead of paths.
 - PIMP accepts only known keys and typed values. DIESE never silently resolves
   an equal-precedence conflict.
 - HexaFS transaction commit validates all staged records and capacity before
@@ -58,8 +61,10 @@ firmware / GRUB (temporary)
 
 The current GRUB/Multiboot2 path came from expodOS and is explicitly temporary;
 the philosophy calls for UEFI in Phase 1. The `ayo` JSON store is similarly a
-host-development bridge that makes transactions inspectable. It is not the
-native persistent format and will be replaced by kernel Form Handle calls.
+host-development bridge that makes transactions inspectable. It serializes
+updates with a lock, pending journal, atomic rename and recovery snapshot, but
+is not the native persistent format and will be replaced by kernel Form Handle
+calls.
 
 The 32-bit alpha is quarantined under `legacy/alpha32`. Its code may be ported,
 but its paths, owner/group modes, file descriptors, sudo-like ACL behavior and

@@ -20,6 +20,7 @@ pub enum Lifecycle {
     Active,
     Retired,
     Recoverable,
+    Removed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +84,7 @@ pub enum RegistryError {
     MissingForm,
     MissingDimension,
     AlreadyBound,
+    StillBound,
 }
 
 pub struct FormRegistry {
@@ -207,6 +209,25 @@ impl FormRegistry {
         }
         Ok(())
     }
+
+    pub fn reclaim(&mut self, form: Fin) -> Result<(), RegistryError> {
+        if self
+            .bindings
+            .iter()
+            .flatten()
+            .any(|binding| binding.form == form && binding.visibility == Visibility::Visible)
+        {
+            return Err(RegistryError::StillBound);
+        }
+        let record = self
+            .forms
+            .iter_mut()
+            .flatten()
+            .find(|record| record.fin == form)
+            .ok_or(RegistryError::MissingForm)?;
+        record.lifecycle = Lifecycle::Removed;
+        Ok(())
+    }
 }
 
 impl Default for FormRegistry {
@@ -260,5 +281,7 @@ mod tests {
         assert_eq!(registry.form(fin(1)).unwrap().lifecycle, Lifecycle::Active);
         registry.retire_from(fin(1), fin(3)).unwrap();
         assert_eq!(registry.form(fin(1)).unwrap().lifecycle, Lifecycle::Retired);
+        registry.reclaim(fin(1)).unwrap();
+        assert_eq!(registry.form(fin(1)).unwrap().lifecycle, Lifecycle::Removed);
     }
 }

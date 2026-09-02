@@ -1,6 +1,8 @@
 
 help
 status
+packages
+relationships Ayo
 date
 cpuinfo
 lspci
@@ -10,6 +12,8 @@ factor 84
 makedim Development
 dimensions
 mkform Browser interface
+relate Browser depends Ayo
+relationships Browser
 mkform Notes data
 write Notes HexaOS Forms can carry structured state
 append Notes  and revisions

@@ -11,8 +11,10 @@ projects without making either legacy architecture the new system model:
 - the new Rust `hexa-core` implements the Form-native semantics that the old
   alpha approximated: FIN identity, Dimension bindings, Dimension-aware
   retirement, typed PIMP policy, explainable DIESE resolution, scoped and
-  revocable Form Handles, and transactional HexaFS metadata.
-- `ayo/` is an entirely Go implementation of the native Package Form manager.
+  revocable requester-bound Form Handles, typed relationships, safe Form
+  reclamation, and transactional HexaFS metadata.
+- `ayo/` is an entirely Go implementation of the native Package Form manager,
+  including constraints, reconciliation, checkpoints and crash recovery.
 
 The current image boots a real 64-bit kernel into an interactive command
 environment. It accepts input from both the QEMU window keyboard and COM1 in
@@ -44,12 +46,12 @@ that launched QEMU. The current command environment supports:
 
 ```text
 help clear echo about status whoami
-forms dimensions inspect journal policy handles
-mkform retire activate grant revoke pimp
+forms packages dimensions inspect journal policy handles relationships
+mkform retire activate grant revoke pimp relate
 ayo reboot shutdown
 ```
 
-The alpha.3 shell also ports the practical HexaOS 7.2 command layer: Form
+The alpha.4 shell also ports the practical HexaOS 7.2 command layer: Form
 content (`write`, `append`, `cat`, `head`, `copy`, `move`, `delete/recover`,
 `hexdump`, hashes), hardware inspection, calculator/string/math tools,
 Dimensions, history, system diagnostics, and the original fun utilities.

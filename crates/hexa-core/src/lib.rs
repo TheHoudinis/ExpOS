@@ -11,6 +11,7 @@ mod fin;
 mod form;
 mod hexafs;
 mod pimp;
+mod relationship;
 mod text;
 
 pub use capability::{Authority, CapabilityBroker, FormHandle, Operations};
@@ -19,6 +20,7 @@ pub use fin::Fin;
 pub use form::{Dimension, Form, FormKind, FormRegistry, Lifecycle, Visibility};
 pub use hexafs::{HexaFs, Transaction};
 pub use pimp::{NetworkPolicy, PimpScope, PimpSpec, PimpValue, SpecKey};
+pub use relationship::{Relationship, RelationshipError, RelationshipGraph, RelationshipKind};
 pub use text::Text;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

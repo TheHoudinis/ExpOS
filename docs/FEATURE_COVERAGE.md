@@ -1,6 +1,6 @@
 # HexaOS feature coverage
 
-HexaOS v8.0.0-alpha.3 uses two runnable environments during migration. `make
+HexaOS v8.0.0-alpha.4 uses two runnable environments during migration. `make
 run` boots the new x86_64 Form-native kernel. `make run-alpha` boots the original
 32-bit Diamond II system with its existing storage image.
 
@@ -8,16 +8,18 @@ run` boots the new x86_64 Form-native kernel. `make run-alpha` boots the origina
 
 | Area | Commands / behavior |
 |---|---|
-| Forms | `mkform`, `forms/list`, `inspect/fin`, `view/cat`, `write`, `append`, `head`, `copy`, `move`, `delete`, `recover`, `retire`, `activate`, `hexdump`, `du`, `df`, `shasum`, `which` |
+| Forms | `mkform`, `forms/list`, `inspect/fin`, `view/cat`, `write`, `append`, `head`, `copy`, `move`, `delete`, `recover`, `retire`, `activate`, `hexdump`, `du`, `df`, `shasum`, `which`; typed `relate`/`relationships` |
 | Dimensions and policy | `dimensions`, `makedim`, `policy`, `pimp`, `journal` |
-| Capabilities | `grant`, `revoke`, `handles` with scoped, expiring Form Handles |
+| Capabilities | `grant`, `revoke`, `handles` with requester-bound, scoped, expiring Form Handles |
+| Packages | `Ayo` boot Package Form, `packages`, and Go `ayo v2` with all 11 commands, version constraints, dependency protection, reconciliation, capability merges, checksummed manifests and bridge recovery |
 | Hardware | `date/clock`, `cpuinfo`, `lspci`, `mem/free`, VGA and COM1 consoles, PS/2 and serial input |
 | System | `status`, `kstat`, `ps`, `dmesg/bootlog`, `ifconfig`, `netstat`, `mode`, `history`, `uptime`, `env`, `whoami`, `reboot`, `shutdown` |
 | Utilities | `calc`, `factor`, `len`, `hex`, `reverse/rev`, `tolower`, `toupper`, `rand`, `dice`, `ascii`, `palette`, `morse`, `sleep`, `true`, `false` |
 | Personality | `fortune`, `8ball`, `cowsay`, `banner`, `logo`, `matrix/cmatrix`, `russian`, `insult`, `excuse`, `compliment`, `hack` |
 
 Native Form contents currently use fixed 512-byte in-memory records. Delete is
-recovery-aware: it moves a Form to Recoverable instead of reclaiming identity.
+recovery-aware: it moves a Form to Recoverable; the core only permits final
+reclamation after Dimension bindings are removed.
 
 ## Runnable through Diamond II fallback
 
@@ -42,4 +44,3 @@ Dimension interfaces exist for them.
 UEFI-native boot, persistent v8 HexaFS block I/O, preemptive v8 Form execution,
 native v8 networking, and GUI Interface Forms remain active migration work.
 ASL remains intentionally unspecified.
-

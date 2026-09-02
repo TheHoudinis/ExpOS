@@ -1,7 +1,7 @@
 use crate::{input::Input, port, print, println, slog, vga};
 use hexa_core::{
     Authority, BootReport, CapabilityBroker, Dimension, Fin, Form, FormHandle, FormKind, Lifecycle,
-    Operations, PimpScope, PimpSpec, Text,
+    Operations, PimpScope, PimpSpec, Relationship, RelationshipGraph, RelationshipKind, Text,
 };
 
 const MAX_LINE: usize = 128;
@@ -10,6 +10,7 @@ const MAX_HANDLES: usize = 16;
 const MAX_CONTENT: usize = 512;
 const MAX_DIMENSIONS: usize = 6;
 const MAX_HISTORY: usize = 8;
+const AYO_FIN: Fin = Fin::from_u128(0x4159_4F00_0000_0000_0000_0000_0000_0001);
 
 pub fn run(report: BootReport) -> ! {
     let mut shell = Shell::new(report);
@@ -57,6 +58,7 @@ struct Shell {
     forms: [Option<Form>; MAX_FORMS],
     handles: [Option<FormHandle>; MAX_HANDLES],
     broker: CapabilityBroker,
+    relationships: RelationshipGraph,
     content: [FormContent; MAX_FORMS],
     dimensions: [Option<Dimension>; MAX_DIMENSIONS],
     history: [HistoryEntry; MAX_HISTORY],
@@ -72,9 +74,11 @@ impl Shell {
     fn new(report: BootReport) -> Self {
         let mut forms = [None; MAX_FORMS];
         forms[0] = Some(Form::new(report.root_fin, "Root", FormKind::Root));
+        forms[1] = Some(Form::new(AYO_FIN, "Ayo", FormKind::Package));
         let mut broker = CapabilityBroker::new();
         let boot_handle = broker
-            .issue(
+            .issue_for(
+                report.root_fin,
                 Authority::Operator,
                 report.root_fin,
                 report.stable_fin,
@@ -86,12 +90,34 @@ impl Shell {
         handles[0] = Some(boot_handle);
         let mut dimensions = [None; MAX_DIMENSIONS];
         dimensions[0] = Some(Dimension::new(report.stable_fin, "Stable", true));
+        let mut relationships = RelationshipGraph::new();
+        relationships
+            .relate(Relationship {
+                source: report.root_fin,
+                target: AYO_FIN,
+                kind: RelationshipKind::Contains,
+                dimension: Some(report.stable_fin),
+            })
+            .expect("the built-in ayo relationship must fit");
+        relationships
+            .relate(Relationship {
+                source: AYO_FIN,
+                target: report.root_fin,
+                kind: RelationshipKind::ConfiguredBy,
+                dimension: Some(report.stable_fin),
+            })
+            .expect("the built-in PIMP relationship must fit");
+        let mut content = [FormContent::empty(); MAX_FORMS];
+        let ayo_description = b"ayo v2 Package Form manager; commands: slap yeet glance chill fix ghost manifest highfive dodge vibecheck flex";
+        content[1].bytes[..ayo_description.len()].copy_from_slice(ayo_description);
+        content[1].length = ayo_description.len() as u16;
         Self {
             report,
             forms,
             handles,
             broker,
-            content: [FormContent::empty(); MAX_FORMS],
+            relationships,
+            content,
             dimensions,
             history: [HistoryEntry::empty(); MAX_HISTORY],
             history_next: 0,
@@ -138,6 +164,10 @@ impl Shell {
             }
             "forms" | "list" => {
                 self.list_forms();
+                true
+            }
+            "packages" => {
+                self.list_packages();
                 true
             }
             "dimensions" | "dims" => {
@@ -304,9 +334,19 @@ impl Shell {
                 self.pimp(words.next(), words.next());
                 true
             }
+            "relate" => {
+                self.relate(words.next(), words.next(), words.next());
+                true
+            }
+            "relationships" => {
+                self.list_relationships(words.next());
+                true
+            }
             "ayo" => {
-                println!("ayo is currently a Go userspace development Form.");
-                println!("From the host: ./ayo/bin/ayo --authority operator <command>");
+                println!("ayo v2 is registered as Package Form {}.", AYO_FIN);
+                println!("Commands: slap yeet glance chill fix ghost manifest highfive dodge");
+                println!("          vibecheck flex");
+                println!("Host bridge: ./ayo/bin/ayo --authority operator <command>");
                 true
             }
             "legacy" | "games" => {
@@ -339,12 +379,13 @@ impl Shell {
     fn help(&self) {
         println!("HexaOS commands:");
         println!("  help clear echo about status whoami");
-        println!("  forms dimensions makedim inspect journal policy handles history");
+        println!("  forms packages dimensions makedim inspect journal policy handles history");
         println!("  mkform <name> [service|interface|package|driver|data|policy]");
         println!("  view/cat write append head delete recover move copy");
         println!("  hexdump du shasum df which retire activate");
         println!("  grant <name> <read|execute|configure|relate|retire|package>");
         println!("  revoke <handle-id>  pimp <name> <key=value>");
+        println!("  relate <source> <kind> <target>  relationships <source>");
         println!("  ayo legacy games reboot shutdown");
         println!("  date clock cpuinfo lspci neofetch sysinfo mem free env uptime ps");
         println!("  kstat dmesg bootlog ifconfig netstat mode");
@@ -428,6 +469,110 @@ impl Shell {
                 self.content[index].length,
                 form.fin
             );
+        }
+    }
+
+    fn list_packages(&self) {
+        println!("PACKAGE          STATE       REV  FIN");
+        for form in self.forms.iter().flatten() {
+            if form.kind == FormKind::Package {
+                println!(
+                    "{:<16} {:<11} {:>3}  {}",
+                    form.name,
+                    lifecycle_name(form.lifecycle),
+                    form.revision,
+                    form.fin
+                );
+            }
+        }
+        println!("Package mutations are committed by the Go ayo v2 engine.");
+    }
+
+    fn relate(
+        &mut self,
+        source_identity: Option<&str>,
+        raw_kind: Option<&str>,
+        target_identity: Option<&str>,
+    ) {
+        let (Some(source_identity), Some(raw_kind), Some(target_identity)) =
+            (source_identity, raw_kind, target_identity)
+        else {
+            println!(
+                "usage: relate <source> <depends|provides|contains|configured-by|revises> <target>"
+            );
+            return;
+        };
+        let (Some(source), Some(target)) = (
+            self.find_form(source_identity).map(|form| form.fin),
+            self.find_form(target_identity).map(|form| form.fin),
+        ) else {
+            println!("Both relationship endpoints must be visible Forms in Stable.");
+            return;
+        };
+        let Some(kind) = parse_relationship_kind(raw_kind) else {
+            println!("Unknown relationship kind '{}'.", raw_kind);
+            return;
+        };
+        match self.relationships.relate(Relationship {
+            source,
+            target,
+            kind,
+            dimension: Some(self.report.stable_fin),
+        }) {
+            Ok(()) => {
+                self.commit_action();
+                println!(
+                    "Related '{}' --{}--> '{}' in Stable.",
+                    source_identity,
+                    relationship_name(kind),
+                    target_identity
+                );
+            }
+            Err(error) => println!("DIESE rejected relationship: {:?}.", error),
+        }
+    }
+
+    fn list_relationships(&self, source_identity: Option<&str>) {
+        let Some(source_identity) = source_identity else {
+            println!("usage: relationships <source>");
+            return;
+        };
+        let Some(source) = self.find_form(source_identity).map(|form| form.fin) else {
+            println!("No Form named '{}'.", source_identity);
+            return;
+        };
+        let kinds = [
+            RelationshipKind::DependsOn,
+            RelationshipKind::Provides,
+            RelationshipKind::Contains,
+            RelationshipKind::ConfiguredBy,
+            RelationshipKind::Revises,
+        ];
+        let mut count = 0;
+        for kind in kinds {
+            for target in self
+                .relationships
+                .targets(source, kind, Some(self.report.stable_fin))
+            {
+                let name = self
+                    .forms
+                    .iter()
+                    .flatten()
+                    .find(|form| form.fin == target)
+                    .map(|form| form.name.as_str())
+                    .unwrap_or("unbound");
+                println!(
+                    "{} --{}--> {} ({})",
+                    source_identity,
+                    relationship_name(kind),
+                    name,
+                    target
+                );
+                count += 1;
+            }
+        }
+        if count == 0 {
+            println!("No visible relationships from '{}'.", source_identity);
         }
     }
 
@@ -743,7 +888,8 @@ impl Shell {
                 return;
             }
         };
-        let Ok(handle) = self.broker.issue(
+        let Ok(handle) = self.broker.issue_for(
+            self.report.root_fin,
             Authority::Operator,
             target,
             self.report.stable_fin,
@@ -916,6 +1062,7 @@ fn is_shell_command(name: &str) -> bool {
             | "whoami"
             | "forms"
             | "list"
+            | "packages"
             | "dimensions"
             | "dims"
             | "makedim"
@@ -953,6 +1100,8 @@ fn is_shell_command(name: &str) -> bool {
             | "grant"
             | "revoke"
             | "pimp"
+            | "relate"
+            | "relationships"
             | "ayo"
             | "legacy"
             | "games"
@@ -960,6 +1109,27 @@ fn is_shell_command(name: &str) -> bool {
             | "shutdown"
             | "halt"
     )
+}
+
+fn parse_relationship_kind(raw: &str) -> Option<RelationshipKind> {
+    match raw {
+        "depends" | "depends-on" => Some(RelationshipKind::DependsOn),
+        "provides" => Some(RelationshipKind::Provides),
+        "contains" => Some(RelationshipKind::Contains),
+        "configured-by" => Some(RelationshipKind::ConfiguredBy),
+        "revises" => Some(RelationshipKind::Revises),
+        _ => None,
+    }
+}
+
+const fn relationship_name(kind: RelationshipKind) -> &'static str {
+    match kind {
+        RelationshipKind::DependsOn => "depends-on",
+        RelationshipKind::Provides => "provides",
+        RelationshipKind::Contains => "contains",
+        RelationshipKind::ConfiguredBy => "configured-by",
+        RelationshipKind::Revises => "revises",
+    }
 }
 
 fn prompt() {
@@ -989,5 +1159,6 @@ const fn lifecycle_name(lifecycle: Lifecycle) -> &'static str {
         Lifecycle::Active => "active",
         Lifecycle::Retired => "retired",
         Lifecycle::Recoverable => "recoverable",
+        Lifecycle::Removed => "removed",
     }
 }

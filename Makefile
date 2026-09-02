@@ -36,6 +36,9 @@ check: $(ISO)
 	grep -q "HEXA_BOOT_OK" $(BUILD)/serial.log
 	grep -q "HEXA_SHELL_READY" $(BUILD)/serial.log
 	grep -q "HEXA_COMMAND_OK help" $(BUILD)/serial.log
+	grep -q "Ayo.*package" $(BUILD)/serial.log
+	grep -q "Ayo --configured-by--> Root" $(BUILD)/serial.log
+	grep -q "Browser --depends-on--> Ayo" $(BUILD)/serial.log
 	grep -q "Created and bound 'Browser'" $(BUILD)/serial.log
 	grep -q "Granted Handle" $(BUILD)/serial.log
 	grep -q "^42" $(BUILD)/serial.log
