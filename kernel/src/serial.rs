@@ -9,6 +9,7 @@ const MCR: u16 = 4; // modem control
 const LSR: u16 = 5; // line status
 
 const LSR_THR_EMPTY: u8 = 0x20;
+const LSR_DATA_READY: u8 = 0x01;
 
 /// 16550 UART. COM1 lives at 0x3F8 on every QEMU x86_64 machine.
 pub struct SerialPort {
@@ -39,6 +40,17 @@ impl SerialPort {
                 core::hint::spin_loop();
             }
             port::outb(self.base + DATA, byte);
+        }
+    }
+
+    /// Return one received byte without blocking.
+    pub fn try_read(&self) -> Option<u8> {
+        unsafe {
+            if port::inb(self.base + LSR) & LSR_DATA_READY == 0 {
+                None
+            } else {
+                Some(port::inb(self.base + DATA))
+            }
         }
     }
 

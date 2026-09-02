@@ -13,7 +13,7 @@ Ports land only after their interfaces are expressed in Form-native terms.
 | `boot_policy`, `replay`, `kobserve`, `log` | recovery and observability | PIMP/DIESE diagnostics and revision journal | queued |
 | `elf`, `syscall` | loading and ring transition experience | Form implementation loader and non-POSIX call ABI | research |
 | `vfs` | console/device plumbing | adapters only; no path-first public VFS | quarantined |
-| `hexa.c` | shell, users, apps, games, commands | Interface Forms after kernel primitives mature | inventoried |
+| `hexa.c` | shell, users, apps, games, commands | Interface Forms after kernel primitives mature | interactive core shell landed; app ports queued |
 | expodOS console | serial, VGA, locks, long-mode entry | v8 bootstrap platform layer | landed |
 
 ## Required sequence
@@ -29,4 +29,3 @@ Ports land only after their interfaces are expressed in Form-native terms.
 7. Connect Go `ayo` to kernel Handles and remove its JSON development bridge.
 8. Create Root/system/interface Forms. Integrate ASL only after its actual
    specification is supplied.
-

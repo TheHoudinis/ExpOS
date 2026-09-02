@@ -36,6 +36,10 @@ firmware / GRUB (temporary)
 6. The capability broker returns a time-limited, Dimension-scoped Form Handle
    that authorizes only read and execution.
 7. HexaFS preflights and atomically publishes a journaled metadata transaction.
+8. The kernel starts an interactive Operator command environment. Polling COM1
+   and PS/2 input work before the interrupt subsystem is ported. Commands can
+   create and inspect Forms, change lifecycle state, grant or revoke Handles,
+   validate PIMP specifications, inspect system state, reboot, and shut down.
 
 ## Trust boundaries
 
@@ -61,3 +65,6 @@ The 32-bit alpha is quarantined under `legacy/alpha32`. Its code may be ported,
 but its paths, owner/group modes, file descriptors, sudo-like ACL behavior and
 process naming must not leak into the new public model.
 
+The command environment is deliberately backed by fixed-capacity, in-memory
+tables at this stage. Its mutations exercise the core semantics but are not
+durable until the HexaFS block driver and recovery path are connected.

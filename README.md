@@ -14,10 +14,11 @@ projects without making either legacy architecture the new system model:
   revocable Form Handles, and transactional HexaFS metadata.
 - `ayo/` is an entirely Go implementation of the native Package Form manager.
 
-The current image is an architecture bootstrap, not a finished daily-use OS.
-It boots a real 64-bit kernel and exercises one complete trusted path, but does
-not yet provide scheduling, UEFI-native loading, persistent block I/O, a user
-environment, or ports of all alpha applications.
+The current image boots a real 64-bit kernel into an interactive command
+environment. It accepts input from both the QEMU window keyboard and COM1 in
+the launching terminal. It is still an architecture alpha rather than a
+finished daily-use OS: scheduling, UEFI-native loading, persistent block I/O,
+and ports of the alpha applications remain in development.
 
 ## Build and verify
 
@@ -37,6 +38,19 @@ To boot interactively:
 ```sh
 make run
 ```
+
+Click the QEMU window and type `help`, or type commands directly in the terminal
+that launched QEMU. The current command environment supports:
+
+```text
+help clear echo about status whoami
+forms dimensions inspect journal policy handles
+mkform retire activate grant revoke pimp
+ayo reboot shutdown
+```
+
+Forms, Handles, and PIMP changes made in this early shell are in-memory and
+reset at reboot. Persistent HexaFS block integration is the next storage phase.
 
 To verify the preserved alpha source still builds:
 
@@ -58,4 +72,3 @@ make legacy-alpha-check
 
 ASL is intentionally not implemented or guessed because its established
 specification was not included.
-

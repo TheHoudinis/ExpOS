@@ -6,8 +6,10 @@
 #![no_std]
 #![no_main]
 
+mod input;
 mod port;
 mod serial;
+mod shell;
 mod sync;
 mod vga;
 mod volatile;
@@ -49,6 +51,14 @@ pub fn _print(args: fmt::Arguments<'_>) {
     let mut writer = vga::WRITER.lock();
     let _ = fmt::Write::write_fmt(&mut *writer, args);
     writer.update_cursor();
+    drop(writer);
+    let mut serial = serial::COM1.lock();
+    let _ = fmt::Write::write_fmt(&mut *serial, args);
+}
+
+pub fn clear_console() {
+    vga::WRITER.lock().clear();
+    serial::COM1.lock().write_str("\x1B[2J\x1B[H");
 }
 
 #[doc(hidden)]
@@ -119,7 +129,7 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
 
     println!();
 
-    match hexa_core::bootstrap_demo() {
+    let report = match hexa_core::bootstrap_demo() {
         Ok(report) => {
             println!("[ok] Root Form FIN {}", report.root_fin);
             println!("[ok] Stable Dimension FIN {}", report.stable_fin);
@@ -127,18 +137,11 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
             println!("[ok] scoped Form Handle #{}", report.handle_id);
             println!("[ok] HexaFS journal commit #{}", report.journal_sequence);
             slog!("HEXA_BOOT_OK form-native bootstrap complete\r\n");
+            report
         }
         Err(error) => panic!("Form-native bootstrap failed: {:?}", error),
-    }
+    };
     println!();
-    println!("Core architecture online. Halting bootstrap CPU.");
-    slog!("[HexaOS] bootstrap CPU halted\r\n");
-
-    // QEMU's optional isa-debug-exit device turns this into a fast smoke test.
-    // On other machines the write is harmless and execution continues to hlt.
-    port::debug_exit_success();
-
-    loop {
-        port::halt();
-    }
+    println!("Core architecture online. Starting command environment.");
+    shell::run(report)
 }

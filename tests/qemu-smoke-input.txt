@@ -1,0 +1,9 @@
+
+help
+status
+mkform Browser interface
+forms
+grant Browser execute
+handles
+pimp Browser network=restricted
+shutdown

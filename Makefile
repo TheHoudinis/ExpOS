@@ -32,8 +32,12 @@ iso: $(ISO)
 
 check: $(ISO)
 	rm -f $(BUILD)/serial.log
-	timeout 20 $(QEMU) -device isa-debug-exit,iobase=0xf4,iosize=0x04 -cdrom $(ISO) -display none -serial stdio -no-reboot > $(BUILD)/serial.log 2>&1 || true
+	timeout 20 $(QEMU) -device isa-debug-exit,iobase=0xf4,iosize=0x04 -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-smoke-input.txt > $(BUILD)/serial.log 2>&1 || true
 	grep -q "HEXA_BOOT_OK" $(BUILD)/serial.log
+	grep -q "HEXA_SHELL_READY" $(BUILD)/serial.log
+	grep -q "HEXA_COMMAND_OK help" $(BUILD)/serial.log
+	grep -q "Created and bound 'Browser'" $(BUILD)/serial.log
+	grep -q "Granted Handle" $(BUILD)/serial.log
 	@echo ">>> HEXAOS SMOKE TEST PASSED <<<"
 
 run: $(ISO)

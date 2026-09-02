@@ -43,7 +43,7 @@ impl fmt::Debug for Text {
 
 impl fmt::Display for Text {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
+        formatter.pad(self.as_str())
     }
 }
 

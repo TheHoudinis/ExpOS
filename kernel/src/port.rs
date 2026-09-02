@@ -17,7 +17,31 @@ pub fn halt() {
     }
 }
 
+pub fn reboot() -> ! {
+    unsafe {
+        while inb(0x64) & 0x02 != 0 {
+            core::hint::spin_loop();
+        }
+        outb(0x64, 0xFE);
+    }
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+pub fn shutdown() -> ! {
+    // QEMU debug-exit (used by tests), QEMU/Bochs ACPI, then halt fallback.
+    unsafe {
+        outb(0xF4, 0x10);
+        outw(0x604, 0x2000);
+        outw(0xB004, 0x2000);
+    }
+    loop {
+        halt();
+    }
+}
+
 #[inline]
-pub fn debug_exit_success() {
-    unsafe { outb(0xF4, 0x10) }
+pub unsafe fn outw(port: u16, value: u16) {
+    core::arch::asm!("out dx, ax", in("dx") port, in("ax") value, options(nomem, nostack, preserves_flags));
 }
