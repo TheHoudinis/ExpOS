@@ -1,0 +1,12 @@
+[package]
+name = "hexa-kernel"
+version = "8.0.0-alpha.1"
+edition = "2021"
+
+# Bare-metal static library: linked together with boot/boot.asm by ld.
+[lib]
+name = "hexa_kernel"
+crate-type = ["staticlib"]
+
+[dependencies]
+hexa-core = { path = "../crates/hexa-core" }

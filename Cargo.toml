@@ -1,0 +1,12 @@
+[workspace]
+members = ["crates/hexa-core", "kernel"]
+resolver = "2"
+
+[profile.release]
+opt-level = 2
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = true
+overflow-checks = true
+

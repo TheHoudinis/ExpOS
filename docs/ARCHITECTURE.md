@@ -1,0 +1,63 @@
+# Architecture status
+
+The rebuild is split into a small trusted semantic core and platform adapters.
+Host tests exercise the same `no_std` core that is linked into the kernel.
+
+```text
+firmware / GRUB (temporary)
+          |
+          v
+  x86_64 bootstrap kernel
+          |
+          v
+ FIN -> Form Registry -> Dimension Binding
+          |                    |
+          v                    v
+     Form Handle <--- capability decision
+          |
+          v
+ PIMP specification -> DIESE resolution
+          |
+          v
+ HexaFS transaction + journal sequence
+```
+
+## Implemented vertical slice
+
+1. The loader validates long-mode support and enters an identity-mapped x86_64
+   kernel with a 64 KiB bootstrap stack.
+2. The kernel validates Multiboot2, initializes polling serial and VGA output,
+   and invokes `hexa_core::bootstrap_demo`.
+3. The demo creates a Root Form and Stable Dimension with independent FINs.
+4. A binding makes the Root Form visible in Stable at revision 1.
+5. Typed PIMP settings request service mode, restricted networking and
+   isolation. DIESE resolves them using explicit scope precedence and rejects
+   same-scope conflicts with a diagnostic.
+6. The capability broker returns a time-limited, Dimension-scoped Form Handle
+   that authorizes only read and execution.
+7. HexaFS preflights and atomically publishes a journaled metadata transaction.
+
+## Trust boundaries
+
+- Exact resolution uses FIN. Human-readable names are secondary and scoped by
+  a Dimension binding.
+- Operator, Power and Guest are authority inputs to capability decisions; they
+  are not Unix UID aliases.
+- Handles carry allowed operations, target FIN, Dimension, expiry and
+  revocation state. No file descriptor abstraction appears in the core.
+- PIMP accepts only known keys and typed values. DIESE never silently resolves
+  an equal-precedence conflict.
+- HexaFS transaction commit validates all staged records and capacity before
+  publishing any record under a single journal sequence.
+
+## Transitional boundaries
+
+The current GRUB/Multiboot2 path came from expodOS and is explicitly temporary;
+the philosophy calls for UEFI in Phase 1. The `ayo` JSON store is similarly a
+host-development bridge that makes transactions inspectable. It is not the
+native persistent format and will be replaced by kernel Form Handle calls.
+
+The 32-bit alpha is quarantined under `legacy/alpha32`. Its code may be ported,
+but its paths, owner/group modes, file descriptors, sudo-like ACL behavior and
+process naming must not leak into the new public model.
+

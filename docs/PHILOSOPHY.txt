@@ -1,0 +1,697 @@
+HEXAOS — CORE PHILOSOPHY AND ARCHITECTURE
+Version: 7.2 Diamond II
+Status: Living architecture specification
+
+1. IDENTITY
+
+HexaOS is an experimental operating system designed around concepts that are not derived from POSIX, Unix, Linux, BSD, or GNU/Hurd. It is not intended to be a conventional Unix-like system with renamed files or a custom desktop.
+
+Its central model is:
+
+    Functionality exists through Forms.
+    Forms are identified by FINs.
+    Forms operate and appear through Dimensions.
+    PIMP specifies how Forms and subsystems should behave.
+    DIESE evaluates and resolves those specifications.
+
+2. FORMS
+
+A Form is the primary functional abstraction in HexaOS. A Form is not merely a file, passive object, directory, or ordinary process. It is a functional entity that may define behavior, execution, interaction, inputs, outputs, state, services, and relationships.
+
+A Form may contain or reference:
+
+    FIN
+    names
+    kind
+    implementation
+    inputs
+    outputs
+    runtime state
+    persistent state
+    relationships
+    capabilities
+    revisions
+    Dimension bindings
+    PIMP specifications
+
+3. FIN — FORM IDENTIFICATION NUMBER
+
+Every Form has a unique FIN. FIN is the authoritative and stable identity of a Form.
+
+Names are human-readable and may be duplicated:
+
+    Browser
+        FIN: 001A-72F0
+
+    Browser
+        FIN: 9C21-44D8
+
+The kernel resolves exact identity through FIN, not through names, paths, or locations. FIN should not change when a Form is renamed or appears in another Dimension.
+
+4. DIMENSIONS
+
+A Dimension is a first-class, kernel-managed context controlling how Forms are visible, revised, related, configured, executed, and constrained.
+
+A Dimension may affect:
+
+    visibility
+    active revision
+    state
+    relationships
+    capabilities
+    execution rules
+    isolation
+    policy
+
+A Form may appear in multiple Dimensions while retaining one FIN.
+
+Example:
+
+    Browser
+    FIN: 7A4E-19C2
+
+    Development:
+        revision=45
+        debug=enabled
+
+    Stable:
+        revision=42
+        debug=disabled
+
+    Secure:
+        revision=42
+        network=restricted
+        isolation=enabled
+
+A Dimension is not automatically a security boundary. Security behavior must be explicit.
+
+5. HEXAFS
+
+HexaFS is HexaOS's native persistent storage system. It is not removed by the Form model; it evolves into the persistent substrate for Forms and Dimensions.
+
+HexaFS may persist:
+
+    Form records
+    Form implementations
+    Form state
+    FIN indexes
+    Dimension records
+    Dimension bindings
+    relationships
+    revisions
+    capabilities
+    PIMP specifications
+    recovery data
+    journals
+
+HexaFS may internally use sectors, blocks, indexes, trees, journals, caches, checksums, and snapshots. These are implementation mechanisms, not necessarily user-facing abstractions.
+
+HexaFS should behave more like a persistent Form graph and structured system store than a traditional hierarchy of paths.
+
+6. FORM RESOLUTION
+
+The kernel should not scan every Form.
+
+Primary lookup:
+
+    FIN -> Form descriptor or persistent location
+
+A hash table or another efficient index may provide fast FIN lookup.
+
+Name lookup is secondary:
+
+    "Browser"
+        -> FIN 7A4E-19C2
+        -> FIN 9C21-44D8
+
+Dimensions, metadata, relationships, and PIMP context may resolve ambiguity.
+
+Resolution order may be:
+
+    1. exact FIN
+    2. name plus Dimension
+    3. structured relationship query
+    4. policy-aware evaluation through DIESE
+
+7. CAPABILITIES AND FORM HANDLES
+
+HexaOS should use capability-based access rather than POSIX owner/group/rwx permissions as its primary model.
+
+A requester asks for a specific operation:
+
+    requester
+        ->
+    target FIN
+        ->
+    current Dimension
+        ->
+    capability policy
+        ->
+    allow or deny
+
+Authorized interaction may return a Form Handle rather than a Unix file descriptor.
+
+A Form Handle may specify:
+
+    target FIN
+    allowed operations
+    Dimension scope
+    validity
+    revocation state
+
+Capabilities should be explicit, narrow, and revocable where practical.
+
+8. DELETION AND RECOVERY
+
+Deletion should be Dimension-aware and should not necessarily destroy a Form immediately.
+
+Lifecycle:
+
+    Active
+        ->
+    Retired
+        ->
+    Recoverable
+        ->
+    Permanently removed
+
+Removing a Form from one Dimension must not automatically remove it from all Dimensions.
+
+Permanent reclamation may require:
+
+    no active Dimension bindings
+    no active references
+    no protected revisions
+    no remaining recovery requirement
+
+9. BOOTSTRAPPING
+
+The Form runtime cannot exist before the minimum kernel environment exists.
+
+Conceptual boot sequence:
+
+    Firmware
+        ->
+    Hexa Bootloader
+        ->
+    Hexa Kernel Core
+        ->
+    CPU initialization
+        ->
+    memory management
+        ->
+    interrupts and exceptions
+        ->
+    scheduler
+        ->
+    HexaFS initialization
+        ->
+    essential PIMP loading and validation
+        ->
+    FIN index
+        ->
+    Form runtime
+        ->
+    Root Form
+        ->
+    system Dimensions
+        ->
+    user environment
+
+The kernel core makes Forms possible.
+The Form runtime manages Forms.
+Forms construct most of the operating environment.
+
+10. PIMP — PERSONAL INTERACTIONS MANAGER PANEL
+
+PIMP is a core, system-critical configuration and specification mechanism.
+
+PIMP is not primarily a graphical panel or ordinary application. It is conceptually related to:
+
+    /etc/doas.conf
+    sudo configuration
+    Gentoo USE flags
+    /etc/portage/make.conf
+
+However, PIMP is broader, more deeply integrated, and irreplaceable within HexaOS.
+
+PIMP tells HexaOS which behavior, implementation, mode, feature, backend, policy, or interaction rule should be used for a Form, service, subsystem, driver, Dimension, or other system component.
+
+PIMP is connected to:
+
+    DIESE — HexaOS Evaluation Tool
+
+DIESE evaluates PIMP specifications and resolves how a Form or subsystem should behave. PIMP expresses intent; DIESE evaluates whether the requested configuration is valid, supported, compatible, and applicable.
+
+Example:
+
+    browser:
+        pimp:
+            use=windowed
+
+This specifies that the Browser Form should use windowed behavior.
+
+A broader example:
+
+    browser:
+        pimp:
+            use=windowed
+            renderer=hexa-render
+            network=restricted
+
+Another example:
+
+    audio:
+        pimp:
+            use=low-latency
+            backend=hexa-audio
+
+PIMP may configure:
+
+    Forms
+    system services
+    kernel-managed subsystems
+    drivers
+    Dimensions
+    security policies
+    execution modes
+    features
+    implementation backends
+    interaction rules
+    DIESE evaluation behavior
+
+PIMP should be declarative where possible. It should state what is wanted, while DIESE and authorized system components determine how to satisfy the request.
+
+PIMP must be structured, typed, validated, and explainable. It should not become an unorganized collection of switches.
+
+A conceptual syntax:
+
+    target:
+        pimp:
+            use=<mode>
+            feature=<enabled-or-disabled>
+            backend=<implementation>
+            policy=<rule>
+
+PIMP may have multiple scopes:
+
+    Form-specific
+        ->
+    Dimension-specific
+        ->
+    subsystem-wide
+        ->
+    system-wide
+        ->
+    built-in default
+
+This precedence order is a proposed model and must be formally finalized.
+
+PIMP can express both selection and constraints.
+
+Selection:
+
+    browser:
+        pimp:
+            use=windowed
+
+Constraint:
+
+    browser:
+        pimp:
+            network=restricted
+
+PIMP must define:
+
+    grammar
+    typed values
+    scopes
+    inheritance
+    precedence
+    validation
+    conflict resolution
+    diagnostics
+    safe fallbacks
+    atomic updates
+    revisions
+    recovery
+    modification permissions
+
+PIMP should be persisted through HexaFS and integrated with Forms, FINs, and Dimensions. It should not be treated merely as an ordinary Unix text file, even if a readable text representation is provided.
+
+PIMP may be represented internally as a privileged system Form or a privileged structured configuration record.
+
+Concept:
+
+    Name:
+        PIMP
+
+    Role:
+        System Specification and Policy
+
+    Storage:
+        HexaFS
+
+    Consumers:
+        DIESE and authorized HexaOS subsystems
+
+PIMP must be available early enough for essential system policy and component selection. The minimal kernel bootstrap must still be able to load a safe essential configuration without depending on the complete user environment.
+
+11. DIESE — HEXAOS EVALUATION TOOL
+
+DIESE is the evaluation and resolution component associated with PIMP.
+
+Conceptual flow:
+
+    PIMP specification
+        ->
+    DIESE validation
+        ->
+    compatibility and dependency evaluation
+        ->
+    conflict detection
+        ->
+    configuration resolution
+        ->
+    selected system behavior
+
+DIESE should be able to report:
+
+    accepted specifications
+    rejected specifications
+    unsupported flags
+    conflicts
+    missing dependencies
+    selected fallbacks
+    final resolved behavior
+
+DIESE must not silently change critical PIMP intent without producing an understandable diagnostic.
+
+
+============================================================
+AYO PACKAGE MANAGER v2.0 — HEXAOS ARCHITECTURE INTEGRATION
+============================================================
+
+ayo is implemented entirely in Go (Golang).
+
+ayo (pronounced "ey-yo") is the native package management subsystem
+of HexaOS.
+
+ayo v2.0 was originally designed for an earlier HexaOS architecture.
+For HexaOS v8, ayo v2.0 is redesigned internally to fully integrate
+with the Form-based architecture, while preserving its original
+command philosophy and user interaction model.
+
+ayo is not a traditional Unix package manager. It does not manage
+software through files, directories, paths, or POSIX-style package
+databases.
+
+Instead, ayo manages software as HexaOS Forms.
+
+------------------------------------------------------------
+PACKAGE REPRESENTATION
+------------------------------------------------------------
+
+Every package is represented as a Package Form stored inside HexaFS.
+
+A Package Form contains:
+
+    - FIN identity
+    - package metadata
+    - version information
+    - provided Forms and capabilities
+    - dependency declarations
+    - compatibility requirements
+    - activation state
+    - revision history
+    - PIMP specifications
+
+Packages are persistent Forms, not collections of files.
+
+Installing a package does not copy files into directories.
+It activates a Form and integrates its capabilities into the system.
+
+------------------------------------------------------------
+AYO AND HEXAOS CORE SYSTEMS
+------------------------------------------------------------
+
+ayo directly integrates with:
+
+HexaFS:
+    Provides persistent storage, transactions, journaling,
+    revisions, and recovery.
+
+PIMP:
+    Defines package policies, requirements, permissions,
+    and desired system state.
+
+DIESE:
+    Resolves package operations, validates permissions,
+    and performs controlled privileged actions.
+
+Capability System:
+    Controls package access through Form Handles instead of
+    traditional Unix ownership and permission models.
+
+Dimensions:
+    Control package visibility, behavior, and integration
+    inside the HexaOS environment.
+
+------------------------------------------------------------
+PACKAGE OPERATIONS
+------------------------------------------------------------
+
+The original ayo v2.0 commands remain unchanged.
+
+slap:
+    Activates a Package Form and enables its capabilities.
+
+yeet:
+    Removes package activation and revokes provided capabilities.
+
+glance:
+    Inspects package state and availability.
+
+chill:
+    Requests system package reconciliation through PIMP and DIESE.
+
+fix:
+    Initiates system repair and recovery procedures.
+
+ghost:
+    Moves a package into a hidden package state while preserving
+    its FIN identity and history.
+
+manifest:
+    Creates a persistent HexaFS revision checkpoint describing
+    system/package state.
+
+highfive:
+    Performs controlled Form capability merging between packages.
+
+dodge:
+    Marks packages as excluded from future reconciliation.
+
+vibecheck:
+    Evaluates system package and runtime health.
+
+flex:
+    Displays package metadata statistics and usage information.
+
+------------------------------------------------------------
+TRANSACTION MODEL
+------------------------------------------------------------
+
+All package changes are processed as HexaFS transactions.
+
+A typical ayo operation:
+
+    User request
+          |
+          v
+    DIESE privilege validation
+          |
+          v
+    PIMP policy evaluation
+          |
+          v
+    HexaFS transaction creation
+          |
+          v
+    Package Form modification
+          |
+          v
+    Journal commit
+          |
+          v
+    Updated HexaOS state
+
+If an operation is interrupted, HexaFS recovery mechanisms restore
+system consistency.
+
+------------------------------------------------------------
+DEPENDENCY MODEL
+------------------------------------------------------------
+
+ayo uses a Form-based dependency model.
+
+Packages may declare relationships with other Package Forms.
+
+Dependencies are evaluated through HexaOS policy systems instead
+of traditional package-manager dependency trees.
+
+The system prioritizes consistency of Forms and capabilities rather
+than file-level dependency resolution.
+
+------------------------------------------------------------
+SECURITY MODEL
+------------------------------------------------------------
+
+HexaOS defines three authority levels:
+
+Operator — full system authority (replaces Unix root).
+Power — standard daily user.
+Guest — highly restricted session comparable to using an iPhone without an Apple ID; temporary, limited, and unable to perform system changes.
+
+ayo does not use Unix root ownership, sudo, or filesystem ACLs.
+
+Package operations requiring elevated authority are performed through
+DIESE-controlled privilege elevation according to PIMP rules.
+
+A package cannot modify the system unless its required capabilities
+are granted and validated.
+
+------------------------------------------------------------
+DESIGN PHILOSOPHY
+------------------------------------------------------------
+
+ayo keeps the original HexaOS idea:
+
+Software is not something copied into an operating system.
+
+Software becomes a functional part of the operating environment.
+
+A package is a Form.
+A Form has identity.
+Identity has capabilities.
+Capabilities create functionality.
+
+ayo exists to manage this relationship between software Forms and
+the HexaOS environment.
+
+ayo intentionally has an artistic personality. Its CLI output may include humorous messages, memes, playful status text, and light-hearted jokes while remaining informative.
+
+The goal of ayo v2.0 is not to recreate Unix package management,
+but to provide a native package system built specifically for the
+HexaOS architecture.
+============================================================
+
+12. ASL
+
+ASL remains a named HexaOS component. Its exact specification is not defined in this document and must not be fabricated. Its relationship to PIMP, DIESE, Forms, Dimensions, and HexaFS should be added when its established design is available.
+
+13. KERNEL DIRECTION
+
+HexaOS aims to develop its own kernel architecture.
+
+The kernel must eventually provide:
+
+    platform initialization
+    memory management
+    interrupts and exceptions
+    scheduling
+    execution
+    inter-Form communication
+    capability enforcement
+    Form lifecycle management
+    Dimension management
+    HexaFS integration
+    driver interfaces
+    synchronization
+    persistent-state coordination
+    essential PIMP/DIESE integration
+
+The kernel architecture may be monolithic, modular, microkernel-based, hybrid, or novel. The choice must follow HexaOS semantics rather than copying another operating system.
+
+14. NON-GOALS
+
+HexaOS should not become:
+
+    Linux with a custom desktop
+    BSD with different branding
+    POSIX with renamed files
+    Unix semantics hidden behind a new interface
+    a conventional filesystem with cosmetic Forms
+    a Unix clone that calls processes Forms without changing their meaning
+
+Compatibility layers may exist later, but they must not define the core architecture.
+
+15. DEVELOPMENT STRATEGY
+
+Phase 1:
+    UEFI boot
+    serial output
+    CPU initialization
+    memory management
+    interrupts
+
+Phase 2:
+    scheduler
+    execution
+    synchronization
+    kernel messaging
+
+Phase 3:
+    Form structure
+    FIN generation
+    in-memory Form registry
+    Form lookup
+    basic Form execution
+
+Phase 4:
+    Dimensions
+    Form bindings
+    Dimension-aware lookup
+    contextual or isolated state
+
+Phase 5:
+    HexaFS integration
+    persistent Forms
+    FIN indexes
+    revisions
+    recovery
+
+Phase 6:
+    capabilities
+    Form Handles
+    access checks
+    revocation
+
+Phase 7:
+    PIMP grammar
+    PIMP parser
+    PIMP validation
+    DIESE evaluation
+    precedence and conflict rules
+
+Phase 8:
+    Root Form
+    system Forms
+    interface Forms
+    ASL integration when specified
+
+16. FINAL PHILOSOPHY
+
+HexaOS is a Form-native, Dimension-oriented operating-system architecture.
+
+Forms are functional entities.
+FINs provide stable identity.
+Dimensions provide context.
+HexaFS persists the system model.
+Capabilities govern access.
+Form Handles represent authorized interaction.
+PIMP specifies desired behavior and policy.
+DIESE evaluates and resolves those specifications.
+The kernel provides the trusted substrate that makes the model executable.
+
+The goal is not to rename Unix concepts. The goal is to define, implement, and test a genuinely different operating-system model that can boot on real hardware, manage memory, execute functionality, persist data, enforce security, resolve configuration, and provide a usable environment.

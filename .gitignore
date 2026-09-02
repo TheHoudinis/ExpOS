@@ -1,0 +1,13 @@
+/build/
+/target/
+/kernel/target/
+/iso/boot/kernel.elf
+/ayo/bin/
+/ayo/*.json
+!/ayo/testdata/*.json
+*.o
+*.bin
+*.img
+*.iso
+*.log
+
