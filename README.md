@@ -49,8 +49,23 @@ mkform retire activate grant revoke pimp
 ayo reboot shutdown
 ```
 
-Forms, Handles, and PIMP changes made in this early shell are in-memory and
-reset at reboot. Persistent HexaFS block integration is the next storage phase.
+The alpha.3 shell also ports the practical HexaOS 7.2 command layer: Form
+content (`write`, `append`, `cat`, `head`, `copy`, `move`, `delete/recover`,
+`hexdump`, hashes), hardware inspection, calculator/string/math tools,
+Dimensions, history, system diagnostics, and the original fun utilities.
+
+Forms, Handles, Dimensions, and PIMP changes made in the v8 shell are currently
+in-memory and reset at reboot. Persistent HexaFS block integration is the next
+native storage phase.
+
+The complete 32-bit Diamond II environment remains runnable while its deeper
+drivers and games are ported:
+
+```sh
+make run-alpha
+```
+
+See [feature coverage](docs/FEATURE_COVERAGE.md) for the native/fallback split.
 
 To verify the preserved alpha source still builds:
 
@@ -68,6 +83,7 @@ make legacy-alpha-check
 | `docs/PHILOSOPHY.txt` | source architecture specification |
 | `docs/ARCHITECTURE.md` | implemented design and trust boundaries |
 | `docs/MIGRATION.md` | alpha subsystem port map and sequence |
+| `docs/FEATURE_COVERAGE.md` | command and subsystem coverage |
 | `legacy/alpha32/` | source snapshot of HexaOS 7.2 alpha |
 
 ASL is intentionally not implemented or guessed because its established

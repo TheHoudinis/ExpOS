@@ -5,7 +5,7 @@ KERNEL_ELF := $(BUILD)/kernel.elf
 RUST_LIB   := target/$(TARGET)/release/libhexa_kernel.a
 QEMU       := qemu-system-x86_64 -m 256M
 
-.PHONY: all iso test check run debug clean legacy-alpha-check ayo kernel-build
+.PHONY: all iso test check run debug clean legacy-alpha-check run-alpha ayo kernel-build
 
 all: test check ayo
 
@@ -38,6 +38,12 @@ check: $(ISO)
 	grep -q "HEXA_COMMAND_OK help" $(BUILD)/serial.log
 	grep -q "Created and bound 'Browser'" $(BUILD)/serial.log
 	grep -q "Granted Handle" $(BUILD)/serial.log
+	grep -q "^42" $(BUILD)/serial.log
+	grep -q "HexaOS Forms can carry structured state and revisions" $(BUILD)/serial.log
+	grep -q "NotesBackup" $(BUILD)/serial.log
+	grep -q "Created Dimension 'Development'" $(BUILD)/serial.log
+	grep -q "Notes is now recoverable" $(BUILD)/serial.log
+	grep -q "Notes is now active" $(BUILD)/serial.log
 	@echo ">>> HEXAOS SMOKE TEST PASSED <<<"
 
 run: $(ISO)
@@ -51,6 +57,9 @@ ayo:
 
 legacy-alpha-check:
 	$(MAKE) -C legacy/alpha32 clean all
+
+run-alpha:
+	$(MAKE) -C legacy/alpha32 run
 
 clean:
 	cargo clean

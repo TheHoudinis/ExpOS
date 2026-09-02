@@ -6,6 +6,8 @@
 #![no_std]
 #![no_main]
 
+mod compat;
+mod hardware;
 mod input;
 mod port;
 mod serial;

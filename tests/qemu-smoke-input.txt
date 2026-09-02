@@ -1,9 +1,28 @@
 
 help
 status
+date
+cpuinfo
+lspci
+mem
+calc 7 * 6
+factor 84
+makedim Development
+dimensions
 mkform Browser interface
+mkform Notes data
+write Notes HexaOS Forms can carry structured state
+append Notes  and revisions
+cat Notes
+hexdump Notes
+copy Notes NotesBackup
+shasum NotesBackup
+delete Notes
+recover Notes
 forms
 grant Browser execute
 handles
 pimp Browser network=restricted
+neofetch
+history
 shutdown

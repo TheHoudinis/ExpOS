@@ -68,3 +68,8 @@ process naming must not leak into the new public model.
 The command environment is deliberately backed by fixed-capacity, in-memory
 tables at this stage. Its mutations exercise the core semantics but are not
 durable until the HexaFS block driver and recovery path are connected.
+
+Alpha.3 ports the broad hardware, utility and Form-content command layer. The
+Diamond II build is also exposed through `make run-alpha`, providing a runnable
+migration fallback for games, networking, scheduling, ATA persistence and VBE
+while their public interfaces are redesigned around v8 semantics.
