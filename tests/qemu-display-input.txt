@@ -2,5 +2,8 @@
 displayinfo
 browser
 q
+desktop
+help
+exit
 goabi
 shutdown

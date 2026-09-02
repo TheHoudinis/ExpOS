@@ -90,7 +90,7 @@ pub fn print_memory_architecture() {
     }
     println!("paging={} long-mode=yes", yes_no(cr0 & (1 << 31) != 0));
     println!("bootstrap map=1 GiB huge-pages  CR3={:#018X}", cr3);
-    println!("kernel stack=64 KiB  QEMU RAM default=256 MiB");
+    println!("kernel stack=512 KiB  QEMU RAM default=256 MiB");
 }
 
 pub fn random_u32() -> u32 {

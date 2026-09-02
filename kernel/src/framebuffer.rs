@@ -51,6 +51,7 @@ pub fn enter() -> bool {
 
 pub fn exit() {
     write(INDEX_ENABLE, DISABLED);
+    restore_vga_text_mode();
 }
 
 pub fn clear(value: u32) {
@@ -134,6 +135,99 @@ fn read(index: u16) -> u16 {
     unsafe {
         port::outw(VBE_INDEX, index);
         port::inw(VBE_DATA)
+    }
+}
+
+fn restore_vga_text_mode() {
+    const SEQUENCER: [u8; 5] = [0x03, 0x00, 0x03, 0x00, 0x02];
+    const CRTC: [u8; 25] = [
+        0x5F, 0x4F, 0x50, 0x82, 0x55, 0x81, 0xBF, 0x1F, 0x00, 0x4F, 0x0D, 0x0E, 0x00, 0x00, 0x00,
+        0x50, 0x9C, 0x0E, 0x8F, 0x28, 0x1F, 0x96, 0xB9, 0xA3, 0xFF,
+    ];
+    const GRAPHICS: [u8; 9] = [0x00, 0x00, 0x10, 0x00, 0x00, 0x10, 0x0E, 0x00, 0xFF];
+    const ATTRIBUTE: [u8; 21] = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x14, 0x07, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E,
+        0x3F, 0x0C, 0x00, 0x0F, 0x08, 0x00,
+    ];
+    unsafe {
+        port::outb(0x3C2, 0x67);
+        for (index, value) in SEQUENCER.iter().enumerate() {
+            port::outb(0x3C4, index as u8);
+            port::outb(0x3C5, *value);
+        }
+        port::outb(0x3D4, 0x03);
+        port::outb(0x3D5, port::inb(0x3D5) | 0x80);
+        port::outb(0x3D4, 0x11);
+        port::outb(0x3D5, port::inb(0x3D5) & !0x80);
+        for (index, value) in CRTC.iter().enumerate() {
+            port::outb(0x3D4, index as u8);
+            port::outb(0x3D5, *value);
+        }
+        for (index, value) in GRAPHICS.iter().enumerate() {
+            port::outb(0x3CE, index as u8);
+            port::outb(0x3CF, *value);
+        }
+        load_text_font();
+        for (index, value) in ATTRIBUTE.iter().enumerate() {
+            let _ = port::inb(0x3DA);
+            port::outb(0x3C0, index as u8);
+            port::outb(0x3C0, *value);
+        }
+        let _ = port::inb(0x3DA);
+        port::outb(0x3C0, 0x20);
+    }
+}
+
+unsafe fn load_text_font() {
+    // VBE does not promise to preserve VGA plane 2. Select the character
+    // generator plane, rebuild a readable 8x16 font from the kernel glyphs,
+    // then restore normal interleaved text-memory access.
+    unsafe {
+        port::outb(0x3C4, 0x00);
+        port::outb(0x3C5, 0x01);
+        port::outb(0x3C4, 0x02);
+        port::outb(0x3C5, 0x04);
+        port::outb(0x3C4, 0x04);
+        port::outb(0x3C5, 0x07);
+        port::outb(0x3C4, 0x00);
+        port::outb(0x3C5, 0x03);
+
+        port::outb(0x3CE, 0x04);
+        port::outb(0x3CF, 0x02);
+        port::outb(0x3CE, 0x05);
+        port::outb(0x3CF, 0x00);
+        port::outb(0x3CE, 0x06);
+        port::outb(0x3CF, 0x04);
+
+        let font_plane = 0xA0000 as *mut u8;
+        for character in 0..=u8::MAX {
+            let rows = glyph_rows(character);
+            let glyph = font_plane.add(character as usize * 32);
+            for scanline in 0..32 {
+                let value = if (1..15).contains(&scanline) {
+                    rows[(scanline - 1) / 2] << 2
+                } else {
+                    0
+                };
+                core::ptr::write_volatile(glyph.add(scanline), value);
+            }
+        }
+
+        port::outb(0x3C4, 0x00);
+        port::outb(0x3C5, 0x01);
+        port::outb(0x3C4, 0x02);
+        port::outb(0x3C5, 0x03);
+        port::outb(0x3C4, 0x04);
+        port::outb(0x3C5, 0x02);
+        port::outb(0x3C4, 0x00);
+        port::outb(0x3C5, 0x03);
+
+        port::outb(0x3CE, 0x04);
+        port::outb(0x3CF, 0x00);
+        port::outb(0x3CE, 0x05);
+        port::outb(0x3CF, 0x10);
+        port::outb(0x3CE, 0x06);
+        port::outb(0x3CF, 0x0E);
     }
 }
 

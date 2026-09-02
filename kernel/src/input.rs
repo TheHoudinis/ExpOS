@@ -3,6 +3,11 @@ use crate::{port, serial};
 const PS2_STATUS: u16 = 0x64;
 const PS2_DATA: u16 = 0x60;
 
+pub const KEY_UP: u8 = 0x80;
+pub const KEY_DOWN: u8 = 0x81;
+pub const KEY_LEFT: u8 = 0x82;
+pub const KEY_RIGHT: u8 = 0x83;
+
 pub struct Input {
     shift: bool,
     caps_lock: bool,
@@ -38,7 +43,13 @@ impl Input {
         }
         if self.extended {
             self.extended = false;
-            return None;
+            return match scancode {
+                0x48 => Some(KEY_UP),
+                0x50 => Some(KEY_DOWN),
+                0x4B => Some(KEY_LEFT),
+                0x4D => Some(KEY_RIGHT),
+                _ => None,
+            };
         }
         match scancode {
             0x2A | 0x36 => {

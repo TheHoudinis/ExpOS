@@ -18,6 +18,9 @@ projects without making either legacy architecture the new system model:
   constraints, reconciliation, checkpoints and crash recovery.
 - `HexaDisplay` is a native 800x600 graphical server with Form-owned surfaces,
   buffers, damage, atomic commits, focus, z-order, hit testing and input events.
+- the HexaDisplay desktop is a multi-application session with a Form launcher,
+  graphical Terminal, Browser, Form registry, Ayo package center, Settings and
+  live System Scope. Each application owns its own surface and FIN.
 - `Browser` is a native graphical Interface Form with a bounded local HTML
   parser, document renderer, links and policy-explained network restrictions.
 - `sdk/go/` defines and tests the capability-gated HexaOS Go ABI v1.
@@ -70,7 +73,7 @@ desktop browser displayinfo goabi
 ayo reboot shutdown
 ```
 
-The alpha.6 shell also ports the practical HexaOS 7.2 command layer: Form
+The alpha.7 shell also ports the practical HexaOS 7.2 command layer: Form
 content (`write`, `append`, `cat`, `head`, `copy`, `move`, `delete/recover`,
 `hexdump`, hashes), hardware inspection, calculator/string/math tools,
 Dimensions, history, system diagnostics, and the original fun utilities.
@@ -80,9 +83,12 @@ in-memory and reset at reboot. Persistent HexaFS block integration is the next
 native storage phase.
 
 Type `browser` or `desktop` in the booted kernel to enter the graphical
-HexaDisplay session. Inside it, use `1`, `2`, and `3` to navigate local pages,
-`N` to see the network-policy diagnostic, `Tab` to change focus, and `Q` to
-return to the command environment.
+HexaDisplay session. `desktop` opens the graphical Terminal while `browser`
+opens the Browser. Press backtick for the launcher; use `B`, `T`, `F`, `P`,
+`S`, and `I` to open apps, `Tab` to cycle, and the arrow keys to move the
+active window. `Esc` always returns to the text command environment; `Q` does
+the same outside Terminal. In Terminal, run `help` or `exit`. Browser keeps
+`1`, `2`, `3`, `H`, and `N` for local navigation.
 
 The complete 32-bit Diamond II environment remains runnable while its deeper
 drivers and games are ported:

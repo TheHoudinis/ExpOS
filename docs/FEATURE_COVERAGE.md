@@ -1,6 +1,6 @@
 # HexaOS feature coverage
 
-HexaOS v8.0.0-alpha.6 uses two runnable environments during migration. `make
+HexaOS v8.0.0-alpha.7 uses two runnable environments during migration. `make
 run` boots the new x86_64 Form-native kernel. `make run-alpha` boots the original
 32-bit Diamond II system with its existing storage image.
 
@@ -12,8 +12,9 @@ run` boots the new x86_64 Form-native kernel. `make run-alpha` boots the origina
 | Dimensions and policy | `dimensions`, `makedim`, `policy`, `pimp`, `journal` |
 | Capabilities | `grant`, `revoke`, `handles`, and `handlecheck` with requester-bound, scoped, expiring Form Handles |
 | Packages | `Ayo` boot Package Form, `packages`, and Go `ayo v2` with interactive TUI, offline/HTTPS catalogs, checksums/signatures, atomic dependency plans, all 11 commands, version constraints, dependency protection, reconciliation, capability merges, manifests and recovery |
-| Graphics | `HexaDisplay` Service Form; 800x600 XRGB8888 Bochs/QEMU framebuffer; owned buffers/surfaces; attach, damage, atomic commit, configure/frame/focus/key events, z-order and hit testing; `desktop`, `displayinfo` |
+| Graphics | `HexaDisplay` Service Form; 800x600 XRGB8888 Bochs/QEMU framebuffer; nine-surface desktop session; Form-owned Browser, Terminal, Forms, Packages, Settings and System windows; launcher, focus cycling, arrow-key movement; attach, damage, atomic commit, configure/frame/focus/key events, z-order and hit testing; VGA text-mode restoration on exit; `desktop`, `displayinfo` |
 | Browser | Native `Browser` Interface Form; bounded local HTML title/heading/paragraph/list/link parsing and graphical rendering; `hexa://` navigation with DIESE/PIMP explanation for blocked external networking |
+| Desktop apps | Graphical Terminal with bounded command input; Form registry; Ayo package catalog view; session Settings; live System Scope; shared launcher and dock |
 | Go | Shared ABI v1 call numbers and validation in Rust, tested `sdk/go/hexa` client and emulator, `GoABI` Interface Form and `goabi` diagnostics |
 | Hardware | `date/clock`, `cpuinfo`, `lspci`, `mem/free`, VGA and COM1 consoles, PS/2 and serial input |
 | System | `status`, `kstat`, `ps`, `dmesg/bootlog`, `ifconfig`, `netstat`, `mode`, `history`, `uptime`, `env`, `whoami`, `reboot`, `shutdown` |

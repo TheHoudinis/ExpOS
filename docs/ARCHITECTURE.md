@@ -25,7 +25,7 @@ firmware / GRUB (temporary)
 ## Implemented vertical slice
 
 1. The loader validates long-mode support and enters an identity-mapped x86_64
-   kernel with a 64 KiB bootstrap stack.
+   kernel with a 512 KiB bootstrap stack.
 2. The kernel validates Multiboot2, initializes polling serial and VGA output,
    and invokes `hexa_core::bootstrap_demo`.
 3. The demo creates a Root Form and Stable Dimension with independent FINs.
@@ -60,6 +60,11 @@ firmware / GRUB (temporary)
   mutate pending state, report damage, and publish atomically with `commit`.
   Focus, configure, frame-complete and key events are routed back to the owning
   FIN. The alpha renderer targets the mapped Bochs/QEMU XRGB framebuffer.
+- The desktop creates separate Browser, Terminal, Forms, Packages, Settings and
+  System surfaces, plus Root, panel and launcher surfaces. Visibility changes,
+  focus transitions and movement are published through HexaDisplay commits.
+  Leaving graphics restores the VGA mode 3 register set before the kernel
+  redraws its text console.
 - The Browser is an Interface Form above HexaDisplay. Its current document
   engine intentionally accepts local `hexa://` and `data:text/html` resources;
   external HTTPS, CSS and JavaScript are not claimed while the v8 network and
