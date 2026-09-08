@@ -66,22 +66,27 @@ firmware / GRUB (temporary)
   FIN. The alpha renderer targets the mapped Bochs/QEMU XRGB framebuffer.
 - The Prism desktop creates separate Browser, Terminal, Forms, Packages,
   Settings, System and Games surfaces, plus Root, panel and launcher surfaces.
-  Its original Windows-inspired shell provides a centered taskbar and Start
-  launcher without copied Microsoft assets. Four workspaces provide
+  Its original dark Win/KDE-style shell provides a left application launcher
+  and bottom panel without copied third-party assets. Four workspaces provide
   master-stack tiling, floating/fullscreen windows, dragging and overview.
-  Taskbar activation follows an existing app to its workspace. Each application receives a child Handle containing
+  Panel activation follows an existing app to its workspace or reopens a closed
+  app. Closing the final app leaves a valid empty workspace. Each application
+  receives a child Handle containing
   only Display and Input rights; the compositor checks it before visibility,
   geometry, commit or key routing. Leaving graphics restores the VGA mode 3
   register set before the kernel redraws its text console.
 - The PS/2 adapter enables the auxiliary device, validates ACKs and decodes
   synchronized three-byte packets. The compositor clamps a save-under cursor,
   hit-tests the topmost visible surface and checks its Input Handle before
-  routing motion or button events. Solid fills use clipped row writes, cursor
-  movement repaints only the cursor bounds, and games repaint only the active
-  window.
+  routing motion or button events. The buffer protocol represents XRGB8888,
+  ARGB8888 and RGB565 clients. Solid fills use clipped row writes; gradients,
+  alpha blending, rounded rectangles and Bresenham lines are native primitives;
+  cursor movement repaints only the cursor bounds; games repaint only the active window.
 - Session identity is intentionally separate from a Unix UID. The current
-  fixed alpha accounts select a DIESE authority input and gate shell mutations;
-  persistent account Forms, salted password hashes and lockout policy remain
+  built-in accounts and twelve-slot runtime registry select a DIESE authority
+  input and gate shell mutations. Operators can create/delete accounts and
+  change passwords; password-bearing commands are omitted from shell history.
+  Persistent account Forms, salted password hashes and lockout policy remain
   future storage/security work.
 - The Browser is an Interface Form above HexaDisplay. Its current document
   engine intentionally accepts local `hexa://` and `data:text/html` resources;
@@ -113,9 +118,10 @@ The command environment is deliberately backed by fixed-capacity, in-memory
 tables at this stage. Its mutations exercise the core semantics but are not
 durable until the HexaFS block driver and recovery path are connected.
 
-Alpha.10 includes the broad hardware, utility and Form-content command layer,
-Prism Arcade, command recall in both terminals, PS/2 pointer routing, graphical
-login, authority sessions, and the redesigned Prism shell. The Diamond II build is
+Alpha.11 includes the broad hardware, utility and Form-content command layer,
+Prism Arcade, command recall in both terminals, PS/2 pointer routing, runtime
+account management, expanded graphics primitives, and the redesigned dark
+Prism shell. The Diamond II build is
 also exposed through `make run-alpha`, providing a runnable migration fallback
 for networking, scheduling, ATA persistence and the games not yet redesigned
 around v8 semantics.

@@ -19,16 +19,18 @@ projects without making either legacy architecture the new system model:
 - `HexaDisplay` is a native 800x600 graphical server with Form-owned surfaces,
   buffers, damage, atomic commits, focus, z-order, pointer hit testing and input
   events.
-- the HexaDisplay desktop is the new Prism environment: an original,
-  Windows-inspired capability compositor with a centered taskbar and Start
-  launcher, plus four workspaces, master-stack tiling, floating/fullscreen
+- the HexaDisplay desktop is the new Prism environment: an original dark
+  Win/KDE-style capability compositor with a left application launcher and
+  bottom panel, plus four workspaces, master-stack tiling, floating/fullscreen
   windows, window dragging and overview. Its graphical Terminal, Browser, Form
   registry, Ayo package center, Settings, live System Scope, and native arcade
   containing playable Snake and Pong are fully clickable. Each application owns its
   surface and receives a narrow delegated Display/Input Handle.
 - a graphical Session Manager signs users in as Operator, Power or Guest and
-  applies that authority to shell capability decisions. PS/2 mouse packets are
-  decoded in the kernel and routed only to the Form under the pointer.
+  applies that authority to shell capability decisions. Its twelve-slot account
+  registry supports creating/deleting users and changing passwords at runtime.
+  PS/2 mouse packets are decoded in the kernel and routed only to the Form under
+  the pointer.
 - `Browser` is a native graphical Interface Form with a bounded local HTML
   parser, document renderer, links and policy-explained network restrictions.
 - `sdk/go/` defines and tests the capability-gated HexaOS Go ABI v1.
@@ -60,8 +62,8 @@ Open the package catalog and select a Form by number or name:
 ```
 
 `Browser` and `Snake`, for example, resolve and install their complete
-dependency plans in one atomic transaction. The built-in 20-package catalog
-also includes PrismDE, MouseKit, SessionManager, InputKit, DeveloperKit,
+dependency plans in one atomic transaction. The built-in 21-package catalog
+also includes PrismDE, RenderKit, MouseKit, SessionManager, InputKit, DeveloperKit,
 TextLab, VirtioBlock, and AudioKit. A remote checksummed catalog can be selected with
 `--registry https://.../catalog.json`; `--registry-key` additionally requires
 an Ed25519 signature.
@@ -83,12 +85,22 @@ launched QEMU.
 | `developer` | `prism` | Power user; destructive policy controls denied |
 | `guest` | `guest` | Read-only session |
 
-These are fixed demonstration credentials, not production authentication.
-Use `users`, `login`, `logout`, or `whoami` in the shell to inspect or change
-the current session. The command environment supports:
+These are built-in demonstration credentials, not production authentication.
+An Operator can manage additional runtime users with:
 
 ```text
-help clear echo about status whoami users login logout
+useradd <name> <operator|power|guest> <password>
+passwd <name> <new-password>
+userdel <name>
+```
+
+Password-bearing commands are excluded from command history. Accounts remain
+in memory until native HexaFS account persistence is implemented. Use `users`,
+`login`, `logout`, or `whoami` to inspect or change the current session. The
+command environment supports:
+
+```text
+help clear echo about status whoami users useradd userdel passwd login logout
 forms packages dimensions inspect journal policy handles relationships
 mkform retire activate reclaim resolve grant revoke handlecheck pimp
 relate unrelate
@@ -96,7 +108,7 @@ desktop browser games displayinfo goabi
 features kernelcaps ayo reboot shutdown
 ```
 
-The alpha.10 shell also ports the practical HexaOS 7.2 command layer: Form
+The alpha.11 shell also ports the practical HexaOS 7.2 command layer: Form
 content (`write`, `append`, `cat`, `head`, `copy`, `move`, `delete/recover`,
 `hexdump`, hashes), hardware inspection, calculator/string/math tools,
 Dimensions, system diagnostics, and the original fun utilities. Both the text
@@ -109,9 +121,11 @@ native storage phase.
 
 Type `browser` or `desktop` in the booted kernel to enter HexaDisplay.
 `desktop` opens the graphical Terminal while `browser` focuses the Browser.
-The mouse opens Start, selects taskbar and launcher apps, focuses windows,
-drags title bars, activates minimize/maximize/close controls, and selects Arcade
-games. Taskbar apps return to their existing workspace instead of being moved.
+The mouse opens the application launcher, selects panel and launcher apps,
+focuses windows, drags title bars, activates minimize/maximize/close controls,
+and selects Arcade games. Every app can close, an empty workspace stays empty,
+and selecting a closed app launches it again. Panel apps return to their
+existing workspace instead of being moved.
 The compositor bindings are `Super+Space` launcher, `Super+Enter` Terminal,
 `Super+B` Browser, `Super+1/2/3/4` workspaces, `Super+arrows` focus/workspace
 movement, `Super+F` fullscreen, `Super+V` floating, `Super+O` overview,
@@ -122,10 +136,12 @@ The graphical Terminal also accepts `ws1/ws2/ws3/ws4`, `games`, `float`,
 Arcade directly; choose `1` for Snake or `2` for Pong, steer with the arrows,
 pause with Space, reset with `R`, and return to the arcade with `M`.
 
-Rendering remains a software XRGB framebuffer rather than GPU acceleration,
-but solid rectangles now use clipped row writes, pointer motion uses cursor
-save-under instead of repainting the desktop, and active games repaint only
-their window. These changes keep interaction smooth under QEMU at 800x600.
+Rendering remains software-based rather than GPU accelerated, but HexaDisplay
+now negotiates XRGB8888, ARGB8888 and RGB565 buffers. The native renderer adds
+vertical gradients, alpha-blended rectangles, rounded rectangles and line
+drawing; solid fills use clipped row writes, pointer motion uses cursor
+save-under, and active games repaint only their window. These changes keep the
+black-by-default Prism shell responsive under QEMU at 800x600.
 
 The complete 32-bit Diamond II environment remains runnable while its deeper
 drivers and games are ported:

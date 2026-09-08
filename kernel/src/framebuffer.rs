@@ -17,17 +17,17 @@ const ENABLED: u16 = 0x01;
 const LFB_ENABLED: u16 = 0x40;
 
 pub mod color {
-    pub const BACKGROUND: u32 = 0x0010_1320;
-    pub const PANEL: u32 = 0x001C_2133;
-    pub const WINDOW: u32 = 0x00F4_F6FB;
-    pub const INK: u32 = 0x0018_1B25;
-    pub const MUTED: u32 = 0x0067_6F83;
+    pub const BACKGROUND: u32 = 0x0007_090E;
+    pub const PANEL: u32 = 0x0013_1720;
+    pub const WINDOW: u32 = 0x000D_1017;
+    pub const INK: u32 = 0x00E8_EBF2;
+    pub const MUTED: u32 = 0x0089_92A6;
     pub const PURPLE: u32 = 0x008A_5CF6;
     pub const GREEN: u32 = 0x0035_D07F;
     pub const CYAN: u32 = 0x004A_C7E8;
     pub const RED: u32 = 0x00F0_626F;
     pub const WHITE: u32 = 0x00FF_FFFF;
-    pub const BORDER: u32 = 0x00CB_D1E1;
+    pub const BORDER: u32 = 0x0030_3747;
 }
 
 pub fn available() -> bool {
@@ -98,6 +98,99 @@ pub fn outline(x: i32, y: i32, width: i32, height: i32, value: u32) {
     rect(x, y + height - 1, width, 1, value);
     rect(x, y, 1, height, value);
     rect(x + width - 1, y, 1, height, value);
+}
+
+pub fn vertical_gradient(x: i32, y: i32, width: i32, height: i32, top: u32, bottom: u32) {
+    if height <= 0 {
+        return;
+    }
+    let denominator = (height - 1).max(1) as u32;
+    for row in 0..height {
+        rect(
+            x,
+            y + row,
+            width,
+            1,
+            lerp_color(top, bottom, row as u32, denominator),
+        );
+    }
+}
+
+pub fn rounded_rect(x: i32, y: i32, width: i32, height: i32, radius: i32, value: u32) {
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    let radius = radius.max(0).min(width / 2).min(height / 2);
+    if radius == 0 {
+        rect(x, y, width, height, value);
+        return;
+    }
+    rect(x + radius, y, width - radius * 2, height, value);
+    rect(x, y + radius, width, height - radius * 2, value);
+    for row in 0..radius {
+        let dy = radius - row;
+        let mut dx = 0;
+        while (dx + 1) * (dx + 1) + dy * dy <= radius * radius {
+            dx += 1;
+        }
+        let inset = radius - dx;
+        rect(x + inset, y + row, width - inset * 2, 1, value);
+        rect(x + inset, y + height - row - 1, width - inset * 2, 1, value);
+    }
+}
+
+pub fn alpha_rect(x: i32, y: i32, width: i32, height: i32, value: u32, alpha: u8) {
+    let left = x.max(0).min(WIDTH as i32);
+    let top = y.max(0).min(HEIGHT as i32);
+    let right = x.saturating_add(width).max(0).min(WIDTH as i32);
+    let bottom = y.saturating_add(height).max(0).min(HEIGHT as i32);
+    for row in top..bottom {
+        for column in left..right {
+            pixel(column, row, blend(read_pixel(column, row), value, alpha));
+        }
+    }
+}
+
+pub fn line(mut x0: i32, mut y0: i32, x1: i32, y1: i32, value: u32) {
+    let dx = (x1 - x0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let dy = -(y1 - y0).abs();
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut error = dx + dy;
+    loop {
+        pixel(x0, y0, value);
+        if x0 == x1 && y0 == y1 {
+            break;
+        }
+        let twice = error * 2;
+        if twice >= dy {
+            error += dy;
+            x0 += sx;
+        }
+        if twice <= dx {
+            error += dx;
+            y0 += sy;
+        }
+    }
+}
+
+fn lerp_color(from: u32, to: u32, step: u32, total: u32) -> u32 {
+    let channel = |shift: u32| {
+        let start = ((from >> shift) & 0xFF) as i32;
+        let end = ((to >> shift) & 0xFF) as i32;
+        (start + (end - start) * step as i32 / total as i32) as u32
+    };
+    (channel(16) << 16) | (channel(8) << 8) | channel(0)
+}
+
+fn blend(background: u32, foreground: u32, alpha: u8) -> u32 {
+    let inverse = 255_u32 - alpha as u32;
+    let mix = |shift: u32| {
+        ((((background >> shift) & 0xFF) * inverse + ((foreground >> shift) & 0xFF) * alpha as u32)
+            / 255)
+            << shift
+    };
+    mix(16) | mix(8) | mix(0)
 }
 
 pub fn text(mut x: i32, mut y: i32, value: &str, color: u32, scale: i32) {

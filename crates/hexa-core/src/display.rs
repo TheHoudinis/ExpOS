@@ -41,7 +41,22 @@ pub struct BufferHandle {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BufferFormat {
     Xrgb8888,
+    Argb8888,
+    Rgb565,
     TextCells,
+}
+
+impl BufferFormat {
+    pub const fn bits_per_pixel(self) -> u8 {
+        match self {
+            Self::Xrgb8888 | Self::Argb8888 => 32,
+            Self::Rgb565 | Self::TextCells => 16,
+        }
+    }
+
+    pub const fn has_alpha(self) -> bool {
+        matches!(self, Self::Argb8888)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -512,5 +527,10 @@ mod tests {
             display.set_geometry(owner, surface, Rect::new(0, 0, 705, 400)),
             Err(DisplayError::BufferSizeMismatch)
         );
+        assert_eq!(BufferFormat::Xrgb8888.bits_per_pixel(), 32);
+        assert_eq!(BufferFormat::Argb8888.bits_per_pixel(), 32);
+        assert!(BufferFormat::Argb8888.has_alpha());
+        assert_eq!(BufferFormat::Rgb565.bits_per_pixel(), 16);
+        assert!(!BufferFormat::Rgb565.has_alpha());
     }
 }

@@ -6,6 +6,9 @@ browser
 q
 desktop
 help
+close
+t
+help
 float
 float
 full

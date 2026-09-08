@@ -4,6 +4,17 @@ expos
 help
 whoami
 users
+useradd artist power nightowl
+users
+login
+artist
+nightowl
+whoami
+login
+operator
+expos
+passwd artist starlight
+userdel artist
 status
 packages
 relationships Ayo

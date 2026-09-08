@@ -33,15 +33,15 @@ const TERMINAL_HISTORY: usize = 12;
 const CURSOR_WIDTH: usize = 14;
 const CURSOR_HEIGHT: usize = 20;
 const TASKBAR_Y: i16 = 550;
-const START_X: i16 = 204;
-const TASK_ICON_X: i16 = 252;
+const START_X: i16 = 18;
+const TASK_ICON_X: i16 = 66;
 const TASK_ICON_STEP: i16 = 44;
 const STABLE_FIN: Fin = Fin::from_u128(0x4449_4D00_0000_0000_0000_0000_0000_0001);
 
 const HOME: &str = "<title>Hexa Home</title><h1>Welcome to ExpOS</h1><p>A Form native desktop where identity capability state and relationships are first class.</p><h2>Explore locally</h2><a href='hexa://about'>1 About this browser</a><a href='hexa://packages'>2 Package Forms</a><a href='hexa://system'>3 System status</a><p>Use 1 2 3 or H inside Browser. External navigation is safely restricted.</p>";
 const ABOUT: &str = "<title>About</title><h1>Hexa Browser</h1><p>This native Interface Form parses bounded local HTML and renders it through HexaDisplay.</p><p>Surface state is owner scoped and becomes visible only after an atomic commit.</p><p>HTTPS CSS JavaScript and media are intentionally not claimed before networking isolation and a complete web engine exist.</p><a href='hexa://home'>H Home</a>";
-const BROWSER_PACKAGES: &str = "<title>Packages</title><h1>Prism Package Forms</h1><p>Ayo activates software as Forms rather than copying archives into Unix paths.</p><li>PrismDE desktop environment</li><li>MouseKit and SessionManager</li><li>GameHub Snake and Pong</li><li>DeveloperKit Go workspace</li><li>TextLab VirtioBlock and AudioKit</li><p>The built-in catalog contains 20 packages. Use the host ayo TUI to search and install complete dependency plans.</p><a href='hexa://home'>H Home</a>";
-const BROWSER_SYSTEM: &str = "<title>System</title><h1>System Scope</h1><p>HexaDisplay protocol version 1 is active.</p><li>800 by 600 XRGB framebuffer</li><li>Atomic attach damage and commit</li><li>Focus z order keyboard and pointer routing</li><li>PS2 mouse keyboard and serial input</li><p>Network Driver Form is not bound. External navigation remains restricted.</p><a href='hexa://home'>H Home</a>";
+const BROWSER_PACKAGES: &str = "<title>Packages</title><h1>Prism Package Forms</h1><p>Ayo activates software as Forms rather than copying archives into Unix paths.</p><li>PrismDE and RenderKit</li><li>MouseKit and SessionManager</li><li>GameHub Snake and Pong</li><li>DeveloperKit Go workspace</li><li>TextLab VirtioBlock and AudioKit</li><p>The built-in catalog contains 21 packages. Use the host ayo TUI to search and install complete dependency plans.</p><a href='hexa://home'>H Home</a>";
+const BROWSER_SYSTEM: &str = "<title>System</title><h1>System Scope</h1><p>HexaDisplay protocol version 1 is active.</p><li>800 by 600 XRGB framebuffer</li><li>XRGB ARGB and RGB565 buffer protocols</li><li>Gradient alpha rounded and line primitives</li><li>Atomic commit focus keyboard and pointer routing</li><li>PS2 mouse keyboard and serial input</li><p>Network Driver Form is not bound. External navigation remains restricted.</p><a href='hexa://home'>H Home</a>";
 const NETWORK_BLOCKED: &str = "<title>Network restricted</title><h1>Navigation blocked</h1><p>DIESE denied external navigation because no v8 Network Driver Form is bound and PIMP network policy is restricted.</p><p>This is a safe fallback not a fake internet connection.</p><a href='hexa://home'>H Home</a>";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -334,7 +334,7 @@ impl DesktopState {
                 DISPLAY_FIN,
                 "ExpOS Start",
                 SurfaceRole::Popup,
-                Rect::new(190, 112, 420, 428),
+                Rect::new(18, 112, 430, 428),
             )
             .expect("desktop launcher surface");
         let _ = server.attach(DISPLAY_FIN, background, buffer(1, DISPLAY_FIN, 800, 600));
@@ -342,7 +342,7 @@ impl DesktopState {
         let _ = server.attach(
             DISPLAY_FIN,
             launcher_surface,
-            buffer(10, DISPLAY_FIN, 420, 428),
+            buffer(10, DISPLAY_FIN, 430, 428),
         );
         let _ = server.set_visible(DISPLAY_FIN, launcher_surface, false);
 
@@ -466,11 +466,11 @@ impl DesktopState {
             return false;
         }
         if self.launcher_open {
-            if (190..610).contains(&x) && (112..540).contains(&y) {
+            if (18..448).contains(&x) && (112..540).contains(&y) {
                 for (index, app) in AppKind::ALL.iter().copied().enumerate() {
                     let column = index % 2;
                     let row = index / 2;
-                    let left = 214 + column as i16 * 190;
+                    let left = 42 + column as i16 * 190;
                     let top = 190 + row as i16 * 63;
                     if (left..left + 170).contains(&x) && (top..top + 50).contains(&y) {
                         self.focus_existing(app);
@@ -549,6 +549,11 @@ impl DesktopState {
             && (!self.fullscreen || app == self.active)
     }
 
+    fn has_active_window(&self) -> bool {
+        self.app_open[self.active.index()]
+            && self.app_workspaces[self.active.index()] == self.workspace
+    }
+
     fn sync_visibility(&mut self) {
         for app in AppKind::ALL {
             if !self.authorized(app, Operations::DISPLAY) {
@@ -577,6 +582,7 @@ impl DesktopState {
     fn focus_existing(&mut self, next: AppKind) {
         if !self.app_open[next.index()] {
             self.switch_to(next);
+            slog!("HEXA_APP_REOPENED {}\r\n", next.title());
             return;
         }
         self.workspace = self.app_workspaces[next.index()];
@@ -608,37 +614,43 @@ impl DesktopState {
         self.workspace = workspace;
         self.fullscreen = false;
         self.overview_open = false;
-        let next = AppKind::ALL
-            .iter()
-            .copied()
-            .find(|app| self.app_open[app.index()] && self.app_workspaces[app.index()] == workspace)
-            .unwrap_or(AppKind::Terminal);
-        self.app_open[next.index()] = true;
-        self.app_workspaces[next.index()] = workspace;
-        self.active = next;
+        let next = AppKind::ALL.iter().copied().find(|app| {
+            self.app_open[app.index()] && self.app_workspaces[app.index()] == workspace
+        });
+        if let Some(next) = next {
+            self.active = next;
+        }
         self.sync_visibility();
         self.arrange_windows();
-        let _ = self.server.focus(self.active_surface());
+        if self.has_active_window() {
+            let _ = self.server.focus(self.active_surface());
+        }
     }
 
     fn close_active(&mut self) {
+        if !self.has_active_window() {
+            return;
+        }
         self.app_open[self.active.index()] = false;
+        slog!("HEXA_APP_CLOSED {}\r\n", self.active.title());
         self.fullscreen = false;
         let replacement = AppKind::ALL.iter().copied().find(|app| {
             self.app_open[app.index()] && self.app_workspaces[app.index()] == self.workspace
         });
-        let next = replacement.unwrap_or(AppKind::Terminal);
-        if replacement.is_none() {
-            self.app_open[next.index()] = true;
-            self.app_workspaces[next.index()] = self.workspace;
+        if let Some(next) = replacement {
+            self.active = next;
         }
-        self.active = next;
         self.sync_visibility();
         self.arrange_windows();
-        let _ = self.server.focus(self.active_surface());
+        if self.has_active_window() {
+            let _ = self.server.focus(self.active_surface());
+        }
     }
 
     fn toggle_fullscreen(&mut self) {
+        if !self.has_active_window() {
+            return;
+        }
         self.fullscreen = !self.fullscreen;
         self.sync_visibility();
         self.arrange_windows();
@@ -646,6 +658,9 @@ impl DesktopState {
     }
 
     fn toggle_floating(&mut self) {
+        if !self.has_active_window() {
+            return;
+        }
         self.fullscreen = false;
         let index = self.active.index();
         self.app_floating[index] = !self.app_floating[index];
@@ -688,6 +703,9 @@ impl DesktopState {
     }
 
     fn move_active(&mut self, dx: i16, dy: i16) {
+        if !self.has_active_window() {
+            return;
+        }
         if !self.app_floating[self.active.index()] {
             self.toggle_floating();
         }
@@ -705,7 +723,7 @@ impl DesktopState {
     }
 
     fn arrange_windows(&mut self) {
-        if self.fullscreen {
+        if self.fullscreen && self.has_active_window() {
             self.set_app_geometry(self.active, Rect::new(8, 8, 784, 534));
             return;
         }
@@ -718,7 +736,7 @@ impl DesktopState {
                     && !self.app_floating[app.index()]
             })
             .count();
-        let master = if !self.app_floating[self.active.index()] {
+        let master = if self.has_active_window() && !self.app_floating[self.active.index()] {
             Some(self.active)
         } else {
             AppKind::ALL.iter().copied().find(|app| {
@@ -802,6 +820,7 @@ impl DesktopState {
                     TerminalAction::Float => self.toggle_floating(),
                     TerminalAction::Fullscreen => self.toggle_fullscreen(),
                     TerminalAction::Overview => self.overview_open = true,
+                    TerminalAction::Close => self.close_active(),
                     TerminalAction::Exit => self.should_exit = true,
                 }
             }
@@ -878,6 +897,7 @@ enum TerminalAction {
     Float,
     Fullscreen,
     Overview,
+    Close,
     Exit,
 }
 
@@ -960,7 +980,10 @@ fn run_session(input: &mut Input, start_app: AppKind, session: crate::session::S
             render(&mut desktop);
             continue;
         }
-        if desktop.active == AppKind::Games && desktop.games.handle_key(key) {
+        if desktop.active == AppKind::Games
+            && desktop.app_is_visible(AppKind::Games)
+            && desktop.games.handle_key(key)
+        {
             render(&mut desktop);
             continue;
         }
@@ -1001,7 +1024,11 @@ fn run_session(input: &mut Input, start_app: AppKind, session: crate::session::S
             KEY_RIGHT => desktop.move_active(12, 0),
             KEY_UP => desktop.move_active(0, -12),
             KEY_DOWN => desktop.move_active(0, 12),
-            _ if desktop.active == AppKind::Terminal => desktop.handle_terminal_key(key),
+            _ if desktop.active == AppKind::Terminal
+                && desktop.app_is_visible(AppKind::Terminal) =>
+            {
+                desktop.handle_terminal_key(key)
+            }
             b'q' | b'Q' => break,
             _ => {
                 if let Some(app) = app_shortcut(key) {
@@ -1057,7 +1084,7 @@ fn terminal_action(command: &[u8]) -> TerminalAction {
     let trimmed = trim_ascii(command);
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case(b"help") {
         TerminalAction::Message(
-            "COMMANDS: STATUS FORMS PACKAGES BROWSER GAMES SETTINGS SYSTEM WS1 WS2 WS3 WS4 FLOAT FULL OVERVIEW CLEAR EXIT",
+            "COMMANDS: STATUS FORMS PACKAGES BROWSER GAMES SETTINGS SYSTEM WS1 WS2 WS3 WS4 FLOAT FULL OVERVIEW CLOSE CLEAR EXIT",
         )
     } else if trimmed.eq_ignore_ascii_case(b"status") {
         TerminalAction::Message("EXPOS ONLINE. HEXADISPLAY V1. NETWORK RESTRICTED.")
@@ -1087,6 +1114,8 @@ fn terminal_action(command: &[u8]) -> TerminalAction {
         TerminalAction::Fullscreen
     } else if trimmed.eq_ignore_ascii_case(b"overview") {
         TerminalAction::Overview
+    } else if trimmed.eq_ignore_ascii_case(b"close") {
+        TerminalAction::Close
     } else if trimmed.eq_ignore_ascii_case(b"clear") {
         TerminalAction::Clear
     } else if trimmed.eq_ignore_ascii_case(b"exit") || trimmed.eq_ignore_ascii_case(b"shell") {
@@ -1118,24 +1147,19 @@ fn buffer(id: u32, owner: Fin, width: u16, height: u16) -> BufferHandle {
 
 fn render(desktop: &mut DesktopState) {
     desktop.cursor.invalidate();
-    framebuffer::clear(0x0010_376F);
-    for row in 0..22 {
-        framebuffer::rect(
-            0,
-            row * 25,
-            800,
-            25,
-            0x000A_316C + (row as u32 * 0x0000_0203),
-        );
+    framebuffer::vertical_gradient(0, 0, 800, 550, 0x0005_0710, 0x0010_0B1B);
+    framebuffer::alpha_rect(430, 40, 330, 420, 0x0038_1668, 80);
+    framebuffer::alpha_rect(510, 105, 210, 300, 0x0000_7894, 42);
+    for offset in 0..7 {
+        let x = 470 + offset * 42;
+        framebuffer::line(x, 65, x - 120, 470, 0x0029_2444);
     }
-    framebuffer::rect(505, 88, 112, 150, 0x0027_75D3);
-    framebuffer::rect(625, 70, 130, 168, 0x0034_8BE8);
-    framebuffer::rect(505, 246, 112, 150, 0x001E_66BF);
-    framebuffer::rect(625, 246, 130, 168, 0x0028_7DD8);
-    framebuffer::rect(497, 80, 4, 340, 0x0067_B8FF);
-    framebuffer::rect(20, 22, 74, 58, 0x0018_4F98);
-    framebuffer::text(31, 42, "FORMS", color::WHITE, 1);
-    framebuffer::text(25, 88, "SYSTEM FORMS", 0x00DB_EBFF, 1);
+    framebuffer::line(350, 470, 760, 280, 0x0031_2B52);
+    framebuffer::rounded_rect(20, 22, 76, 72, 10, 0x0012_1722);
+    framebuffer::outline(20, 22, 76, 72, 0x0030_3850);
+    framebuffer::rounded_rect(42, 34, 32, 32, 8, color::PURPLE);
+    framebuffer::text(53, 45, "F", color::WHITE, 1);
+    framebuffer::text(28, 80, "FORMS", color::INK, 1);
     draw_panel(desktop);
 
     if desktop.overview_open {
@@ -1191,9 +1215,9 @@ fn draw_app(desktop: &DesktopState, app: AppKind, focused: bool) {
 }
 
 fn draw_panel(desktop: &DesktopState) {
-    framebuffer::rect(608, 14, 174, 34, 0x00E7_EFF9);
-    framebuffer::outline(608, 14, 174, 34, 0x00A7_C9EE);
-    framebuffer::text(621, 27, "DESKTOP", 0x0029_4463, 1);
+    framebuffer::rounded_rect(608, 14, 174, 34, 10, 0x0012_1721);
+    framebuffer::outline(608, 14, 174, 34, color::BORDER);
+    framebuffer::text(621, 27, "SPACE", color::MUTED, 1);
     for workspace in 1..=4 {
         let x = 681 + (workspace - 1) * 23;
         framebuffer::rect(
@@ -1202,9 +1226,9 @@ fn draw_panel(desktop: &DesktopState) {
             18,
             18,
             if desktop.workspace == workspace as u8 {
-                0x0000_78D4
+                color::PURPLE
             } else {
-                0x00C5_D7EA
+                0x0025_2B38
             },
         );
         draw_number(x + 7, 27, workspace as u64, color::WHITE);
@@ -1216,38 +1240,42 @@ fn draw_window(rect: Rect, title: &str, focused: bool, handle_id: u32) {
     let y = rect.y as i32;
     let width = rect.width as i32;
     let height = rect.height as i32;
-    framebuffer::rect(x - 6, y + 7, width + 12, height + 7, 0x0010_2A50);
+    framebuffer::rounded_rect(x - 6, y + 7, width + 12, height + 7, 8, 0x0002_0306);
     framebuffer::rect(x, y, width, height, color::WINDOW);
     framebuffer::outline(
         x,
         y,
         width,
         height,
-        if focused { 0x0000_78D4 } else { 0x0097_A8BA },
+        if focused {
+            color::PURPLE
+        } else {
+            color::BORDER
+        },
     );
     if focused {
-        framebuffer::outline(x - 1, y - 1, width + 2, height + 2, 0x0066_ADE8);
+        framebuffer::outline(x - 1, y - 1, width + 2, height + 2, 0x005E_42A6);
     }
-    framebuffer::rect(x, y, width, 36, 0x00F3_F6FA);
-    framebuffer::rect(x + 12, y + 10, 16, 16, 0x0000_78D4);
+    framebuffer::rect(x, y, width, 36, 0x0015_1922);
+    framebuffer::rect(x + 12, y + 10, 16, 16, color::PURPLE);
     framebuffer::text(x + 17, y + 15, "E", color::WHITE, 1);
-    framebuffer::text(x + 38, y + 13, title, 0x0021_2A35, 1);
+    framebuffer::text(x + 38, y + 13, title, color::INK, 1);
     if width >= 430 {
-        framebuffer::text(x + width - 188, y + 13, "HANDLE", 0x0071_7E8C, 1);
-        draw_number(x + width - 137, y + 13, handle_id as u64, 0x0000_78D4);
+        framebuffer::text(x + width - 188, y + 13, "HANDLE", color::MUTED, 1);
+        draw_number(x + width - 137, y + 13, handle_id as u64, color::CYAN);
     }
-    framebuffer::rect(x + width - 126, y, 42, 36, 0x00F3_F6FA);
-    framebuffer::text(x + width - 110, y + 13, "_", 0x0048_535F, 1);
-    framebuffer::rect(x + width - 84, y, 42, 36, 0x00F3_F6FA);
-    framebuffer::outline(x + width - 69, y + 11, 12, 10, 0x0048_535F);
+    framebuffer::rect(x + width - 126, y, 42, 36, 0x0015_1922);
+    framebuffer::text(x + width - 110, y + 13, "_", color::MUTED, 1);
+    framebuffer::rect(x + width - 84, y, 42, 36, 0x0015_1922);
+    framebuffer::outline(x + width - 69, y + 11, 12, 10, color::MUTED);
     framebuffer::rect(
         x + width - 42,
         y,
         42,
         36,
-        if focused { 0x00E8_F0F9 } else { 0x00F3_F6FA },
+        if focused { 0x0022_1823 } else { 0x0015_1922 },
     );
-    framebuffer::text(x + width - 25, y + 13, "X", 0x0050_5A66, 1);
+    framebuffer::text(x + width - 25, y + 13, "X", color::RED, 1);
 }
 
 fn draw_compact_app(rect: Rect, app: AppKind, desktop: &DesktopState, focused: bool) {
@@ -1255,14 +1283,7 @@ fn draw_compact_app(rect: Rect, app: AppKind, desktop: &DesktopState, focused: b
     let y = rect.y as i32;
     let width = rect.width as i32;
     let height = rect.height as i32;
-    let dark = app == AppKind::Terminal;
-    framebuffer::rect(
-        x + 12,
-        y + 48,
-        width - 24,
-        height - 63,
-        if dark { 0x0008_0B12 } else { 0x00EA_EDF4 },
-    );
+    framebuffer::rect(x + 12, y + 48, width - 24, height - 63, 0x0008_0B12);
     framebuffer::rect(x + 25, y + 66, 6, 54, app.accent());
     framebuffer::text(
         x + 44,
@@ -1272,13 +1293,7 @@ fn draw_compact_app(rect: Rect, app: AppKind, desktop: &DesktopState, focused: b
         if width >= 380 { 2 } else { 1 },
     );
     if width >= 330 {
-        framebuffer::text(
-            x + 44,
-            y + 98,
-            app.summary(),
-            if dark { color::MUTED } else { color::INK },
-            1,
-        );
+        framebuffer::text(x + 44, y + 98, app.summary(), color::INK, 1);
     }
     framebuffer::text(
         x + 28,
@@ -1318,7 +1333,7 @@ fn draw_browser(rect: Rect, document: &Document) {
     let y = rect.y as i32;
     let width = rect.width as i32;
     let bottom = y + rect.height as i32;
-    framebuffer::rect(x + 20, y + 52, width - 40, 32, 0x00E7_EAF2);
+    framebuffer::rect(x + 20, y + 52, width - 40, 32, 0x0018_1D28);
     framebuffer::outline(x + 20, y + 52, width - 40, 32, color::BORDER);
     framebuffer::text(x + 34, y + 63, document.url(), color::INK, 1);
     framebuffer::rect(x + 20, y + 94, width - 40, 1, color::BORDER);
@@ -1464,7 +1479,7 @@ fn draw_forms(rect: Rect) {
     ];
     for (index, (name, kind, status, status_color)) in rows.iter().enumerate() {
         let row_y = y + 116 + index as i32 * 43;
-        framebuffer::rect(x + 28, row_y, rect.width as i32 - 56, 34, 0x00EA_EDF4);
+        framebuffer::rect(x + 28, row_y, rect.width as i32 - 56, 34, 0x0015_1922);
         framebuffer::rect(x + 28, row_y, 5, 34, *status_color);
         framebuffer::text(x + 46, row_y + 12, name, color::INK, 1);
         framebuffer::text(x + 260, row_y + 12, kind, color::MUTED, 1);
@@ -1479,6 +1494,7 @@ fn draw_forms(rect: Rect) {
 fn draw_packages(rect: Rect) {
     let x = rect.x as i32;
     let y = rect.y as i32;
+    let content_width = rect.width as i32 - 56;
     framebuffer::text(x + 28, y + 58, "AYO PACKAGE CENTER", color::PURPLE, 2);
     framebuffer::text(
         x + 28,
@@ -1490,6 +1506,7 @@ fn draw_packages(rect: Rect) {
     package_card(
         x + 28,
         y + 116,
+        content_width,
         "CORETOOLS",
         "INSTALLED",
         "DIAGNOSTICS AND REPAIR",
@@ -1497,13 +1514,15 @@ fn draw_packages(rect: Rect) {
     package_card(
         x + 28,
         y + 174,
-        "HEXADISPLAY",
+        content_width,
+        "HEXADISPLAY + RENDERKIT",
         "INSTALLED",
-        "FORM NATIVE DISPLAY SERVICE",
+        "DISPLAY FORM + GRAPHICS PRIMITIVES",
     );
     package_card(
         x + 28,
         y + 232,
+        content_width,
         "GAMEHUB + SNAKE + PONG",
         "AVAILABLE",
         "NATIVE PLAYABLE GAME FORMS",
@@ -1511,9 +1530,10 @@ fn draw_packages(rect: Rect) {
     package_card(
         x + 28,
         y + 290,
-        "PRISMDE + SESSION + MOUSEKIT",
+        content_width,
+        "PRISM + SESSION",
         "AVAILABLE",
-        "DESKTOP IDENTITY AND POINTER",
+        "DARK DE MOUSE AND IDENTITY",
     );
     framebuffer::text(
         x + 34,
@@ -1535,13 +1555,13 @@ fn draw_packages(rect: Rect) {
     );
 }
 
-fn package_card(x: i32, y: i32, name: &str, status: &str, detail: &str) {
-    framebuffer::rect(x, y, 648, 46, 0x00EA_EDF4);
-    framebuffer::outline(x, y, 648, 46, color::BORDER);
+fn package_card(x: i32, y: i32, width: i32, name: &str, status: &str, detail: &str) {
+    framebuffer::rect(x, y, width, 46, 0x0015_1922);
+    framebuffer::outline(x, y, width, 46, color::BORDER);
     framebuffer::text(x + 14, y + 11, name, color::INK, 1);
     framebuffer::text(x + 178, y + 11, detail, color::MUTED, 1);
     framebuffer::text(
-        x + 540,
+        x + width - 108,
         y + 28,
         status,
         if status == "INSTALLED" {
@@ -1556,33 +1576,82 @@ fn package_card(x: i32, y: i32, name: &str, status: &str, detail: &str) {
 fn draw_settings(rect: Rect) {
     let x = rect.x as i32;
     let y = rect.y as i32;
+    let content_width = rect.width as i32 - 56;
     framebuffer::text(x + 28, y + 58, "DESKTOP SETTINGS", color::PURPLE, 2);
     framebuffer::text(x + 28, y + 91, "SESSION", color::MUTED, 1);
-    setting_row(x + 28, y + 112, "RENDERER", "HEXADISPLAY V1", true);
-    setting_row(x + 28, y + 157, "RESOLUTION", "800 X 600 XRGB", true);
-    setting_row(x + 28, y + 202, "THEME", "STABLE DIMENSION", true);
-    setting_row(x + 28, y + 247, "INPUT", "PS2 PLUS SERIAL", true);
-    setting_row(x + 28, y + 292, "NETWORK", "RESTRICTED", false);
-    setting_row(x + 28, y + 337, "POLICY", "DIESE ENFORCED", true);
+    setting_row(
+        x + 28,
+        y + 112,
+        content_width,
+        "RENDERER",
+        "HEXADISPLAY V1",
+        true,
+    );
+    setting_row(
+        x + 28,
+        y + 157,
+        content_width,
+        "RESOLUTION",
+        "800 X 600 XRGB",
+        true,
+    );
+    setting_row(x + 28, y + 202, content_width, "THEME", "PRISM DARK", true);
+    setting_row(
+        x + 28,
+        y + 247,
+        content_width,
+        "INPUT",
+        "PS2 PLUS SERIAL",
+        true,
+    );
+    setting_row(
+        x + 28,
+        y + 292,
+        content_width,
+        "USERS",
+        "CLI USER MANAGER",
+        true,
+    );
+    setting_row(
+        x + 28,
+        y + 337,
+        content_width,
+        "POLICY",
+        "DIESE ENFORCED",
+        true,
+    );
+    framebuffer::text(
+        x + rect.width as i32 - 180,
+        y + 305,
+        "SLOTS",
+        color::MUTED,
+        1,
+    );
+    draw_number(
+        x + rect.width as i32 - 92,
+        y + 305,
+        crate::session::account_count() as u64,
+        color::CYAN,
+    );
     app_footer(
         rect,
         "SETTINGS ARE SESSION LOCAL  TAB NEXT  ARROWS MOVE  Q SHELL",
     );
 }
 
-fn setting_row(x: i32, y: i32, label: &str, value: &str, enabled: bool) {
-    framebuffer::rect(x, y, 648, 35, 0x00EA_EDF4);
+fn setting_row(x: i32, y: i32, width: i32, label: &str, value: &str, enabled: bool) {
+    framebuffer::rect(x, y, width, 35, 0x0015_1922);
     framebuffer::text(x + 15, y + 13, label, color::INK, 1);
     framebuffer::text(x + 235, y + 13, value, color::MUTED, 1);
     framebuffer::rect(
-        x + 600,
+        x + width - 48,
         y + 11,
         27,
         13,
         if enabled { color::GREEN } else { color::RED },
     );
     framebuffer::rect(
-        x + if enabled { 616 } else { 602 },
+        x + width - if enabled { 32 } else { 46 },
         y + 13,
         9,
         9,
@@ -1593,20 +1662,58 @@ fn setting_row(x: i32, y: i32, label: &str, value: &str, enabled: bool) {
 fn draw_system(rect: Rect, desktop: &DesktopState) {
     let x = rect.x as i32;
     let y = rect.y as i32;
+    let metric_width = (rect.width as i32 - 68) / 2;
+    let right_x = x + 40 + metric_width;
     framebuffer::text(x + 28, y + 58, "SYSTEM SCOPE", color::PURPLE, 2);
     framebuffer::text(x + 28, y + 88, "LIVE SESSION TELEMETRY", color::MUTED, 1);
     metric(
         x + 28,
         y + 120,
+        metric_width,
         "DISPLAY PROTOCOL",
         "VERSION 1",
         color::GREEN,
     );
-    metric(x + 352, y + 120, "FRAMEBUFFER", "800 X 600", color::CYAN);
-    metric(x + 28, y + 196, "SURFACES", "10 FORM OWNED", color::PURPLE);
-    metric(x + 352, y + 196, "GO ABI", "VERSION 1", color::GREEN);
-    metric(x + 28, y + 272, "INPUT", "PS2 MOUSE + KEYS", color::CYAN);
-    metric(x + 352, y + 272, "NETWORK", "RESTRICTED", color::RED);
+    metric(
+        right_x,
+        y + 120,
+        metric_width,
+        "FRAMEBUFFER",
+        "800 X 600",
+        color::CYAN,
+    );
+    metric(
+        x + 28,
+        y + 196,
+        metric_width,
+        "SURFACES",
+        "10 FORM OWNED",
+        color::PURPLE,
+    );
+    metric(
+        right_x,
+        y + 196,
+        metric_width,
+        "GO ABI",
+        "VERSION 1",
+        color::GREEN,
+    );
+    metric(
+        x + 28,
+        y + 272,
+        metric_width,
+        "INPUT",
+        "PS2 MOUSE + KEYS",
+        color::CYAN,
+    );
+    metric(
+        right_x,
+        y + 272,
+        metric_width,
+        "NETWORK",
+        "RESTRICTED",
+        color::RED,
+    );
     framebuffer::text(x + 34, y + 365, "ATOMIC COMMITS", color::MUTED, 1);
     draw_number(
         x + 180,
@@ -1622,8 +1729,8 @@ fn draw_system(rect: Rect, desktop: &DesktopState) {
     );
 }
 
-fn metric(x: i32, y: i32, label: &str, value: &str, accent: u32) {
-    framebuffer::rect(x, y, 306, 60, 0x00EA_EDF4);
+fn metric(x: i32, y: i32, width: i32, label: &str, value: &str, accent: u32) {
+    framebuffer::rect(x, y, width, 60, 0x0015_1922);
     framebuffer::rect(x, y, 5, 60, accent);
     framebuffer::text(x + 18, y + 13, label, color::MUTED, 1);
     framebuffer::text(x + 18, y + 34, value, accent, 1);
@@ -1632,37 +1739,36 @@ fn metric(x: i32, y: i32, label: &str, value: &str, accent: u32) {
 fn app_footer(rect: Rect, text: &str) {
     let x = rect.x as i32;
     let y = rect.y as i32 + rect.height as i32 - 28;
-    framebuffer::rect(x + 1, y, rect.width as i32 - 2, 27, 0x00E7_EAF2);
+    framebuffer::rect(x + 1, y, rect.width as i32 - 2, 27, 0x0013_1720);
     framebuffer::text(x + 16, y + 10, text, color::MUTED, 1);
 }
 
 fn draw_dock(desktop: &DesktopState) {
-    framebuffer::rect(0, TASKBAR_Y as i32, 800, 50, 0x00E9_F1FA);
-    framebuffer::rect(0, TASKBAR_Y as i32, 800, 1, 0x00B6_D1EC);
+    framebuffer::alpha_rect(0, TASKBAR_Y as i32, 800, 50, 0x0012_1620, 238);
+    framebuffer::rect(0, TASKBAR_Y as i32, 800, 1, color::BORDER);
     let start_color = if desktop.launcher_open {
-        0x00D2_E7FA
+        0x0032_2654
     } else {
-        0x00E9_F1FA
+        0x0017_1B25
     };
-    framebuffer::rect(START_X as i32, 556, 38, 38, start_color);
-    for (x, y) in [(213, 564), (224, 564), (213, 575), (224, 575)] {
-        framebuffer::rect(x, y, 9, 9, 0x0000_78D4);
-    }
+    framebuffer::rounded_rect(START_X as i32, 556, 38, 38, 8, start_color);
+    framebuffer::rounded_rect(27, 565, 20, 20, 6, color::PURPLE);
+    framebuffer::text(34, 572, "E", color::WHITE, 1);
     for app in AppKind::ALL {
         let x = TASK_ICON_X as i32 + app.index() as i32 * TASK_ICON_STEP as i32;
-        if app == desktop.active {
-            framebuffer::rect(x, 556, 38, 38, 0x00D2_E7FA);
+        if app == desktop.active && desktop.app_is_visible(app) {
+            framebuffer::rounded_rect(x, 556, 38, 38, 8, 0x0028_213C);
         }
         framebuffer::rect(x + 10, 564, 18, 18, app.accent());
         framebuffer::text(x + 16, 570, app.shortcut(), color::WHITE, 1);
         if desktop.app_open[app.index()] {
-            framebuffer::rect(x + 10, 591, 18, 2, 0x0000_78D4);
+            framebuffer::rect(x + 10, 591, 18, 2, color::PURPLE);
         }
     }
-    framebuffer::text(606, 568, "NET --", 0x003E_5268, 1);
-    framebuffer::text(658, 568, "VOL", 0x003E_5268, 1);
-    framebuffer::text(704, 564, desktop.session.name(), 0x0029_4463, 1);
-    framebuffer::text(704, 580, desktop.session.authority_name(), 0x005F_7489, 1);
+    framebuffer::text(606, 568, "NET --", color::MUTED, 1);
+    framebuffer::text(658, 568, "VOL", color::MUTED, 1);
+    framebuffer::text(704, 564, desktop.session.name(), color::INK, 1);
+    framebuffer::text(704, 580, desktop.session.authority_name(), color::MUTED, 1);
 }
 
 fn draw_overview(desktop: &DesktopState) {
@@ -1731,17 +1837,17 @@ fn draw_overview(desktop: &DesktopState) {
 }
 
 fn draw_launcher(desktop: &DesktopState) {
-    framebuffer::rect(198, 120, 420, 428, 0x0010_2A50);
-    framebuffer::rect(190, 112, 420, 428, 0x00F3_F7FC);
-    framebuffer::outline(190, 112, 420, 428, 0x009D_C0E3);
-    framebuffer::text(214, 132, "EXPOS START", 0x0022_3347, 2);
-    framebuffer::rect(214, 158, 372, 25, color::WHITE);
-    framebuffer::outline(214, 158, 372, 25, 0x00B8_CBDD);
-    framebuffer::text(226, 168, "SEARCH FORMS AND CAPABILITIES", 0x0070_8091, 1);
+    framebuffer::rounded_rect(26, 120, 430, 428, 12, 0x0002_0306);
+    framebuffer::rounded_rect(18, 112, 430, 428, 12, 0x0011_151E);
+    framebuffer::outline(18, 112, 430, 428, color::BORDER);
+    framebuffer::text(42, 132, "PRISM APPLICATIONS", color::INK, 2);
+    framebuffer::rounded_rect(42, 158, 382, 25, 6, 0x001C_212D);
+    framebuffer::outline(42, 158, 382, 25, color::BORDER);
+    framebuffer::text(54, 168, "SEARCH FORMS AND CAPABILITIES", color::MUTED, 1);
     for (index, app) in AppKind::ALL.iter().copied().enumerate() {
         let column = index % 2;
         let row = index / 2;
-        let x = 214 + column as i32 * 190;
+        let x = 42 + column as i32 * 190;
         let y = 190 + row as i32 * 63;
         framebuffer::rect(
             x,
@@ -1749,22 +1855,22 @@ fn draw_launcher(desktop: &DesktopState) {
             170,
             50,
             if app == desktop.active {
-                0x00D9_ECFB
+                0x0030_2550
             } else {
-                0x00E9_F1F9
+                0x0018_1D28
             },
         );
         framebuffer::rect(x + 10, y + 9, 30, 30, app.accent());
         framebuffer::text(x + 22, y + 20, app.shortcut(), color::WHITE, 1);
-        framebuffer::text(x + 50, y + 14, app.title(), 0x0029_394B, 1);
-        framebuffer::text(x + 50, y + 31, "FORM APP", 0x0070_8091, 1);
+        framebuffer::text(x + 50, y + 14, app.title(), color::INK, 1);
+        framebuffer::text(x + 50, y + 31, "FORM APP", color::MUTED, 1);
     }
-    framebuffer::rect(190, 470, 420, 70, 0x00E3_ECF6);
-    framebuffer::rect(214, 489, 30, 30, 0x0000_78D4);
-    framebuffer::text(225, 500, "O", color::WHITE, 1);
-    framebuffer::text(256, 491, desktop.session.name(), 0x0029_394B, 1);
-    framebuffer::text(256, 508, desktop.session.authority_name(), 0x006D_7E90, 1);
-    framebuffer::text(493, 500, "ESC CLOSE", 0x006D_7E90, 1);
+    framebuffer::rect(18, 470, 430, 70, 0x000B_0E14);
+    framebuffer::rounded_rect(42, 489, 30, 30, 8, color::PURPLE);
+    framebuffer::text(53, 500, "O", color::WHITE, 1);
+    framebuffer::text(84, 491, desktop.session.name(), color::INK, 1);
+    framebuffer::text(84, 508, desktop.session.authority_name(), color::MUTED, 1);
+    framebuffer::text(335, 500, "ESC CLOSE", color::MUTED, 1);
 }
 
 fn wrapped_text(mut x: i32, mut y: i32, width: i32, value: &str, color: u32, scale: i32) -> i32 {

@@ -223,10 +223,12 @@ impl Shell {
         if line.is_empty() {
             return;
         }
-        self.record_history(line);
         let mut words = line.split_whitespace();
         let command = words.next().unwrap_or("");
         let args = line.get(command.len()..).unwrap_or("").trim_start();
+        if !is_sensitive_command(command) {
+            self.record_history(line);
+        }
         if (self.session.authority() == Authority::Guest && is_mutating_command(command))
             || (self.session.authority() == Authority::Power && is_operator_command(command))
         {
@@ -348,9 +350,11 @@ impl Shell {
             "displayinfo" => {
                 println!("HexaDisplay protocol v1: surfaces attach damage commit focus hit-test");
                 println!(
-                    "framebuffer: 800x600 XRGB8888 available={}",
+                    "framebuffer: 800x600 XRGB8888 scanout available={}",
                     crate::framebuffer::available()
                 );
+                println!("buffer protocols: XRGB8888 ARGB8888 RGB565 TextCells");
+                println!("primitives: clipped fill gradient alpha rounded line text");
                 println!("Display FIN={}", crate::desktop::DISPLAY_FIN);
                 true
             }
@@ -383,17 +387,69 @@ impl Shell {
             }
             "users" => {
                 println!("USER             AUTHORITY  STATE");
-                for account in crate::session::ACCOUNTS {
+                crate::session::visit_accounts(|name, authority| {
                     println!(
                         "{:<16} {:<10} {}",
-                        account.name(),
-                        account.authority_name(),
-                        if account.name() == self.session.name() {
+                        name,
+                        authority_name(authority),
+                        if name == self.session.name() {
                             "active"
                         } else {
                             "available"
                         }
                     );
+                });
+                true
+            }
+            "useradd" => {
+                let (Some(name), Some(authority), Some(password)) =
+                    (words.next(), words.next(), words.next())
+                else {
+                    println!("usage: useradd <name> <operator|power|guest> <password>");
+                    return;
+                };
+                let Some(authority) = parse_authority(authority) else {
+                    println!("authority must be operator, power, or guest");
+                    return;
+                };
+                match crate::session::add_account(name, password, authority) {
+                    Ok(()) => {
+                        println!(
+                            "Created user '{}' with {} authority.",
+                            name,
+                            authority_name(authority)
+                        );
+                        slog!("HEXA_USER_CREATED {}\r\n", name);
+                    }
+                    Err(error) => println!("useradd: {}", error.message()),
+                }
+                true
+            }
+            "userdel" => {
+                let Some(name) = words.next() else {
+                    println!("usage: userdel <name>");
+                    return;
+                };
+                match crate::session::remove_account(name, self.session.name()) {
+                    Ok(()) => {
+                        println!("Deleted user '{}'.", name);
+                        slog!("HEXA_USER_DELETED {}\r\n", name);
+                    }
+                    Err(error) => println!("userdel: {}", error.message()),
+                }
+                true
+            }
+            "passwd" => {
+                let (Some(name), Some(password)) = (words.next(), words.next()) else {
+                    println!("usage: passwd <name> <new-password>");
+                    return;
+                };
+                match crate::session::change_password(name, password) {
+                    Ok(()) => {
+                        println!("Password changed for '{}'.", name);
+                        slog!("HEXA_PASSWORD_CHANGED {}\r\n", name);
+                    }
+                    Err(error) => println!("passwd: {}", error.message()),
                 }
                 true
             }
@@ -557,6 +613,8 @@ impl Shell {
     fn help(&self) {
         println!("HexaOS commands:");
         println!("  help clear echo about status whoami users login logout");
+        println!("  useradd <name> <operator|power|guest> <password>");
+        println!("  userdel <name>  passwd <name> <new-password>");
         println!("  forms packages dimensions makedim inspect journal policy handles history");
         println!("  mkform <name> [service|interface|package|driver|data|policy]");
         println!("  view/cat write append head delete recover move copy");
@@ -1421,6 +1479,9 @@ fn is_shell_command(name: &str) -> bool {
             | "status"
             | "whoami"
             | "users"
+            | "useradd"
+            | "userdel"
+            | "passwd"
             | "login"
             | "logout"
             | "forms"
@@ -1487,6 +1548,9 @@ fn is_mutating_command(name: &str) -> bool {
     matches!(
         name,
         "makedim"
+            | "useradd"
+            | "userdel"
+            | "passwd"
             | "mkform"
             | "write"
             | "append"
@@ -1512,6 +1576,9 @@ fn is_operator_command(name: &str) -> bool {
     matches!(
         name,
         "makedim"
+            | "useradd"
+            | "userdel"
+            | "passwd"
             | "delete"
             | "retire"
             | "reclaim"
@@ -1522,6 +1589,27 @@ fn is_operator_command(name: &str) -> bool {
             | "shutdown"
             | "halt"
     )
+}
+
+fn is_sensitive_command(name: &str) -> bool {
+    matches!(name, "useradd" | "passwd")
+}
+
+const fn authority_name(authority: Authority) -> &'static str {
+    match authority {
+        Authority::Operator => "Operator",
+        Authority::Power => "Power",
+        Authority::Guest => "Guest",
+    }
+}
+
+fn parse_authority(value: &str) -> Option<Authority> {
+    match value {
+        "operator" => Some(Authority::Operator),
+        "power" | "developer" => Some(Authority::Power),
+        "guest" => Some(Authority::Guest),
+        _ => None,
+    }
 }
 
 fn parse_operation(raw: &str) -> Option<Operations> {

@@ -479,7 +479,7 @@ impl Pong {
 }
 
 fn game_card(x: i32, y: i32, width: i32, title: &str, detail: &str, accent: u32) {
-    framebuffer::rect(x, y, width, 180, 0x00EA_EDF4);
+    framebuffer::rect(x, y, width, 180, 0x0015_1922);
     framebuffer::outline(x, y, width, 180, color::BORDER);
     framebuffer::rect(x, y, 7, 180, accent);
     framebuffer::text(x + 25, y + 28, title, accent, 2);
