@@ -14,6 +14,7 @@ mod hardware;
 mod input;
 mod port;
 mod serial;
+mod session;
 mod shell;
 mod sync;
 mod vga;
@@ -147,6 +148,8 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
         Err(error) => panic!("Form-native bootstrap failed: {:?}", error),
     };
     println!();
-    println!("Core architecture online. Starting command environment.");
-    shell::run(report)
+    println!("Core architecture online. Starting session manager.");
+    let mut input = input::Input::new();
+    let session = session::login(&mut input);
+    shell::run(report, input, session)
 }

@@ -36,8 +36,10 @@ firmware / GRUB (temporary)
 6. The capability broker returns a time-limited, Dimension-scoped Form Handle
    that authorizes only read and execution.
 7. HexaFS preflights and atomically publishes a journaled metadata transaction.
-8. The kernel starts an interactive Operator command environment. Polling COM1
-   and PS/2 input work before the interrupt subsystem is ported. Commands can
+8. The kernel starts a graphical Session Manager and maps the selected identity
+   to Operator, Power or Guest authority before opening the command environment.
+   Polling COM1, PS/2 keyboard and PS/2 mouse input work before the interrupt
+   subsystem is ported. Commands can
    create and inspect Forms, change lifecycle state, grant or revoke Handles,
    validate PIMP specifications, inspect system state, reboot, and shut down.
 
@@ -60,15 +62,27 @@ firmware / GRUB (temporary)
 - HexaDisplay uses a Wayland-like ownership model without copying Wayland's
   Unix socket/file-descriptor ABI: clients own surfaces and Buffer Handles,
   mutate pending state, report damage, and publish atomically with `commit`.
-  Focus, configure, frame-complete and key events are routed back to the owning
+  Focus, configure, frame-complete, key and pointer events are routed back to the owning
   FIN. The alpha renderer targets the mapped Bochs/QEMU XRGB framebuffer.
 - The Prism desktop creates separate Browser, Terminal, Forms, Packages,
   Settings, System and Games surfaces, plus Root, panel and launcher surfaces.
-  Four workspaces provide master-stack tiling, floating/fullscreen
-  windows and overview. Each application receives a child Handle containing
+  Its original Windows-inspired shell provides a centered taskbar and Start
+  launcher without copied Microsoft assets. Four workspaces provide
+  master-stack tiling, floating/fullscreen windows, dragging and overview.
+  Taskbar activation follows an existing app to its workspace. Each application receives a child Handle containing
   only Display and Input rights; the compositor checks it before visibility,
   geometry, commit or key routing. Leaving graphics restores the VGA mode 3
   register set before the kernel redraws its text console.
+- The PS/2 adapter enables the auxiliary device, validates ACKs and decodes
+  synchronized three-byte packets. The compositor clamps a save-under cursor,
+  hit-tests the topmost visible surface and checks its Input Handle before
+  routing motion or button events. Solid fills use clipped row writes, cursor
+  movement repaints only the cursor bounds, and games repaint only the active
+  window.
+- Session identity is intentionally separate from a Unix UID. The current
+  fixed alpha accounts select a DIESE authority input and gate shell mutations;
+  persistent account Forms, salted password hashes and lockout policy remain
+  future storage/security work.
 - The Browser is an Interface Form above HexaDisplay. Its current document
   engine intentionally accepts local `hexa://` and `data:text/html` resources;
   external HTTPS, CSS and JavaScript are not claimed while the v8 network and
@@ -99,8 +113,9 @@ The command environment is deliberately backed by fixed-capacity, in-memory
 tables at this stage. Its mutations exercise the core semantics but are not
 durable until the HexaFS block driver and recovery path are connected.
 
-Alpha.9 includes the broad hardware, utility and Form-content command layer,
-Prism Arcade, and command recall in both terminals. The Diamond II build is
+Alpha.10 includes the broad hardware, utility and Form-content command layer,
+Prism Arcade, command recall in both terminals, PS/2 pointer routing, graphical
+login, authority sessions, and the redesigned Prism shell. The Diamond II build is
 also exposed through `make run-alpha`, providing a runnable migration fallback
 for networking, scheduling, ATA persistence and the games not yet redesigned
 around v8 semantics.

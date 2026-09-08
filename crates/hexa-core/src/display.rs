@@ -88,6 +88,8 @@ pub enum DisplayEventKind {
     FocusOut,
     FrameDone,
     Key,
+    PointerMotion,
+    PointerButton,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -315,6 +317,29 @@ impl DisplayServer {
         Ok(())
     }
 
+    pub fn route_pointer(
+        &mut self,
+        x: i16,
+        y: i16,
+        buttons: u8,
+        changed: u8,
+    ) -> Result<u32, DisplayError> {
+        let surface_id = self.hit_test(x, y).ok_or(DisplayError::NotFound)?;
+        let owner = self
+            .surface(surface_id)
+            .ok_or(DisplayError::NotFound)?
+            .owner;
+        let value = x as u16 as u64
+            | ((y as u16 as u64) << 16)
+            | ((buttons as u64) << 32)
+            | ((changed as u64) << 40);
+        self.push_event(owner, surface_id, DisplayEventKind::PointerMotion, value);
+        if changed != 0 {
+            self.push_event(owner, surface_id, DisplayEventKind::PointerButton, value);
+        }
+        Ok(surface_id)
+    }
+
     pub fn poll_event(&mut self, owner: Fin) -> Option<DisplayEvent> {
         let index = self
             .events
@@ -439,6 +464,7 @@ mod tests {
         assert_eq!(display.hit_test(30, 30), Some(back));
         assert_eq!(display.focused(), Some(back));
         display.route_key(b'x').unwrap();
+        assert_eq!(display.route_pointer(30, 30, 1, 1), Ok(back));
         let events: std::vec::Vec<_> = core::iter::from_fn(|| display.poll_event(owner)).collect();
         assert!(events
             .iter()
@@ -446,6 +472,9 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| event.kind == DisplayEventKind::Key && event.value == b'x' as u64));
+        assert!(events
+            .iter()
+            .any(|event| event.kind == DisplayEventKind::PointerButton));
     }
 
     #[test]

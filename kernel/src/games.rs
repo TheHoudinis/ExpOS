@@ -96,6 +96,31 @@ impl GameHub {
         }
     }
 
+    pub fn handle_click(&mut self, x: i16, y: i16, rect: Rect) -> bool {
+        if self.mode != GameMode::Menu {
+            return false;
+        }
+        let local_x = x - rect.x;
+        let local_y = y - rect.y;
+        if !(122..302).contains(&local_y) {
+            return false;
+        }
+        let card_width = (rect.width as i16 - 82) / 2;
+        if (34..34 + card_width).contains(&local_x) {
+            self.mode = GameMode::Snake;
+            self.snake.reset();
+            self.paused = false;
+            true
+        } else if (48 + card_width..48 + card_width * 2).contains(&local_x) {
+            self.mode = GameMode::Pong;
+            self.pong.reset();
+            self.paused = false;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn tick(&mut self, now: u64) -> bool {
         if self.mode == GameMode::Menu || self.paused {
             self.last_tick = now;

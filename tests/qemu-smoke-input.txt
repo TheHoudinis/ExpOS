@@ -1,5 +1,9 @@
 
+operator
+expos
 help
+whoami
+users
 status
 packages
 relationships Ayo

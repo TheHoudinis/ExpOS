@@ -299,7 +299,7 @@ fn logo() {
 
 fn neofetch() {
     logo();
-    println!("OS: HexaOS v8.0.0-alpha.3");
+    println!("OS: ExpOS v8.0.0-alpha.10");
     println!("Kernel: x86_64 Rust no_std");
     println!("Model: Form-native / Dimension-oriented");
     println!("Authority: Operator");

@@ -25,6 +25,21 @@ pub const KEY_SUPER_RIGHT: u8 = 0x9C;
 pub const KEY_SUPER_UP: u8 = 0x9D;
 pub const KEY_SUPER_DOWN: u8 = 0x9E;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PointerEvent {
+    pub dx: i16,
+    pub dy: i16,
+    pub buttons: u8,
+    pub pressed: u8,
+    pub released: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputEvent {
+    Key(u8),
+    Pointer(PointerEvent),
+}
+
 pub struct Input {
     shift: bool,
     caps_lock: bool,
@@ -32,6 +47,10 @@ pub struct Input {
     super_key: bool,
     serial_escape: u8,
     serial_escape_started: u64,
+    mouse_packet: [u8; 3],
+    mouse_index: usize,
+    mouse_buttons: u8,
+    mouse_enabled: bool,
 }
 
 impl Input {
@@ -43,26 +62,96 @@ impl Input {
             super_key: false,
             serial_escape: 0,
             serial_escape_started: 0,
+            mouse_packet: [0; 3],
+            mouse_index: 0,
+            mouse_buttons: 0,
+            mouse_enabled: false,
         }
+    }
+
+    pub fn enable_mouse(&mut self) -> bool {
+        if self.mouse_enabled {
+            return true;
+        }
+        if !controller_write_command(0xA8) || !controller_write_command(0x20) {
+            return false;
+        }
+        let Some(mut command_byte) = controller_read(false) else {
+            return false;
+        };
+        command_byte &= !0x22;
+        if !controller_write_command(0x60) || !controller_write_data(command_byte) {
+            return false;
+        }
+        if !mouse_command(0xF6) || !mouse_command(0xF4) {
+            return false;
+        }
+        self.mouse_index = 0;
+        self.mouse_buttons = 0;
+        self.mouse_enabled = true;
+        true
     }
 
     /// Poll serial first, then the PS/2 controller used by the QEMU window.
     pub fn poll(&mut self) -> Option<u8> {
+        match self.poll_event()? {
+            InputEvent::Key(key) => Some(key),
+            InputEvent::Pointer(_) => None,
+        }
+    }
+
+    pub fn poll_event(&mut self) -> Option<InputEvent> {
         if let Some(byte) = serial::COM1.lock().try_read() {
-            return self.decode_serial(byte);
+            return self.decode_serial(byte).map(InputEvent::Key);
         }
         if self.serial_escape != 0
             && unsafe { _rdtsc() }.wrapping_sub(self.serial_escape_started) > 5_000_000
         {
             self.serial_escape = 0;
-            return Some(0x1B);
+            return Some(InputEvent::Key(0x1B));
         }
         let status = unsafe { port::inb(PS2_STATUS) };
         if status & 0x01 == 0 {
             return None;
         }
-        let scancode = unsafe { port::inb(PS2_DATA) };
-        self.decode_scancode(scancode)
+        let data = unsafe { port::inb(PS2_DATA) };
+        if status & 0x20 != 0 {
+            self.decode_mouse(data).map(InputEvent::Pointer)
+        } else {
+            self.decode_scancode(data).map(InputEvent::Key)
+        }
+    }
+
+    fn decode_mouse(&mut self, byte: u8) -> Option<PointerEvent> {
+        if self.mouse_index == 0 && byte & 0x08 == 0 {
+            return None;
+        }
+        self.mouse_packet[self.mouse_index] = byte;
+        self.mouse_index += 1;
+        if self.mouse_index < self.mouse_packet.len() {
+            return None;
+        }
+        self.mouse_index = 0;
+        let header = self.mouse_packet[0];
+        let buttons = header & 0x07;
+        let previous = self.mouse_buttons;
+        self.mouse_buttons = buttons;
+        let overflow = header & 0xC0 != 0;
+        Some(PointerEvent {
+            dx: if overflow {
+                0
+            } else {
+                self.mouse_packet[1] as i8 as i16
+            },
+            dy: if overflow {
+                0
+            } else {
+                -(self.mouse_packet[2] as i8 as i16)
+            },
+            buttons,
+            pressed: buttons & !previous,
+            released: previous & !buttons,
+        })
     }
 
     fn decode_scancode(&mut self, scancode: u8) -> Option<u8> {
@@ -228,6 +317,52 @@ impl Input {
             (_, value) => Some(value),
         }
     }
+}
+
+fn controller_write_command(command: u8) -> bool {
+    if !controller_wait_write() {
+        return false;
+    }
+    unsafe { port::outb(PS2_STATUS, command) };
+    true
+}
+
+fn controller_write_data(value: u8) -> bool {
+    if !controller_wait_write() {
+        return false;
+    }
+    unsafe { port::outb(PS2_DATA, value) };
+    true
+}
+
+fn controller_wait_write() -> bool {
+    for _ in 0..100_000 {
+        if unsafe { port::inb(PS2_STATUS) } & 0x02 == 0 {
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+    false
+}
+
+fn controller_read(auxiliary: bool) -> Option<u8> {
+    for _ in 0..100_000 {
+        let status = unsafe { port::inb(PS2_STATUS) };
+        if status & 0x01 != 0 {
+            let value = unsafe { port::inb(PS2_DATA) };
+            if !auxiliary || status & 0x20 != 0 {
+                return Some(value);
+            }
+        }
+        core::hint::spin_loop();
+    }
+    None
+}
+
+fn mouse_command(command: u8) -> bool {
+    controller_write_command(0xD4)
+        && controller_write_data(command)
+        && controller_read(true) == Some(0xFA)
 }
 
 fn super_binding(key: u8) -> Option<u8> {

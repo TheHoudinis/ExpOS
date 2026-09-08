@@ -96,9 +96,9 @@ pub fn print_kernel_features() {
         yes_no(cr4 & (1 << 7) != 0),
         yes_no(efer & (1 << 11) != 0)
     );
-    println!("kernel: 64-bit paging, PCI scan, RTC, COM1, PS/2, VBE framebuffer");
+    println!("kernel: 64-bit paging, PCI scan, RTC, COM1, PS/2 mouse/keys, framebuffer");
     println!("services: Forms, FIN resolution, HexaFS journal, PIMP/DIESE, Handles");
-    println!("desktop: 4 workspaces, tiling, floating, fullscreen, routed input");
+    println!("desktop: 4 workspaces, tiling, floating, pointer hit-testing, routed input");
     println!("pending: interrupt scheduler, native storage/network/audio Driver Forms");
 }
 

@@ -1,6 +1,8 @@
 use crate::{
     input::{Input, KEY_DOWN, KEY_UP},
-    port, print, println, slog, vga,
+    port, print, println,
+    session::Session,
+    slog, vga,
 };
 use hexa_core::{
     Authority, BootReport, CapabilityBroker, Dimension, Fin, Form, FormHandle, FormKind, Lifecycle,
@@ -17,9 +19,8 @@ const MAX_HISTORY: usize = 8;
 const AYO_FIN: Fin = Fin::from_u128(0x4159_4F00_0000_0000_0000_0000_0000_0001);
 const GO_ABI_FIN: Fin = Fin::from_u128(0x474F_4142_4900_0000_0000_0000_0000_0001);
 
-pub fn run(report: BootReport) -> ! {
-    let mut shell = Shell::new(report);
-    let mut input = Input::new();
+pub fn run(report: BootReport, mut input: Input, session: Session) -> ! {
+    let mut shell = Shell::new(report, session);
     let mut line = [0_u8; MAX_LINE];
     let mut length = 0;
     let mut history_cursor = None;
@@ -27,7 +28,7 @@ pub fn run(report: BootReport) -> ! {
     println!();
     println!("Hexa command environment ready. Type 'help'.");
     slog!("HEXA_SHELL_READY\r\n");
-    prompt();
+    prompt(shell.session);
 
     loop {
         let Some(byte) = input.poll() else {
@@ -42,7 +43,7 @@ pub fn run(report: BootReport) -> ! {
                 }
                 length = 0;
                 history_cursor = None;
-                prompt();
+                prompt(shell.session);
             }
             0x08 => {
                 if length > 0 {
@@ -84,6 +85,7 @@ pub fn run(report: BootReport) -> ! {
 
 struct Shell {
     report: BootReport,
+    session: Session,
     forms: [Option<Form>; MAX_FORMS],
     handles: [Option<FormHandle>; MAX_HANDLES],
     broker: CapabilityBroker,
@@ -100,7 +102,7 @@ struct Shell {
 }
 
 impl Shell {
-    fn new(report: BootReport) -> Self {
+    fn new(report: BootReport, session: Session) -> Self {
         let mut forms = [None; MAX_FORMS];
         forms[0] = Some(Form::new(report.root_fin, "Root", FormKind::Root));
         forms[1] = Some(Form::new(AYO_FIN, "Ayo", FormKind::Package));
@@ -116,13 +118,18 @@ impl Shell {
         ));
         forms[4] = Some(Form::new(GO_ABI_FIN, "GoABI", FormKind::Interface));
         let mut broker = CapabilityBroker::new();
+        let boot_operations = if session.authority() == Authority::Guest {
+            Operations::READ
+        } else {
+            Operations::READ.union(Operations::EXECUTE)
+        };
         let boot_handle = broker
             .issue_for(
                 report.root_fin,
-                Authority::Operator,
+                session.authority(),
                 report.root_fin,
                 report.stable_fin,
-                Operations::READ.union(Operations::EXECUTE),
+                boot_operations,
                 u64::MAX,
             )
             .expect("the trusted boot Handle must be issuable");
@@ -195,6 +202,7 @@ impl Shell {
         );
         Self {
             report,
+            session,
             forms,
             handles,
             broker,
@@ -219,6 +227,17 @@ impl Shell {
         let mut words = line.split_whitespace();
         let command = words.next().unwrap_or("");
         let args = line.get(command.len()..).unwrap_or("").trim_start();
+        if (self.session.authority() == Authority::Guest && is_mutating_command(command))
+            || (self.session.authority() == Authority::Power && is_operator_command(command))
+        {
+            println!(
+                "DIESE denied '{}' for {} authority.",
+                command,
+                self.session.authority_name()
+            );
+            slog!("HEXA_COMMAND_DENIED {}\r\n", command);
+            return;
+        }
         let recognized = match command {
             "help" => {
                 self.help();
@@ -229,7 +248,10 @@ impl Shell {
                     "HexaOS v{} interactive architecture alpha",
                     env!("CARGO_PKG_VERSION")
                 );
-                println!("Form-native x86_64 kernel; authority=Operator; Dimension=Stable");
+                println!(
+                    "Form-native x86_64 kernel; authority={}; Dimension=Stable",
+                    self.session.authority_name()
+                );
                 true
             }
             "clear" => {
@@ -298,7 +320,7 @@ impl Shell {
                     "registry capacity: Forms={} Handles={} Dimensions={}",
                     MAX_FORMS, MAX_HANDLES, MAX_DIMENSIONS
                 );
-                println!("input backends: PS/2 polling + COM1 polling");
+                println!("input backends: PS/2 mouse/keyboard + COM1 polling");
                 true
             }
             "ifconfig" => {
@@ -333,11 +355,11 @@ impl Shell {
                 true
             }
             "desktop" => {
-                crate::desktop::run(input, false);
+                crate::desktop::run(input, false, self.session);
                 true
             }
             "browser" => {
-                crate::desktop::run(input, true);
+                crate::desktop::run(input, true, self.session);
                 true
             }
             "goabi" => {
@@ -352,7 +374,31 @@ impl Shell {
                 true
             }
             "whoami" => {
-                println!("Operator (full system authority)");
+                println!(
+                    "{} ({} authority)",
+                    self.session.name(),
+                    self.session.authority_name()
+                );
+                true
+            }
+            "users" => {
+                println!("USER             AUTHORITY  STATE");
+                for account in crate::session::ACCOUNTS {
+                    println!(
+                        "{:<16} {:<10} {}",
+                        account.name(),
+                        account.authority_name(),
+                        if account.name() == self.session.name() {
+                            "active"
+                        } else {
+                            "available"
+                        }
+                    );
+                }
+                true
+            }
+            "login" | "logout" => {
+                self.session = crate::session::login(input);
                 true
             }
             "mkform" => {
@@ -478,7 +524,7 @@ impl Shell {
                 true
             }
             "games" | "arcade" => {
-                crate::desktop::run_games(input);
+                crate::desktop::run_games(input, self.session);
                 true
             }
             "legacy" => {
@@ -510,7 +556,7 @@ impl Shell {
 
     fn help(&self) {
         println!("HexaOS commands:");
-        println!("  help clear echo about status whoami");
+        println!("  help clear echo about status whoami users login logout");
         println!("  forms packages dimensions makedim inspect journal policy handles history");
         println!("  mkform <name> [service|interface|package|driver|data|policy]");
         println!("  view/cat write append head delete recover move copy");
@@ -543,7 +589,11 @@ impl Shell {
             .filter(|handle| !handle.revoked)
             .count();
         println!("architecture: x86_64 Form-native alpha");
-        println!("Dimension: Stable  authority: Operator");
+        println!(
+            "Dimension: Stable  user: {}  authority: {}",
+            self.session.name(),
+            self.session.authority_name()
+        );
         println!("active Forms: {}  active Handles: {}", active, handle_count);
         println!("typed relationships: {}", self.relationships.count());
         println!("journal sequence: {}", self.journal_sequence);
@@ -1130,7 +1180,7 @@ impl Shell {
         };
         let Ok(handle) = self.broker.issue_for(
             self.report.root_fin,
-            Authority::Operator,
+            self.session.authority(),
             target,
             self.report.stable_fin,
             operations,
@@ -1370,6 +1420,9 @@ fn is_shell_command(name: &str) -> bool {
             | "about"
             | "status"
             | "whoami"
+            | "users"
+            | "login"
+            | "logout"
             | "forms"
             | "list"
             | "packages"
@@ -1424,6 +1477,47 @@ fn is_shell_command(name: &str) -> bool {
             | "legacy"
             | "games"
             | "arcade"
+            | "reboot"
+            | "shutdown"
+            | "halt"
+    )
+}
+
+fn is_mutating_command(name: &str) -> bool {
+    matches!(
+        name,
+        "makedim"
+            | "mkform"
+            | "write"
+            | "append"
+            | "delete"
+            | "recover"
+            | "move"
+            | "copy"
+            | "retire"
+            | "activate"
+            | "reclaim"
+            | "grant"
+            | "revoke"
+            | "pimp"
+            | "relate"
+            | "unrelate"
+            | "reboot"
+            | "shutdown"
+            | "halt"
+    )
+}
+
+fn is_operator_command(name: &str) -> bool {
+    matches!(
+        name,
+        "makedim"
+            | "delete"
+            | "retire"
+            | "reclaim"
+            | "grant"
+            | "revoke"
+            | "pimp"
             | "reboot"
             | "shutdown"
             | "halt"
@@ -1487,11 +1581,11 @@ const fn relationship_name(kind: RelationshipKind) -> &'static str {
     }
 }
 
-fn prompt() {
+fn prompt(session: Session) {
     let mut writer = vga::WRITER.lock();
     writer.set_color(vga::Color::LightGreen, vga::Color::Black);
     drop(writer);
-    print!("operator@Stable> ");
+    print!("{}@Stable> ", session.name());
     vga::WRITER
         .lock()
         .set_color(vga::Color::LightGray, vga::Color::Black);

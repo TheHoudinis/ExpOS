@@ -17,21 +17,26 @@ projects without making either legacy architecture the new system model:
   including an interactive catalog TUI, HTTPS registries, dependency plans,
   constraints, reconciliation, checkpoints and crash recovery.
 - `HexaDisplay` is a native 800x600 graphical server with Form-owned surfaces,
-  buffers, damage, atomic commits, focus, z-order, hit testing and input events.
-- the HexaDisplay desktop is the new Prism environment: a Hyprland-inspired
-  capability compositor with four workspaces, master-stack tiling,
-  floating/fullscreen windows, an
-  overview, Form launcher, graphical Terminal, Browser, Form registry, Ayo
-  package center, Settings, live System Scope, and a native arcade containing
-  playable Snake and Pong. Each application owns its
+  buffers, damage, atomic commits, focus, z-order, pointer hit testing and input
+  events.
+- the HexaDisplay desktop is the new Prism environment: an original,
+  Windows-inspired capability compositor with a centered taskbar and Start
+  launcher, plus four workspaces, master-stack tiling, floating/fullscreen
+  windows, window dragging and overview. Its graphical Terminal, Browser, Form
+  registry, Ayo package center, Settings, live System Scope, and native arcade
+  containing playable Snake and Pong are fully clickable. Each application owns its
   surface and receives a narrow delegated Display/Input Handle.
+- a graphical Session Manager signs users in as Operator, Power or Guest and
+  applies that authority to shell capability decisions. PS/2 mouse packets are
+  decoded in the kernel and routed only to the Form under the pointer.
 - `Browser` is a native graphical Interface Form with a bounded local HTML
   parser, document renderer, links and policy-explained network restrictions.
 - `sdk/go/` defines and tests the capability-gated HexaOS Go ABI v1.
 
-The current image boots a real 64-bit kernel into an interactive command
-environment. It accepts input from both the QEMU window keyboard and COM1 in
-the launching terminal. It is still an architecture alpha rather than a
+The current image boots a real 64-bit kernel into a graphical login followed by
+an interactive command environment. It accepts a PS/2 mouse and keyboard from
+the QEMU window plus keyboard input from COM1 in the launching terminal. It is
+still an architecture alpha rather than a
 finished daily-use OS: scheduling, UEFI-native loading, persistent block I/O,
 and ports of the alpha applications remain in development.
 
@@ -55,9 +60,9 @@ Open the package catalog and select a Form by number or name:
 ```
 
 `Browser` and `Snake`, for example, resolve and install their complete
-dependency plans in one atomic transaction. The built-in 18-package catalog
-also includes PrismDE, InputKit, DeveloperKit, TextLab, VirtioBlock, and
-AudioKit. A remote checksummed catalog can be selected with
+dependency plans in one atomic transaction. The built-in 20-package catalog
+also includes PrismDE, MouseKit, SessionManager, InputKit, DeveloperKit,
+TextLab, VirtioBlock, and AudioKit. A remote checksummed catalog can be selected with
 `--registry https://.../catalog.json`; `--registry-key` additionally requires
 an Ed25519 signature.
 
@@ -67,11 +72,23 @@ To boot interactively:
 make run
 ```
 
-Click the QEMU window and type `help`, or type commands directly in the terminal
-that launched QEMU. The current command environment supports:
+Click the QEMU window and sign in with one of the alpha accounts below. Press
+Enter to move from user to password and Enter again to sign in. You can also
+click either field and the Sign In button, or type through the terminal that
+launched QEMU.
+
+| User | Password | Authority |
+|---|---|---|
+| `operator` | `expos` | Full Operator controls |
+| `developer` | `prism` | Power user; destructive policy controls denied |
+| `guest` | `guest` | Read-only session |
+
+These are fixed demonstration credentials, not production authentication.
+Use `users`, `login`, `logout`, or `whoami` in the shell to inspect or change
+the current session. The command environment supports:
 
 ```text
-help clear echo about status whoami
+help clear echo about status whoami users login logout
 forms packages dimensions inspect journal policy handles relationships
 mkform retire activate reclaim resolve grant revoke handlecheck pimp
 relate unrelate
@@ -79,7 +96,7 @@ desktop browser games displayinfo goabi
 features kernelcaps ayo reboot shutdown
 ```
 
-The alpha.9 shell also ports the practical HexaOS 7.2 command layer: Form
+The alpha.10 shell also ports the practical HexaOS 7.2 command layer: Form
 content (`write`, `append`, `cat`, `head`, `copy`, `move`, `delete/recover`,
 `hexdump`, hashes), hardware inspection, calculator/string/math tools,
 Dimensions, system diagnostics, and the original fun utilities. Both the text
@@ -92,6 +109,9 @@ native storage phase.
 
 Type `browser` or `desktop` in the booted kernel to enter HexaDisplay.
 `desktop` opens the graphical Terminal while `browser` focuses the Browser.
+The mouse opens Start, selects taskbar and launcher apps, focuses windows,
+drags title bars, activates minimize/maximize/close controls, and selects Arcade
+games. Taskbar apps return to their existing workspace instead of being moved.
 The compositor bindings are `Super+Space` launcher, `Super+Enter` Terminal,
 `Super+B` Browser, `Super+1/2/3/4` workspaces, `Super+arrows` focus/workspace
 movement, `Super+F` fullscreen, `Super+V` floating, `Super+O` overview,
@@ -101,6 +121,11 @@ The graphical Terminal also accepts `ws1/ws2/ws3/ws4`, `games`, `float`,
 `full`, `overview`, `help`, and `exit`. The shell command `games` opens Prism
 Arcade directly; choose `1` for Snake or `2` for Pong, steer with the arrows,
 pause with Space, reset with `R`, and return to the arcade with `M`.
+
+Rendering remains a software XRGB framebuffer rather than GPU acceleration,
+but solid rectangles now use clipped row writes, pointer motion uses cursor
+save-under instead of repainting the desktop, and active games repaint only
+their window. These changes keep interaction smooth under QEMU at 800x600.
 
 The complete 32-bit Diamond II environment remains runnable while its deeper
 drivers and games are ported:

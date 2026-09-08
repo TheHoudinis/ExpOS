@@ -71,14 +71,24 @@ pub fn pixel(x: i32, y: i32, value: u32) {
     unsafe { core::ptr::write_volatile((LFB as *mut u32).add(offset), value) };
 }
 
+pub fn read_pixel(x: i32, y: i32) -> u32 {
+    if x < 0 || y < 0 || x >= WIDTH as i32 || y >= HEIGHT as i32 {
+        return 0;
+    }
+    let offset = y as usize * WIDTH + x as usize;
+    unsafe { core::ptr::read_volatile((LFB as *const u32).add(offset)) }
+}
+
 pub fn rect(x: i32, y: i32, width: i32, height: i32, value: u32) {
     let left = x.max(0).min(WIDTH as i32);
     let top = y.max(0).min(HEIGHT as i32);
     let right = x.saturating_add(width).max(0).min(WIDTH as i32);
     let bottom = y.saturating_add(height).max(0).min(HEIGHT as i32);
+    let pointer = LFB as *mut u32;
     for row in top..bottom {
+        let offset = row as usize * WIDTH;
         for column in left..right {
-            pixel(column, row, value);
+            unsafe { core::ptr::write_volatile(pointer.add(offset + column as usize), value) };
         }
     }
 }
