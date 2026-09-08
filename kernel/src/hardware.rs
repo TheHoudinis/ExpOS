@@ -53,6 +53,55 @@ pub fn print_cpu_info() {
     );
 }
 
+pub fn print_kernel_features() {
+    let basic = __cpuid(1);
+    let maximum_extended = __cpuid(0x8000_0000).eax;
+    let extended = if maximum_extended >= 0x8000_0001 {
+        Some(__cpuid(0x8000_0001))
+    } else {
+        None
+    };
+    let cr0: u64;
+    let cr4: u64;
+    let efer: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack, preserves_flags));
+        core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
+        let low: u32;
+        let high: u32;
+        core::arch::asm!(
+            "rdmsr",
+            in("ecx") 0xC000_0080_u32,
+            out("eax") low,
+            out("edx") high,
+            options(nomem, nostack, preserves_flags)
+        );
+        efer = ((high as u64) << 32) | low as u64;
+    }
+    let extended_edx = extended.map(|leaf| leaf.edx).unwrap_or(0);
+    println!("KERNEL FEATURE MATRIX");
+    println!(
+        "cpu: long-mode={} NX={} syscall={} SSE2={} APIC={}",
+        yes_no(extended_edx & (1 << 29) != 0),
+        yes_no(extended_edx & (1 << 20) != 0),
+        yes_no(extended_edx & (1 << 11) != 0),
+        yes_no(basic.edx & (1 << 26) != 0),
+        yes_no(basic.edx & (1 << 9) != 0)
+    );
+    println!(
+        "state: paging={} write-protect={} PAE={} global-pages={} NX-active={}",
+        yes_no(cr0 & (1 << 31) != 0),
+        yes_no(cr0 & (1 << 16) != 0),
+        yes_no(cr4 & (1 << 5) != 0),
+        yes_no(cr4 & (1 << 7) != 0),
+        yes_no(efer & (1 << 11) != 0)
+    );
+    println!("kernel: 64-bit paging, PCI scan, RTC, COM1, PS/2, VBE framebuffer");
+    println!("services: Forms, FIN resolution, HexaFS journal, PIMP/DIESE, Handles");
+    println!("desktop: 4 workspaces, tiling, floating, fullscreen, routed input");
+    println!("pending: interrupt scheduler, native storage/network/audio Driver Forms");
+}
+
 pub fn print_pci() {
     println!("BUS SLOT FUNC VENDOR DEVICE");
     let mut found = 0;

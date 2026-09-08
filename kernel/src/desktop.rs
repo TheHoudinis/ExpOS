@@ -4,7 +4,8 @@ use crate::{
         Input, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_SUPER_BROWSER, KEY_SUPER_CLOSE, KEY_SUPER_CYCLE,
         KEY_SUPER_DOWN, KEY_SUPER_FLOAT, KEY_SUPER_FULLSCREEN, KEY_SUPER_LAUNCHER, KEY_SUPER_LEFT,
         KEY_SUPER_OVERVIEW, KEY_SUPER_RIGHT, KEY_SUPER_TERMINAL, KEY_SUPER_UP,
-        KEY_SUPER_WORKSPACE_1, KEY_SUPER_WORKSPACE_2, KEY_SUPER_WORKSPACE_3, KEY_UP,
+        KEY_SUPER_WORKSPACE_1, KEY_SUPER_WORKSPACE_2, KEY_SUPER_WORKSPACE_3, KEY_SUPER_WORKSPACE_4,
+        KEY_UP,
     },
     slog,
 };
@@ -21,17 +22,19 @@ pub const FORMS_FIN: Fin = Fin::from_u128(0x464F_524D_5300_0000_0000_0000_0000_0
 pub const PACKAGES_FIN: Fin = Fin::from_u128(0x5041_434B_4147_4553_0000_0000_0000_0001);
 pub const SETTINGS_FIN: Fin = Fin::from_u128(0x5345_5454_494E_4753_0000_0000_0000_0001);
 pub const SYSTEM_FIN: Fin = Fin::from_u128(0x5359_5354_454D_0000_0000_0000_0000_0001);
+pub const GAMES_FIN: Fin = Fin::from_u128(0x4741_4D45_5300_0000_0000_0000_0000_0001);
 
-const APP_COUNT: usize = 6;
+const APP_COUNT: usize = 7;
 const APP_WIDTH: u16 = 704;
 const APP_HEIGHT: u16 = 466;
 const BUFFER_WIDTH: u16 = 780;
 const BUFFER_HEIGHT: u16 = 510;
+const TERMINAL_HISTORY: usize = 12;
 const STABLE_FIN: Fin = Fin::from_u128(0x4449_4D00_0000_0000_0000_0000_0000_0001);
 
 const HOME: &str = "<title>Hexa Home</title><h1>Welcome to ExpOS</h1><p>A Form native desktop where identity capability state and relationships are first class.</p><h2>Explore locally</h2><a href='hexa://about'>1 About this browser</a><a href='hexa://packages'>2 Package Forms</a><a href='hexa://system'>3 System status</a><p>Use 1 2 3 or H inside Browser. External navigation is safely restricted.</p>";
 const ABOUT: &str = "<title>About</title><h1>Hexa Browser</h1><p>This native Interface Form parses bounded local HTML and renders it through HexaDisplay.</p><p>Surface state is owner scoped and becomes visible only after an atomic commit.</p><p>HTTPS CSS JavaScript and media are intentionally not claimed before networking isolation and a complete web engine exist.</p><a href='hexa://home'>H Home</a>";
-const BROWSER_PACKAGES: &str = "<title>Packages</title><h1>Package Forms</h1><p>Ayo activates software as Forms rather than copying archives into Unix paths.</p><li>CoreTools diagnostics and repair</li><li>Network socket capability</li><li>Terminal command Interface</li><li>Browser document Interface</li><p>Use the Packages app for the native catalog and the host ayo TUI for repository downloads.</p><a href='hexa://home'>H Home</a>";
+const BROWSER_PACKAGES: &str = "<title>Packages</title><h1>Prism Package Forms</h1><p>Ayo activates software as Forms rather than copying archives into Unix paths.</p><li>PrismDE desktop environment</li><li>GameHub Snake and Pong</li><li>DeveloperKit Go workspace</li><li>TextLab VirtioBlock and AudioKit</li><p>The built-in catalog contains 18 packages. Use the host ayo TUI to search and install complete dependency plans.</p><a href='hexa://home'>H Home</a>";
 const BROWSER_SYSTEM: &str = "<title>System</title><h1>System Scope</h1><p>HexaDisplay protocol version 1 is active.</p><li>800 by 600 XRGB framebuffer</li><li>Atomic attach damage and commit</li><li>Focus z order and keyboard routing</li><li>PS2 and serial input</li><p>Network Driver Form is not bound. External navigation remains restricted.</p><a href='hexa://home'>H Home</a>";
 const NETWORK_BLOCKED: &str = "<title>Network restricted</title><h1>Navigation blocked</h1><p>DIESE denied external navigation because no v8 Network Driver Form is bound and PIMP network policy is restricted.</p><p>This is a safe fallback not a fake internet connection.</p><a href='hexa://home'>H Home</a>";
 
@@ -43,6 +46,7 @@ enum AppKind {
     Packages,
     Settings,
     System,
+    Games,
 }
 
 impl AppKind {
@@ -53,6 +57,7 @@ impl AppKind {
         Self::Packages,
         Self::Settings,
         Self::System,
+        Self::Games,
     ];
 
     const fn index(self) -> usize {
@@ -63,6 +68,7 @@ impl AppKind {
             Self::Packages => 3,
             Self::Settings => 4,
             Self::System => 5,
+            Self::Games => 6,
         }
     }
 
@@ -74,6 +80,7 @@ impl AppKind {
             Self::Packages => "PACKAGES",
             Self::Settings => "SETTINGS",
             Self::System => "SYSTEM SCOPE",
+            Self::Games => "PRISM ARCADE",
         }
     }
 
@@ -85,6 +92,7 @@ impl AppKind {
             Self::Packages => PACKAGES_FIN,
             Self::Settings => SETTINGS_FIN,
             Self::System => SYSTEM_FIN,
+            Self::Games => GAMES_FIN,
         }
     }
 
@@ -96,6 +104,7 @@ impl AppKind {
             Self::Packages => "P",
             Self::Settings => "S",
             Self::System => "I",
+            Self::Games => "G",
         }
     }
 
@@ -107,6 +116,7 @@ impl AppKind {
             Self::Packages => "AYO CATALOG + TRANSACTIONS",
             Self::Settings => "PIMP SESSION SPECIFICATIONS",
             Self::System => "KERNEL + CAPABILITY SCOPE",
+            Self::Games => "NATIVE SNAKE + PONG",
         }
     }
 
@@ -118,6 +128,7 @@ impl AppKind {
             Self::Packages => 0x00F4_B942,
             Self::Settings => 0x00E9_69A7,
             Self::System => color::RED,
+            Self::Games => 0x00FF_5CC8,
         }
     }
 }
@@ -141,6 +152,12 @@ struct DesktopState {
     terminal_len: usize,
     terminal_message: [u8; 128],
     terminal_message_len: usize,
+    terminal_history: [[u8; 64]; TERMINAL_HISTORY],
+    terminal_history_len: [u8; TERMINAL_HISTORY],
+    terminal_history_next: usize,
+    terminal_history_count: usize,
+    terminal_history_cursor: Option<usize>,
+    games: crate::games::GameHub,
     should_exit: bool,
 }
 
@@ -222,7 +239,7 @@ impl DesktopState {
                 DISPLAY_FIN,
                 "Launcher",
                 SurfaceRole::Popup,
-                Rect::new(18, 48, 280, 360),
+                Rect::new(18, 48, 280, 410),
             )
             .expect("desktop launcher surface");
         let _ = server.attach(DISPLAY_FIN, background, buffer(1, DISPLAY_FIN, 800, 600));
@@ -230,7 +247,7 @@ impl DesktopState {
         let _ = server.attach(
             DISPLAY_FIN,
             launcher_surface,
-            buffer(9, DISPLAY_FIN, 280, 360),
+            buffer(10, DISPLAY_FIN, 280, 410),
         );
         let _ = server.set_visible(DISPLAY_FIN, launcher_surface, false);
 
@@ -247,7 +264,7 @@ impl DesktopState {
             broker,
             app_surfaces,
             app_handles,
-            app_workspaces: [1, 1, 2, 2, 3, 3],
+            app_workspaces: [1, 1, 2, 2, 3, 3, 4],
             app_open: [true; APP_COUNT],
             app_floating: [false; APP_COUNT],
             launcher_surface,
@@ -261,6 +278,12 @@ impl DesktopState {
             terminal_len: 0,
             terminal_message: [0; 128],
             terminal_message_len: 0,
+            terminal_history: [[0; 64]; TERMINAL_HISTORY],
+            terminal_history_len: [0; TERMINAL_HISTORY],
+            terminal_history_next: 0,
+            terminal_history_count: 0,
+            terminal_history_cursor: None,
+            games: crate::games::GameHub::new(),
             should_exit: false,
         }
     }
@@ -332,7 +355,7 @@ impl DesktopState {
     }
 
     fn switch_workspace(&mut self, workspace: u8) {
-        if !(1..=3).contains(&workspace) || workspace == self.workspace {
+        if !(1..=4).contains(&workspace) || workspace == self.workspace {
             return;
         }
         self.workspace = workspace;
@@ -527,8 +550,12 @@ impl DesktopState {
     fn handle_terminal_key(&mut self, key: u8) {
         match key {
             b'\n' => {
-                let action = terminal_action(&self.terminal_line[..self.terminal_len]);
+                let command = self.terminal_line;
+                let command_len = self.terminal_len;
+                self.record_terminal_history(&command[..command_len]);
+                let action = terminal_action(&command[..command_len]);
                 self.terminal_len = 0;
+                self.terminal_history_cursor = None;
                 match action {
                     TerminalAction::Message(message) => self.set_terminal_message(message),
                     TerminalAction::Clear => self.terminal_message_len = 0,
@@ -542,15 +569,66 @@ impl DesktopState {
             }
             0x08 => {
                 self.terminal_len = self.terminal_len.saturating_sub(1);
+                self.terminal_history_cursor = None;
             }
             byte if (byte.is_ascii_graphic() || byte == b' ')
                 && self.terminal_len < self.terminal_line.len() =>
             {
                 self.terminal_line[self.terminal_len] = byte;
                 self.terminal_len += 1;
+                self.terminal_history_cursor = None;
             }
             _ => {}
         }
+    }
+
+    fn record_terminal_history(&mut self, command: &[u8]) {
+        let command = trim_ascii(command);
+        if command.is_empty() {
+            return;
+        }
+        let count = command.len().min(self.terminal_line.len());
+        self.terminal_history[self.terminal_history_next][..count]
+            .copy_from_slice(&command[..count]);
+        self.terminal_history_len[self.terminal_history_next] = count as u8;
+        self.terminal_history_next = (self.terminal_history_next + 1) % TERMINAL_HISTORY;
+        self.terminal_history_count = (self.terminal_history_count + 1).min(TERMINAL_HISTORY);
+    }
+
+    fn recall_terminal_history(&mut self, older: bool) {
+        if self.terminal_history_count == 0 {
+            return;
+        }
+        let cursor = if older {
+            self.terminal_history_cursor
+                .map(|cursor| (cursor + 1).min(self.terminal_history_count - 1))
+                .unwrap_or(0)
+        } else {
+            let Some(cursor) = self.terminal_history_cursor else {
+                return;
+            };
+            if cursor == 0 {
+                self.terminal_len = 0;
+                self.terminal_history_cursor = None;
+                return;
+            }
+            cursor - 1
+        };
+        let index = (self.terminal_history_next + TERMINAL_HISTORY - 1 - cursor) % TERMINAL_HISTORY;
+        let count = self.terminal_history_len[index] as usize;
+        self.terminal_line[..count].copy_from_slice(&self.terminal_history[index][..count]);
+        self.terminal_len = count;
+        self.terminal_history_cursor = Some(cursor);
+    }
+
+    fn terminal_history_entry(&self, reverse_index: usize) -> Option<&str> {
+        if reverse_index >= self.terminal_history_count {
+            return None;
+        }
+        let index =
+            (self.terminal_history_next + TERMINAL_HISTORY - 1 - reverse_index) % TERMINAL_HISTORY;
+        let count = self.terminal_history_len[index] as usize;
+        core::str::from_utf8(&self.terminal_history[index][..count]).ok()
     }
 }
 
@@ -566,18 +644,42 @@ enum TerminalAction {
 }
 
 pub fn run(input: &mut Input, start_browser: bool) {
+    run_session(
+        input,
+        if start_browser {
+            AppKind::Browser
+        } else {
+            AppKind::Terminal
+        },
+    );
+}
+
+pub fn run_games(input: &mut Input) {
+    run_session(input, AppKind::Games);
+}
+
+fn run_session(input: &mut Input, start_app: AppKind) {
     if !framebuffer::enter() {
         crate::println!("HexaDisplay unavailable: no Bochs/QEMU VBE framebuffer.");
         slog!("HEXA_DISPLAY_UNAVAILABLE\r\n");
         return;
     }
 
-    let mut desktop = DesktopState::new(start_browser);
+    let mut desktop = DesktopState::new(start_app == AppKind::Browser);
+    if start_app == AppKind::Games {
+        desktop.switch_workspace(4);
+    }
     render(&desktop);
-    slog!("HEXA_DISPLAY_READY surfaces=9 commit=9\r\n");
+    slog!("HEXA_DISPLAY_READY surfaces=10 commit=10\r\n");
 
     while !desktop.should_exit {
         let Some(key) = input.poll() else {
+            if desktop.active == AppKind::Games
+                && desktop.app_is_visible(AppKind::Games)
+                && desktop.games.tick(crate::hardware::timestamp())
+            {
+                render(&desktop);
+            }
             core::hint::spin_loop();
             continue;
         };
@@ -609,6 +711,10 @@ pub fn run(input: &mut Input, start_browser: bool) {
             render(&desktop);
             continue;
         }
+        if desktop.active == AppKind::Games && desktop.games.handle_key(key) {
+            render(&desktop);
+            continue;
+        }
         match key {
             KEY_SUPER_TERMINAL => desktop.switch_to(AppKind::Terminal),
             KEY_SUPER_BROWSER => desktop.switch_to(AppKind::Browser),
@@ -616,14 +722,14 @@ pub fn run(input: &mut Input, start_browser: bool) {
             KEY_SUPER_CYCLE | KEY_SUPER_LEFT | KEY_SUPER_RIGHT => desktop.cycle_app(),
             KEY_SUPER_UP => {
                 let workspace = if desktop.workspace == 1 {
-                    3
+                    4
                 } else {
                     desktop.workspace - 1
                 };
                 desktop.switch_workspace(workspace);
             }
             KEY_SUPER_DOWN => {
-                let workspace = if desktop.workspace == 3 {
+                let workspace = if desktop.workspace == 4 {
                     1
                 } else {
                     desktop.workspace + 1
@@ -636,7 +742,12 @@ pub fn run(input: &mut Input, start_browser: bool) {
             KEY_SUPER_WORKSPACE_1 => desktop.switch_workspace(1),
             KEY_SUPER_WORKSPACE_2 => desktop.switch_workspace(2),
             KEY_SUPER_WORKSPACE_3 => desktop.switch_workspace(3),
+            KEY_SUPER_WORKSPACE_4 => desktop.switch_workspace(4),
             b'\t' => desktop.cycle_app(),
+            KEY_UP if desktop.active == AppKind::Terminal => desktop.recall_terminal_history(true),
+            KEY_DOWN if desktop.active == AppKind::Terminal => {
+                desktop.recall_terminal_history(false)
+            }
             KEY_LEFT => desktop.move_active(-12, 0),
             KEY_RIGHT => desktop.move_active(12, 0),
             KEY_UP => desktop.move_active(0, -12),
@@ -675,6 +786,7 @@ fn app_shortcut(key: u8) -> Option<AppKind> {
         b'p' => Some(AppKind::Packages),
         b's' => Some(AppKind::Settings),
         b'i' => Some(AppKind::System),
+        b'g' => Some(AppKind::Games),
         _ => None,
     }
 }
@@ -687,6 +799,7 @@ fn launcher_shortcut(key: u8) -> Option<AppKind> {
         b'p' | b'4' => Some(AppKind::Packages),
         b's' | b'5' => Some(AppKind::Settings),
         b'i' | b'6' => Some(AppKind::System),
+        b'g' | b'7' => Some(AppKind::Games),
         _ => None,
     }
 }
@@ -695,7 +808,7 @@ fn terminal_action(command: &[u8]) -> TerminalAction {
     let trimmed = trim_ascii(command);
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case(b"help") {
         TerminalAction::Message(
-            "COMMANDS: STATUS FORMS PACKAGES BROWSER SETTINGS SYSTEM WS1 WS2 WS3 FLOAT FULL OVERVIEW CLEAR EXIT",
+            "COMMANDS: STATUS FORMS PACKAGES BROWSER GAMES SETTINGS SYSTEM WS1 WS2 WS3 WS4 FLOAT FULL OVERVIEW CLEAR EXIT",
         )
     } else if trimmed.eq_ignore_ascii_case(b"status") {
         TerminalAction::Message("EXPOS ONLINE. HEXADISPLAY V1. NETWORK RESTRICTED.")
@@ -709,12 +822,16 @@ fn terminal_action(command: &[u8]) -> TerminalAction {
         TerminalAction::Switch(AppKind::Settings)
     } else if trimmed.eq_ignore_ascii_case(b"system") {
         TerminalAction::Switch(AppKind::System)
+    } else if trimmed.eq_ignore_ascii_case(b"games") || trimmed.eq_ignore_ascii_case(b"arcade") {
+        TerminalAction::Switch(AppKind::Games)
     } else if trimmed.eq_ignore_ascii_case(b"ws1") {
         TerminalAction::Workspace(1)
     } else if trimmed.eq_ignore_ascii_case(b"ws2") {
         TerminalAction::Workspace(2)
     } else if trimmed.eq_ignore_ascii_case(b"ws3") {
         TerminalAction::Workspace(3)
+    } else if trimmed.eq_ignore_ascii_case(b"ws4") {
+        TerminalAction::Workspace(4)
     } else if trimmed.eq_ignore_ascii_case(b"float") {
         TerminalAction::Float
     } else if trimmed.eq_ignore_ascii_case(b"full") || trimmed.eq_ignore_ascii_case(b"fullscreen") {
@@ -799,6 +916,7 @@ fn draw_app(desktop: &DesktopState, app: AppKind, focused: bool) {
             AppKind::Packages => draw_packages(rect),
             AppKind::Settings => draw_settings(rect),
             AppKind::System => draw_system(rect, desktop),
+            AppKind::Games => desktop.games.render(rect),
         }
     } else {
         draw_compact_app(rect, app, desktop, focused);
@@ -811,9 +929,9 @@ fn draw_panel(desktop: &DesktopState) {
     framebuffer::rect(16, 10, 22, 22, color::PURPLE);
     framebuffer::text(22, 17, "H", color::WHITE, 1);
     framebuffer::text(50, 12, "EXPOS", color::WHITE, 2);
-    framebuffer::text(120, 14, "HYPRFORM", color::CYAN, 1);
-    for workspace in 1..=3 {
-        let x = 230 + (workspace - 1) * 42;
+    framebuffer::text(120, 14, "PRISM", color::CYAN, 1);
+    for workspace in 1..=4 {
+        let x = 205 + (workspace - 1) * 38;
         framebuffer::rect(
             x,
             9,
@@ -828,7 +946,7 @@ fn draw_panel(desktop: &DesktopState) {
         draw_number(x + 13, 17, workspace as u64, color::WHITE);
     }
     framebuffer::text(
-        382,
+        368,
         14,
         if desktop.fullscreen {
             "FULLSCREEN"
@@ -840,9 +958,9 @@ fn draw_panel(desktop: &DesktopState) {
         color::MUTED,
         1,
     );
-    framebuffer::text(510, 14, "WIN", color::MUTED, 1);
-    draw_number(538, 14, desktop.current_window_count() as u64, color::CYAN);
-    framebuffer::text(586, 14, "CAPABILITY COMPOSITOR", color::MUTED, 1);
+    framebuffer::text(492, 14, "WIN", color::MUTED, 1);
+    draw_number(520, 14, desktop.current_window_count() as u64, color::CYAN);
+    framebuffer::text(553, 14, "CAPABILITY COMPOSITOR", color::MUTED, 1);
     framebuffer::rect(730, 14, 8, 8, color::GREEN);
     framebuffer::text(746, 14, "ONLINE", color::WHITE, 1);
 }
@@ -1025,6 +1143,22 @@ fn draw_terminal(rect: Rect, desktop: &DesktopState) {
                 .unwrap_or("INVALID TERMINAL OUTPUT");
         wrapped_text(x + 34, y + 181, width - 76, message, color::CYAN, 2);
     }
+    if height >= 430 {
+        framebuffer::text(
+            x + 34,
+            y + 242,
+            "RECENT // UP DOWN TO RECALL",
+            color::MUTED,
+            1,
+        );
+        for reverse_index in (0..3).rev() {
+            if let Some(command) = desktop.terminal_history_entry(reverse_index) {
+                let row = y + 266 + (2 - reverse_index) as i32 * 20;
+                framebuffer::text(x + 40, row, ">", color::PURPLE, 1);
+                framebuffer::text(x + 54, row, command, color::MUTED, 1);
+            }
+        }
+    }
     framebuffer::text(x + 34, y + height - 83, "operator@stable>", color::GREEN, 2);
     if let Ok(line) = core::str::from_utf8(&desktop.terminal_line[..desktop.terminal_len]) {
         framebuffer::text(x + 226, y + height - 83, line, color::WHITE, 2);
@@ -1038,7 +1172,7 @@ fn draw_terminal(rect: Rect, desktop: &DesktopState) {
     }
     app_footer(
         rect,
-        "ENTER RUN  BACKSPACE EDIT  TAB NEXT APP  \x60 LAUNCHER  ESC SHELL",
+        "ENTER RUN  UP DOWN HISTORY  TAB NEXT APP  \x60 LAUNCHER  ESC SHELL",
     );
 }
 
@@ -1103,16 +1237,16 @@ fn draw_packages(rect: Rect) {
     package_card(
         x + 28,
         y + 232,
-        "GOSDK",
+        "GAMEHUB + SNAKE + PONG",
         "AVAILABLE",
-        "GO ABI V1 DEVELOPMENT KIT",
+        "NATIVE PLAYABLE GAME FORMS",
     );
     package_card(
         x + 28,
         y + 290,
-        "DEMOBROWSER",
+        "PRISMDE + DEVELOPERKIT",
         "AVAILABLE",
-        "LOCAL DOCUMENT INTERFACE",
+        "DESKTOP AND GO WORKSPACE",
     );
     framebuffer::text(
         x + 34,
@@ -1202,7 +1336,7 @@ fn draw_system(rect: Rect, desktop: &DesktopState) {
         color::GREEN,
     );
     metric(x + 352, y + 120, "FRAMEBUFFER", "800 X 600", color::CYAN);
-    metric(x + 28, y + 196, "SURFACES", "9 FORM OWNED", color::PURPLE);
+    metric(x + 28, y + 196, "SURFACES", "10 FORM OWNED", color::PURPLE);
     metric(x + 352, y + 196, "GO ABI", "VERSION 1", color::GREEN);
     metric(x + 28, y + 272, "INPUT", "PS2 SERIAL", color::CYAN);
     metric(x + 352, y + 272, "NETWORK", "RESTRICTED", color::RED);
@@ -1239,10 +1373,10 @@ fn draw_dock(desktop: &DesktopState) {
     framebuffer::rect(0, 568, 800, 32, color::PANEL);
     framebuffer::rect(0, 568, 800, 1, 0x0030_374C);
     framebuffer::text(18, 580, "SUPER+SPACE", color::WHITE, 1);
-    let mut x = 130;
+    let mut x = 124;
     for app in AppKind::ALL {
         if app == desktop.active {
-            framebuffer::rect(x - 7, 574, 91, 20, color::PURPLE);
+            framebuffer::rect(x - 7, 574, 76, 20, color::PURPLE);
         }
         if desktop.app_open[app.index()] {
             framebuffer::rect(x - 2, 576, 4, 4, app.accent());
@@ -1258,24 +1392,13 @@ fn draw_dock(desktop: &DesktopState) {
             },
             1,
         );
-        framebuffer::text(
-            x + 19,
-            581,
-            app.title(),
-            if app == desktop.active {
-                color::WHITE
-            } else {
-                color::MUTED
-            },
-            1,
-        );
         draw_number(
-            x + 74,
+            x + 51,
             581,
             desktop.app_workspaces[app.index()] as u64,
             color::MUTED,
         );
-        x += 108;
+        x += 92;
     }
 }
 
@@ -1286,19 +1409,19 @@ fn draw_overview(desktop: &DesktopState) {
     framebuffer::text(
         50,
         108,
-        "SUPER+O CLOSE  SUPER+1..3 WORKSPACE  SUPER+Q CLOSE WINDOW",
+        "SUPER+O CLOSE  SUPER+1..4 WORKSPACE  SUPER+Q CLOSE WINDOW",
         color::MUTED,
         1,
     );
     for (index, app) in AppKind::ALL.iter().copied().enumerate() {
-        let column = index % 3;
-        let row = index / 3;
-        let x = 50 + column as i32 * 238;
+        let column = index % 4;
+        let row = index / 4;
+        let x = 50 + column as i32 * 178;
         let y = 140 + row as i32 * 176;
         framebuffer::rect(
             x,
             y,
-            216,
+            162,
             150,
             if app == desktop.active {
                 0x0035_285E
@@ -1309,7 +1432,7 @@ fn draw_overview(desktop: &DesktopState) {
         framebuffer::outline(
             x,
             y,
-            216,
+            162,
             150,
             if app == desktop.active {
                 color::PURPLE
@@ -1319,7 +1442,6 @@ fn draw_overview(desktop: &DesktopState) {
         );
         framebuffer::rect(x + 14, y + 15, 8, 38, app.accent());
         framebuffer::text(x + 34, y + 17, app.title(), color::WHITE, 1);
-        framebuffer::text(x + 34, y + 40, app.summary(), color::MUTED, 1);
         framebuffer::text(x + 14, y + 82, "WORKSPACE", color::MUTED, 1);
         draw_number(
             x + 98,
@@ -1346,9 +1468,9 @@ fn draw_overview(desktop: &DesktopState) {
 }
 
 fn draw_launcher(desktop: &DesktopState) {
-    framebuffer::rect(24, 54, 280, 360, 0x0005_0710);
-    framebuffer::rect(18, 48, 280, 360, color::PANEL);
-    framebuffer::outline(18, 48, 280, 360, color::PURPLE);
+    framebuffer::rect(24, 54, 280, 410, 0x0005_0710);
+    framebuffer::rect(18, 48, 280, 410, color::PANEL);
+    framebuffer::outline(18, 48, 280, 410, color::PURPLE);
     framebuffer::text(38, 70, "FORM LAUNCHER", color::WHITE, 2);
     framebuffer::text(38, 96, "SELECT AN INTERFACE", color::MUTED, 1);
     for (index, app) in AppKind::ALL.iter().copied().enumerate() {
@@ -1378,7 +1500,7 @@ fn draw_launcher(desktop: &DesktopState) {
         framebuffer::text(49, y + 14, app.shortcut(), color::WHITE, 1);
         framebuffer::text(77, y + 13, app.title(), color::WHITE, 1);
     }
-    framebuffer::text(38, 386, "\x60 OR ESC CLOSE", color::MUTED, 1);
+    framebuffer::text(38, 438, "\x60 OR ESC CLOSE", color::MUTED, 1);
 }
 
 fn wrapped_text(mut x: i32, mut y: i32, width: i32, value: &str, color: u32, scale: i32) -> i32 {

@@ -1,4 +1,4 @@
-# HexaOS v8 architecture rebuild
+# ExpOS Prism v8 architecture rebuild
 
 This repository is the unified HexaOS rebuild derived from the living
 philosophy specification. It combines the useful foundations of both supplied
@@ -18,10 +18,12 @@ projects without making either legacy architecture the new system model:
   constraints, reconciliation, checkpoints and crash recovery.
 - `HexaDisplay` is a native 800x600 graphical server with Form-owned surfaces,
   buffers, damage, atomic commits, focus, z-order, hit testing and input events.
-- the HexaDisplay desktop is a Hyprland-inspired capability compositor with
-  three workspaces, master-stack tiling, floating/fullscreen windows, an
+- the HexaDisplay desktop is the new Prism environment: a Hyprland-inspired
+  capability compositor with four workspaces, master-stack tiling,
+  floating/fullscreen windows, an
   overview, Form launcher, graphical Terminal, Browser, Form registry, Ayo
-  package center, Settings and live System Scope. Each application owns its
+  package center, Settings, live System Scope, and a native arcade containing
+  playable Snake and Pong. Each application owns its
   surface and receives a narrow delegated Display/Input Handle.
 - `Browser` is a native graphical Interface Form with a bounded local HTML
   parser, document renderer, links and policy-explained network restrictions.
@@ -52,8 +54,10 @@ Open the package catalog and select a Form by number or name:
 ./ayo/bin/ayo --authority operator
 ```
 
-`Browser`, for example, resolves and installs its complete dependency plan in
-one atomic transaction. A remote checksummed catalog can be selected with
+`Browser` and `Snake`, for example, resolve and install their complete
+dependency plans in one atomic transaction. The built-in 18-package catalog
+also includes PrismDE, InputKit, DeveloperKit, TextLab, VirtioBlock, and
+AudioKit. A remote checksummed catalog can be selected with
 `--registry https://.../catalog.json`; `--registry-key` additionally requires
 an Ed25519 signature.
 
@@ -71,14 +75,16 @@ help clear echo about status whoami
 forms packages dimensions inspect journal policy handles relationships
 mkform retire activate reclaim resolve grant revoke handlecheck pimp
 relate unrelate
-desktop browser displayinfo goabi
-ayo reboot shutdown
+desktop browser games displayinfo goabi
+features kernelcaps ayo reboot shutdown
 ```
 
-The alpha.8 shell also ports the practical HexaOS 7.2 command layer: Form
+The alpha.9 shell also ports the practical HexaOS 7.2 command layer: Form
 content (`write`, `append`, `cat`, `head`, `copy`, `move`, `delete/recover`,
 `hexdump`, hashes), hardware inspection, calculator/string/math tools,
-Dimensions, history, system diagnostics, and the original fun utilities.
+Dimensions, system diagnostics, and the original fun utilities. Both the text
+shell and graphical Terminal keep bounded command history; Up and Down recall
+older and newer entries through either the QEMU keyboard or ANSI serial input.
 
 Forms, Handles, Dimensions, and PIMP changes made in the v8 shell are currently
 in-memory and reset at reboot. Persistent HexaFS block integration is the next
@@ -87,12 +93,14 @@ native storage phase.
 Type `browser` or `desktop` in the booted kernel to enter HexaDisplay.
 `desktop` opens the graphical Terminal while `browser` focuses the Browser.
 The compositor bindings are `Super+Space` launcher, `Super+Enter` Terminal,
-`Super+B` Browser, `Super+1/2/3` workspaces, `Super+arrows` focus/workspace
+`Super+B` Browser, `Super+1/2/3/4` workspaces, `Super+arrows` focus/workspace
 movement, `Super+F` fullscreen, `Super+V` floating, `Super+O` overview,
-`Super+Q` close and `Super+Tab` cycle. Backtick, `B/T/F/P/S/I`, `Tab`, and
+`Super+Q` close and `Super+Tab` cycle. Backtick, `B/T/F/P/S/I/G`, `Tab`, and
 arrow-key fallbacks remain available. `Esc` returns to the text environment.
-The graphical Terminal also accepts `ws1/ws2/ws3`, `float`, `full`, `overview`,
-`help`, and `exit`.
+The graphical Terminal also accepts `ws1/ws2/ws3/ws4`, `games`, `float`,
+`full`, `overview`, `help`, and `exit`. The shell command `games` opens Prism
+Arcade directly; choose `1` for Snake or `2` for Pong, steer with the arrows,
+pause with Space, reset with `R`, and return to the arcade with `M`.
 
 The complete 32-bit Diamond II environment remains runnable while its deeper
 drivers and games are ported:

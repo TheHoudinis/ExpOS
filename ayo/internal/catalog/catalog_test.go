@@ -29,6 +29,22 @@ func TestBuiltinBrowserResolvesCompleteFormPlan(t *testing.T) {
 	}
 }
 
+func TestBuiltinSnakeResolvesPlayableGameStack(t *testing.T) {
+	plan, err := Builtin().Resolve("Snake", "Stable", model.State{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"CoreTools", "HexaDisplay", "InputKit", "GameHub", "Snake"}
+	if len(plan) != len(want) {
+		t.Fatalf("unexpected plan: %#v", plan)
+	}
+	for index := range want {
+		if plan[index].Name != want[index] {
+			t.Fatalf("plan[%d]=%s want %s", index, plan[index].Name, want[index])
+		}
+	}
+}
+
 func TestCatalogRejectsTamperedPackage(t *testing.T) {
 	catalog := Builtin()
 	catalog.Packages[0].Summary = "tampered"

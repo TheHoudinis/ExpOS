@@ -1,4 +1,5 @@
 use crate::{port, serial};
+use core::arch::x86_64::_rdtsc;
 
 const PS2_STATUS: u16 = 0x64;
 const PS2_DATA: u16 = 0x60;
@@ -18,6 +19,7 @@ pub const KEY_SUPER_OVERVIEW: u8 = 0x97;
 pub const KEY_SUPER_WORKSPACE_1: u8 = 0x98;
 pub const KEY_SUPER_WORKSPACE_2: u8 = 0x99;
 pub const KEY_SUPER_WORKSPACE_3: u8 = 0x9A;
+pub const KEY_SUPER_WORKSPACE_4: u8 = 0x9F;
 pub const KEY_SUPER_LEFT: u8 = 0x9B;
 pub const KEY_SUPER_RIGHT: u8 = 0x9C;
 pub const KEY_SUPER_UP: u8 = 0x9D;
@@ -28,6 +30,8 @@ pub struct Input {
     caps_lock: bool,
     extended: bool,
     super_key: bool,
+    serial_escape: u8,
+    serial_escape_started: u64,
 }
 
 impl Input {
@@ -37,13 +41,21 @@ impl Input {
             caps_lock: false,
             extended: false,
             super_key: false,
+            serial_escape: 0,
+            serial_escape_started: 0,
         }
     }
 
     /// Poll serial first, then the PS/2 controller used by the QEMU window.
     pub fn poll(&mut self) -> Option<u8> {
         if let Some(byte) = serial::COM1.lock().try_read() {
-            return normalize_serial(byte);
+            return self.decode_serial(byte);
+        }
+        if self.serial_escape != 0
+            && unsafe { _rdtsc() }.wrapping_sub(self.serial_escape_started) > 5_000_000
+        {
+            self.serial_escape = 0;
+            return Some(0x1B);
         }
         let status = unsafe { port::inb(PS2_STATUS) };
         if status & 0x01 == 0 {
@@ -66,6 +78,14 @@ impl Input {
                     None
                 }
                 0xDB => {
+                    self.super_key = false;
+                    None
+                }
+                0x5C => {
+                    self.super_key = true;
+                    None
+                }
+                0xDC => {
                     self.super_key = false;
                     None
                 }
@@ -167,6 +187,47 @@ impl Input {
             Some(key)
         }
     }
+
+    fn decode_serial(&mut self, byte: u8) -> Option<u8> {
+        match (self.serial_escape, byte) {
+            (0, 0x1B) => {
+                self.serial_escape = 1;
+                self.serial_escape_started = unsafe { _rdtsc() };
+                None
+            }
+            (1, b'[') => {
+                self.serial_escape = 2;
+                None
+            }
+            (1, _) => {
+                self.serial_escape = 0;
+                Some(0x1B)
+            }
+            (2, b'A') => {
+                self.serial_escape = 0;
+                Some(KEY_UP)
+            }
+            (2, b'B') => {
+                self.serial_escape = 0;
+                Some(KEY_DOWN)
+            }
+            (2, b'C') => {
+                self.serial_escape = 0;
+                Some(KEY_RIGHT)
+            }
+            (2, b'D') => {
+                self.serial_escape = 0;
+                Some(KEY_LEFT)
+            }
+            (2, _) => {
+                self.serial_escape = 0;
+                None
+            }
+            (_, b'\r') => Some(b'\n'),
+            (_, 0x7F) => Some(0x08),
+            (_, value) => Some(value),
+        }
+    }
 }
 
 fn super_binding(key: u8) -> Option<u8> {
@@ -182,15 +243,8 @@ fn super_binding(key: u8) -> Option<u8> {
         b'1' => Some(KEY_SUPER_WORKSPACE_1),
         b'2' => Some(KEY_SUPER_WORKSPACE_2),
         b'3' => Some(KEY_SUPER_WORKSPACE_3),
+        b'4' => Some(KEY_SUPER_WORKSPACE_4),
         _ => None,
-    }
-}
-
-fn normalize_serial(byte: u8) -> Option<u8> {
-    match byte {
-        b'\r' => Some(b'\n'),
-        0x7F => Some(0x08),
-        value => Some(value),
     }
 }
 

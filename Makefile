@@ -36,6 +36,7 @@ check: $(ISO)
 	grep -q "HEXA_BOOT_OK" $(BUILD)/serial.log
 	grep -q "HEXA_SHELL_READY" $(BUILD)/serial.log
 	grep -q "HEXA_COMMAND_OK help" $(BUILD)/serial.log
+	grep -q "KERNEL FEATURE MATRIX" $(BUILD)/serial.log
 	grep -q "Ayo.*package" $(BUILD)/serial.log
 	grep -q "HexaDisplay.*service" $(BUILD)/serial.log
 	grep -q "GoABI.*interface" $(BUILD)/serial.log
@@ -59,7 +60,7 @@ display-check: $(ISO)
 	rm -f $(BUILD)/display-serial.log
 	timeout 20 $(QEMU) -device isa-debug-exit,iobase=0xf4,iosize=0x04 -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-display-input.txt > $(BUILD)/display-serial.log 2>&1 || true
 	grep -q "framebuffer: 800x600 XRGB8888 available=true" $(BUILD)/display-serial.log
-	grep -q "HEXA_DISPLAY_READY surfaces=9 commit=9" $(BUILD)/display-serial.log
+	grep -q "HEXA_DISPLAY_READY surfaces=10 commit=10" $(BUILD)/display-serial.log
 	grep -q "HEXA_DISPLAY_CLOSED" $(BUILD)/display-serial.log
 	grep -q "HEXA_COMMAND_OK desktop" $(BUILD)/display-serial.log
 	grep -q "HexaOS Go ABI v1" $(BUILD)/display-serial.log

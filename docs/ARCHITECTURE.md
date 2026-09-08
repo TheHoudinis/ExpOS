@@ -62,9 +62,9 @@ firmware / GRUB (temporary)
   mutate pending state, report damage, and publish atomically with `commit`.
   Focus, configure, frame-complete and key events are routed back to the owning
   FIN. The alpha renderer targets the mapped Bochs/QEMU XRGB framebuffer.
-- The Hyprland-inspired desktop creates separate Browser, Terminal, Forms,
-  Packages, Settings and System surfaces, plus Root, panel and launcher
-  surfaces. Three workspaces provide master-stack tiling, floating/fullscreen
+- The Prism desktop creates separate Browser, Terminal, Forms, Packages,
+  Settings, System and Games surfaces, plus Root, panel and launcher surfaces.
+  Four workspaces provide master-stack tiling, floating/fullscreen
   windows and overview. Each application receives a child Handle containing
   only Display and Input rights; the compositor checks it before visibility,
   geometry, commit or key routing. Leaving graphics restores the VGA mode 3
@@ -99,7 +99,8 @@ The command environment is deliberately backed by fixed-capacity, in-memory
 tables at this stage. Its mutations exercise the core semantics but are not
 durable until the HexaFS block driver and recovery path are connected.
 
-Alpha.3 ports the broad hardware, utility and Form-content command layer. The
-Diamond II build is also exposed through `make run-alpha`, providing a runnable
-migration fallback for games, networking, scheduling, ATA persistence and VBE
-while their public interfaces are redesigned around v8 semantics.
+Alpha.9 includes the broad hardware, utility and Form-content command layer,
+Prism Arcade, and command recall in both terminals. The Diamond II build is
+also exposed through `make run-alpha`, providing a runnable migration fallback
+for networking, scheduling, ATA persistence and the games not yet redesigned
+around v8 semantics.

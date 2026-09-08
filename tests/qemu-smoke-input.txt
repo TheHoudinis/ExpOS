@@ -5,6 +5,7 @@ packages
 relationships Ayo
 date
 cpuinfo
+features
 lspci
 mem
 calc 7 * 6

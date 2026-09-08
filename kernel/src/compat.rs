@@ -4,6 +4,7 @@ pub fn execute(command: &str, args: &str) -> bool {
     match command {
         "date" | "clock" => hardware::print_date(),
         "cpuinfo" => hardware::print_cpu_info(),
+        "features" | "kernelcaps" => hardware::print_kernel_features(),
         "lspci" => hardware::print_pci(),
         "mem" | "free" => hardware::print_memory_architecture(),
         "neofetch" | "sysinfo" => neofetch(),
@@ -32,7 +33,7 @@ pub fn execute(command: &str, args: &str) -> bool {
         "cowsay" => cowsay(args),
         "banner" => banner(args),
         "logo" => logo(),
-        "sysname" | "uname" => println!("HexaOS 8.0.0-alpha.3 x86_64 Form-native"),
+        "sysname" | "uname" => println!("HexaOS {} x86_64 Form-native", env!("CARGO_PKG_VERSION")),
         "env" => {
             println!("SYSTEM=HexaOS/8");
             println!("ARCH=x86_64");
@@ -61,6 +62,8 @@ pub fn is_command(name: &str) -> bool {
         "date"
             | "clock"
             | "cpuinfo"
+            | "features"
+            | "kernelcaps"
             | "lspci"
             | "mem"
             | "free"

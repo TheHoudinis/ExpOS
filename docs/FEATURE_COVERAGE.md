@@ -1,6 +1,6 @@
 # HexaOS feature coverage
 
-HexaOS v8.0.0-alpha.8 uses two runnable environments during migration. `make
+ExpOS v8.0.0-alpha.9 uses two runnable environments during migration. `make
 run` boots the new x86_64 Form-native kernel. `make run-alpha` boots the original
 32-bit Diamond II system with its existing storage image.
 
@@ -11,13 +11,13 @@ run` boots the new x86_64 Form-native kernel. `make run-alpha` boots the origina
 | Forms | `mkform`, `forms/list`, `inspect/fin`, exact `resolve`, `view/cat`, `write`, `append`, `head`, `copy`, `move`, `delete`, `recover`, `retire`, `activate`, guarded `reclaim`, `hexdump`, `du`, `df`, `shasum`, `which`; typed `relate`/`unrelate`/`relationships` |
 | Dimensions and policy | `dimensions`, `makedim`, `policy`, `pimp`, `journal` |
 | Capabilities | `grant`, `revoke`, `handles`, and `handlecheck` with requester-bound, scoped, expiring Form Handles; non-amplifying delegation; parent-linked revocation cascades; explicit Display and Input rights |
-| Packages | `Ayo` boot Package Form, `packages`, and Go `ayo v2` with interactive TUI, offline/HTTPS catalogs, checksums/signatures, atomic dependency plans, all 11 commands, version constraints, dependency protection, reconciliation, capability merges, manifests and recovery |
-| Graphics | `HexaDisplay` Service Form; 800x600 XRGB8888 Bochs/QEMU framebuffer; Hyprland-inspired capability compositor with three workspaces, master-stack tiling, floating/fullscreen modes, overview, Super-key bindings and nine surfaces; Form-owned Browser, Terminal, Forms, Packages, Settings and System windows; atomic geometry/commit, configure/frame/focus/key events, z-order and hit testing; VGA text-mode restoration on exit; `desktop`, `displayinfo` |
+| Packages | `Ayo` boot Package Form and Go `ayo v2` with an 18-package built-in Prism catalog, interactive number/name/search TUI, offline/HTTPS catalogs, checksums/signatures, atomic dependency plans, all 11 commands, version constraints, dependency protection, reconciliation, capability merges, manifests and recovery |
+| Graphics | `HexaDisplay` Service Form; 800x600 XRGB8888 Bochs/QEMU framebuffer; Prism capability compositor with four workspaces, master-stack tiling, floating/fullscreen modes, overview, Super-key bindings and ten surfaces; Form-owned Browser, Terminal, Forms, Packages, Settings, System and Games windows; atomic geometry/commit, configure/frame/focus/key events, z-order and hit testing; VGA text-mode restoration on exit; `desktop`, `displayinfo` |
 | Browser | Native `Browser` Interface Form; bounded local HTML title/heading/paragraph/list/link parsing and graphical rendering; `hexa://` navigation with DIESE/PIMP explanation for blocked external networking |
-| Desktop apps | Graphical Terminal with bounded command input; Form registry; Ayo package catalog view; session Settings; live System Scope; shared launcher and dock |
+| Desktop apps | Graphical Terminal with Up/Down command history; Form registry; Ayo package catalog view; session Settings; live System Scope; Prism Arcade with native ticking Snake and Pong; shared launcher and dock |
 | Go | Shared ABI v1 call numbers and validation in Rust, tested `sdk/go/hexa` client and emulator, `GoABI` Interface Form and `goabi` diagnostics |
-| Hardware | `date/clock`, `cpuinfo`, `lspci`, `mem/free`, VGA and COM1 consoles, PS/2 and serial input |
-| System | `status`, `kstat`, `ps`, `dmesg/bootlog`, `ifconfig`, `netstat`, `mode`, `history`, `uptime`, `env`, `whoami`, `reboot`, `shutdown` |
+| Hardware | `date/clock`, `cpuinfo`, `features/kernelcaps`, `lspci`, `mem/free`, VGA and COM1 consoles, PS/2 keyboard including both Super keys, ANSI serial arrow decoding, serial Esc timeout, and CPUID/control-register feature reporting |
+| System | `status`, `kstat`, `ps`, `dmesg/bootlog`, `ifconfig`, `netstat`, `mode`, bounded Up/Down shell history, `history`, `uptime`, `env`, `whoami`, `reboot`, `shutdown` |
 | Utilities | `calc`, `factor`, `len`, `hex`, `reverse/rev`, `tolower`, `toupper`, `rand`, `dice`, `ascii`, `palette`, `morse`, `sleep`, `true`, `false` |
 | Personality | `fortune`, `8ball`, `cowsay`, `banner`, `logo`, `matrix/cmatrix`, `russian`, `insult`, `excuse`, `compliment`, `hack` |
 
@@ -35,7 +35,7 @@ reclamation after Dimension bindings are removed.
 - framebuffer/VBE mode switching and double buffering;
 - users, password login and the legacy `diese`/PIMP ACL layer;
 - intents, typed pipes, events, replay, boot policy and observers;
-- Snake, Tetris, Tic-Tac-Toe, Hangman, Memory and Guess;
+- Tetris, Tic-Tac-Toe, Hangman, Memory and Guess (Snake and Pong are now also native Prism Game Forms);
 - the remaining legacy shell and package commands.
 
 These subsystems are preserved as functionality, but they are not labeled

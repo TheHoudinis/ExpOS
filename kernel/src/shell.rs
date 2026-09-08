@@ -1,4 +1,7 @@
-use crate::{input::Input, port, print, println, slog, vga};
+use crate::{
+    input::{Input, KEY_DOWN, KEY_UP},
+    port, print, println, slog, vga,
+};
 use hexa_core::{
     Authority, BootReport, CapabilityBroker, Dimension, Fin, Form, FormHandle, FormKind, Lifecycle,
     Operations, PimpScope, PimpSpec, Relationship, RelationshipGraph, RelationshipKind, Text,
@@ -19,6 +22,7 @@ pub fn run(report: BootReport) -> ! {
     let mut input = Input::new();
     let mut line = [0_u8; MAX_LINE];
     let mut length = 0;
+    let mut history_cursor = None;
 
     println!();
     println!("Hexa command environment ready. Type 'help'.");
@@ -37,6 +41,7 @@ pub fn run(report: BootReport) -> ! {
                     shell.execute(command.trim(), &mut input);
                 }
                 length = 0;
+                history_cursor = None;
                 prompt();
             }
             0x08 => {
@@ -45,7 +50,29 @@ pub fn run(report: BootReport) -> ! {
                     print!("\x08 \x08");
                 }
             }
+            KEY_UP => {
+                if shell.history_count > 0 {
+                    let next = history_cursor
+                        .map(|cursor: usize| (cursor + 1).min(shell.history_count - 1))
+                        .unwrap_or(0);
+                    replace_input_line(&mut line, &mut length, shell.recent_history(next));
+                    history_cursor = Some(next);
+                }
+            }
+            KEY_DOWN => {
+                if let Some(cursor) = history_cursor {
+                    if cursor == 0 {
+                        replace_input_line(&mut line, &mut length, None);
+                        history_cursor = None;
+                    } else {
+                        let next = cursor - 1;
+                        replace_input_line(&mut line, &mut length, shell.recent_history(next));
+                        history_cursor = Some(next);
+                    }
+                }
+            }
             printable @ 0x20..=0x7E if length < MAX_LINE - 1 => {
+                history_cursor = None;
                 line[length] = printable;
                 length += 1;
                 print!("{}", printable as char);
@@ -450,7 +477,11 @@ impl Shell {
                 println!("CLI:      ./ayo/bin/ayo --authority operator <command>");
                 true
             }
-            "legacy" | "games" => {
+            "games" | "arcade" => {
+                crate::desktop::run_games(input);
+                true
+            }
+            "legacy" => {
                 println!("HexaOS 7.2 Diamond II remains available with its full legacy stack.");
                 println!("Exit QEMU, then run: make run-alpha");
                 println!("It includes games, networking, persistent ATA HexaFS, tasks, events,");
@@ -489,8 +520,10 @@ impl Shell {
         println!("  pimp <name> <key=value>");
         println!("  relate/unrelate <source> <kind> <target>  relationships <source>");
         println!("  desktop browser displayinfo goabi");
-        println!("  ayo legacy games reboot shutdown");
-        println!("  date clock cpuinfo lspci neofetch sysinfo mem free env uptime ps");
+        println!("  ayo games arcade legacy reboot shutdown");
+        println!(
+            "  date clock cpuinfo features kernelcaps lspci neofetch sysinfo mem free env uptime ps"
+        );
         println!("  kstat dmesg bootlog ifconfig netstat mode");
         println!("  calc len hex reverse tolower toupper factor rand dice ascii");
         println!("  palette morse fortune 8ball cowsay banner logo matrix sleep");
@@ -1255,8 +1288,32 @@ impl Shell {
         }
     }
 
+    fn recent_history(&self, reverse_index: usize) -> Option<&[u8]> {
+        if reverse_index >= self.history_count {
+            return None;
+        }
+        let index = (self.history_next + MAX_HISTORY - 1 - reverse_index) % MAX_HISTORY;
+        let entry = &self.history[index];
+        Some(&entry.bytes[..entry.length as usize])
+    }
+
     fn form_count(&self) -> usize {
         self.forms.iter().flatten().count()
+    }
+}
+
+fn replace_input_line(line: &mut [u8; MAX_LINE], length: &mut usize, value: Option<&[u8]>) {
+    while *length > 0 {
+        print!("\x08 \x08");
+        *length -= 1;
+    }
+    if let Some(value) = value {
+        let count = value.len().min(MAX_LINE - 1);
+        line[..count].copy_from_slice(&value[..count]);
+        *length = count;
+        if let Ok(text) = core::str::from_utf8(&line[..count]) {
+            print!("{}", text);
+        }
     }
 }
 
@@ -1366,6 +1423,7 @@ fn is_shell_command(name: &str) -> bool {
             | "ayo"
             | "legacy"
             | "games"
+            | "arcade"
             | "reboot"
             | "shutdown"
             | "halt"

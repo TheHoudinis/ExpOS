@@ -9,6 +9,7 @@
 mod compat;
 mod desktop;
 mod framebuffer;
+mod games;
 mod hardware;
 mod input;
 mod port;
