@@ -13,9 +13,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"hexaos.dev/ayo/internal/artifact"
 	"hexaos.dev/ayo/internal/manager"
 	"hexaos.dev/ayo/internal/model"
 )
@@ -23,15 +25,16 @@ import (
 const maxCatalogBytes = 2 << 20
 
 type Package struct {
-	Name          string            `json:"name"`
-	Version       string            `json:"version"`
-	Summary       string            `json:"summary"`
-	Capabilities  []string          `json:"capabilities,omitempty"`
-	ProvidedForms []string          `json:"provided_forms,omitempty"`
-	Dependencies  []string          `json:"dependencies,omitempty"`
-	Compatibility []string          `json:"compatibility,omitempty"`
-	PIMP          map[string]string `json:"pimp,omitempty"`
-	Checksum      string            `json:"checksum"`
+	Name          string              `json:"name"`
+	Version       string              `json:"version"`
+	Summary       string              `json:"summary"`
+	Capabilities  []string            `json:"capabilities,omitempty"`
+	ProvidedForms []string            `json:"provided_forms,omitempty"`
+	Dependencies  []string            `json:"dependencies,omitempty"`
+	Compatibility []string            `json:"compatibility,omitempty"`
+	PIMP          map[string]string   `json:"pimp,omitempty"`
+	Artifact      *model.ArtifactSpec `json:"artifact,omitempty"`
+	Checksum      string              `json:"checksum"`
 }
 
 type Catalog struct {
@@ -43,7 +46,7 @@ type Catalog struct {
 }
 
 func Builtin() Catalog {
-	catalog := Catalog{Schema: 1, Name: "ExpOS Prism Forms", GeneratedAt: time.Date(2026, 9, 8, 0, 0, 0, 0, time.UTC), Packages: []Package{
+	catalog := Catalog{Schema: 2, Name: "ExpOS Prism Forms", GeneratedAt: time.Date(2026, 9, 9, 0, 0, 0, 0, time.UTC), Packages: []Package{
 		{Name: "CoreTools", Version: "1.0.0", Summary: "Form-native diagnostics and repair tools", Capabilities: []string{"inspect", "repair"}, ProvidedForms: []string{"Diagnostics"}, Compatibility: []string{"hexaos>=8.0.0"}},
 		{Name: "Network", Version: "2.1.0", Summary: "Network service Form and socket capability", Capabilities: []string{"network", "socket"}, ProvidedForms: []string{"NetworkService"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
 		{Name: "Terminal", Version: "1.2.0", Summary: "Interactive command Interface Form", Capabilities: []string{"execute", "render"}, ProvidedForms: []string{"TerminalInterface"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
@@ -67,6 +70,13 @@ func Builtin() Catalog {
 		{Name: "DeveloperKit", Version: "1.0.0", Summary: "Go SDK terminal and editor development deck", Capabilities: []string{"execute", "read", "configure"}, ProvidedForms: []string{"DeveloperWorkspace"}, Dependencies: []string{"GoSDK@>=1.0.0", "HexaEdit@>=0.8.0", "PrismDE@>=1.0.0"}},
 	}}
 	for index := range catalog.Packages {
+		pkg := &catalog.Packages[index]
+		source := fmt.Sprintf("builtin://forms/%s/%s", pkg.Name, pkg.Version)
+		payload, _ := artifact.BuiltinPayload(source)
+		pkg.Artifact = &model.ArtifactSpec{
+			Source: source, SHA256: artifact.Digest(payload), Format: "raw",
+			Target: "share/ayo/forms/" + strings.ToLower(pkg.Name) + ".form", Mode: 0o644,
+		}
 		catalog.Packages[index].Checksum = packageChecksum(catalog.Packages[index])
 	}
 	return catalog
@@ -92,11 +102,14 @@ func Load(ctx context.Context, source, publicKey string) (Catalog, error) {
 			return Catalog{}, err
 		}
 	}
+	if err := resolveArtifactSources(&catalog, source, remote); err != nil {
+		return Catalog{}, err
+	}
 	return catalog, nil
 }
 
 func (catalog Catalog) Validate(requireChecksums bool) error {
-	if catalog.Schema != 1 || catalog.Name == "" {
+	if (catalog.Schema != 1 && catalog.Schema != 2) || catalog.Name == "" {
 		return errors.New("unsupported or unnamed ayo registry catalog")
 	}
 	seen := make(map[string]bool)
@@ -114,6 +127,11 @@ func (catalog Catalog) Validate(requireChecksums bool) error {
 		}
 		if pkg.Checksum != "" && !strings.EqualFold(pkg.Checksum, packageChecksum(pkg)) {
 			return fmt.Errorf("Package Form %s failed checksum validation", pkg.Name)
+		}
+		if catalog.Schema >= 2 {
+			if pkg.Artifact == nil || pkg.Artifact.Source == "" || len(pkg.Artifact.SHA256) != sha256.Size*2 || pkg.Artifact.Format == "" {
+				return fmt.Errorf("Package Form %s has no complete v3 artifact", pkg.Name)
+			}
 		}
 	}
 	return nil
@@ -139,7 +157,12 @@ func (catalog Catalog) Resolve(name, dimension string, state model.State) ([]man
 				return versionErr
 			}
 			if ok {
-				return nil
+				candidate, inCatalog := catalog.Find(packageName)
+				hasExpectedArtifact := !inCatalog || candidate.Artifact == nil ||
+					(installed.Artifact != nil && strings.EqualFold(installed.Artifact.SHA256, candidate.Artifact.SHA256))
+				if hasExpectedArtifact {
+					return nil
+				}
 			}
 		}
 		pkg, ok := catalog.Find(packageName)
@@ -179,7 +202,38 @@ func (catalog Catalog) Resolve(name, dimension string, state model.State) ([]man
 }
 
 func (pkg Package) InstallSpec() manager.InstallSpec {
-	return manager.InstallSpec{Name: pkg.Name, Version: pkg.Version, Capabilities: pkg.Capabilities, ProvidedForms: pkg.ProvidedForms, Dependencies: pkg.Dependencies, Compatibility: pkg.Compatibility, PIMP: pkg.PIMP}
+	return manager.InstallSpec{Name: pkg.Name, Version: pkg.Version, Capabilities: pkg.Capabilities, ProvidedForms: pkg.ProvidedForms, Dependencies: pkg.Dependencies, Compatibility: pkg.Compatibility, PIMP: pkg.PIMP, Artifact: pkg.Artifact}
+}
+
+func resolveArtifactSources(catalog *Catalog, catalogSource string, remote bool) error {
+	baseURL, _ := url.Parse(catalogSource)
+	baseDirectory := filepath.Dir(catalogSource)
+	for index := range catalog.Packages {
+		artifactSpec := catalog.Packages[index].Artifact
+		if artifactSpec == nil {
+			continue
+		}
+		parsed, err := url.Parse(artifactSpec.Source)
+		if err != nil {
+			return err
+		}
+		if parsed.Scheme == "" {
+			if remote {
+				parsed = baseURL.ResolveReference(parsed)
+				artifactSpec.Source = parsed.String()
+			} else if !filepath.IsAbs(artifactSpec.Source) {
+				artifactSpec.Source = filepath.Join(baseDirectory, artifactSpec.Source)
+			}
+		}
+		resolved, err := url.Parse(artifactSpec.Source)
+		if err != nil {
+			return err
+		}
+		if remote && resolved.Scheme != "https" {
+			return fmt.Errorf("remote Package Form %s artifact must use HTTPS", catalog.Packages[index].Name)
+		}
+	}
+	return nil
 }
 
 func readSource(ctx context.Context, source string) ([]byte, bool, error) {

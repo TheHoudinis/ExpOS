@@ -1,7 +1,7 @@
 use crate::port;
 
-pub const WIDTH: usize = 800;
-pub const HEIGHT: usize = 600;
+pub const WIDTH: usize = 1024;
+pub const HEIGHT: usize = 768;
 const LFB: usize = 0xFD00_0000;
 const VBE_INDEX: u16 = 0x01CE;
 const VBE_DATA: u16 = 0x01CF;
@@ -19,7 +19,7 @@ const LFB_ENABLED: u16 = 0x40;
 pub mod color {
     pub const BACKGROUND: u32 = 0x0007_090E;
     pub const PANEL: u32 = 0x0013_1720;
-    pub const WINDOW: u32 = 0x000D_1017;
+    pub const WINDOW: u32 = 0x0000_0000;
     pub const INK: u32 = 0x00E8_EBF2;
     pub const MUTED: u32 = 0x0089_92A6;
     pub const PURPLE: u32 = 0x008A_5CF6;

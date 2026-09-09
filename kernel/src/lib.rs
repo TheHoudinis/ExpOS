@@ -12,6 +12,7 @@ mod framebuffer;
 mod games;
 mod hardware;
 mod input;
+mod network;
 mod port;
 mod serial;
 mod session;
@@ -147,9 +148,14 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
         }
         Err(error) => panic!("Form-native bootstrap failed: {:?}", error),
     };
+    let _ = network::initialize();
     println!();
     println!("Core architecture online. Starting session manager.");
     let mut input = input::Input::new();
-    let session = session::login(&mut input);
-    shell::run(report, input, session)
+    let requested_mode = session::choose_boot_mode(&mut input);
+    let login = session::login(&mut input, requested_mode);
+    if login.mode == session::BootMode::Graphical {
+        desktop::run(&mut input, false, login.session);
+    }
+    shell::run(report, input, login.session)
 }

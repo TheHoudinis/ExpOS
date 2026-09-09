@@ -84,7 +84,7 @@ func (app App) Run() error {
 			if err := app.Manager.InstallPlan(plan); err != nil {
 				notice = "Install failed: " + err.Error()
 			} else {
-				notice = fmt.Sprintf("Installed %s with %d Form(s) in one transaction. nice.", pkg.Name, len(plan))
+				notice = fmt.Sprintf("Downloaded and installed %s with %d Form(s) in one verified transaction. nice.", pkg.Name, len(plan))
 			}
 		}
 	}
@@ -104,7 +104,7 @@ func (app App) draw(packages []catalog.Package, filter, notice string) {
 		}
 	}
 	fmt.Fprintln(app.Output, "┌──────────────────────────────────────────────────────────────────────┐")
-	fmt.Fprintln(app.Output, "│  AYO v2 // PACKAGE FORM DECK                                        │")
+	fmt.Fprintln(app.Output, "│  AYO v3 // VERIFIED PACKAGE DECK                                    │")
 	fmt.Fprintf(app.Output, "│  %-30s Dimension: %-12s Active: %-3d │\n", app.Catalog.Name, app.Manager.Dimension, installed)
 	fmt.Fprintln(app.Output, "├────┬────────────────┬──────────┬────────────────────────────────────┤")
 	for index, pkg := range packages {
@@ -153,7 +153,11 @@ func (app App) installed() string {
 			if form.Active {
 				status = "active"
 			}
-			items = append(items, fmt.Sprintf("%s@%s (%s)", form.Name, form.Version, status))
+			files := 0
+			if form.Artifact != nil {
+				files = len(form.Artifact.Files)
+			}
+			items = append(items, fmt.Sprintf("%s@%s (%s, %d files)", form.Name, form.Version, status, files))
 		}
 	}
 	if len(items) == 0 {
@@ -170,7 +174,11 @@ func (app App) details(identity string, packages []catalog.Package) string {
 	if !ok {
 		return "No registry Package Form named " + identity
 	}
-	return fmt.Sprintf("%s@%s — %s\nProvides: %s\nCapabilities: %s\nDepends: %s\nCompatibility: %s\nChecksum: %s", pkg.Name, pkg.Version, pkg.Summary, values(pkg.ProvidedForms), values(pkg.Capabilities), values(pkg.Dependencies), values(pkg.Compatibility), pkg.Checksum)
+	artifact := "legacy metadata only"
+	if pkg.Artifact != nil {
+		artifact = fmt.Sprintf("%s (%s, sha256 %s)", pkg.Artifact.Source, pkg.Artifact.Format, pkg.Artifact.SHA256)
+	}
+	return fmt.Sprintf("%s@%s — %s\nProvides: %s\nCapabilities: %s\nDepends: %s\nCompatibility: %s\nArtifact: %s\nCatalog checksum: %s", pkg.Name, pkg.Version, pkg.Summary, values(pkg.ProvidedForms), values(pkg.Capabilities), values(pkg.Dependencies), values(pkg.Compatibility), artifact, pkg.Checksum)
 }
 
 func selectPackage(identity string, packages []catalog.Package) (catalog.Package, bool) {

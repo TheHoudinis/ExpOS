@@ -96,10 +96,13 @@ pub fn print_kernel_features() {
         yes_no(cr4 & (1 << 7) != 0),
         yes_no(efer & (1 << 11) != 0)
     );
-    println!("kernel: 64-bit paging, PCI scan, RTC, COM1, PS/2 mouse/keys, framebuffer");
+    println!("kernel: 64-bit paging, PCI scan, RTC, COM1, PS/2 mouse/keys, framebuffer, RTL8139");
     println!("services: Forms, FIN resolution, HexaFS journal, PIMP/DIESE, Handles");
-    println!("desktop: 4 workspaces, tiling, floating, pointer hit-testing, routed input");
-    println!("pending: interrupt scheduler, native storage/network/audio Driver Forms");
+    println!(
+        "desktop: empty-start taskbar shell, window controls, pointer hit-testing, routed input"
+    );
+    println!("network: Ethernet, ARP, static IPv4 and ICMP echo (polling)");
+    println!("pending: interrupt scheduler, native storage/audio, TCP/DNS/TLS, Wi-Fi drivers");
 }
 
 pub fn print_pci() {

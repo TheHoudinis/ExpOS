@@ -22,6 +22,7 @@ impl Operations {
     pub const PACKAGE: Self = Self(1 << 5);
     pub const DISPLAY: Self = Self(1 << 6);
     pub const INPUT: Self = Self(1 << 7);
+    pub const NETWORK: Self = Self(1 << 8);
 
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
@@ -321,6 +322,45 @@ mod tests {
             ),
             Err(CapabilityError::Denied)
         );
+    }
+
+    #[test]
+    fn network_handles_require_explicit_non_guest_authority() {
+        let requester = Fin::from_u128(30);
+        let network = Fin::from_u128(31);
+        let stable = Fin::from_u128(32);
+        let mut broker = CapabilityBroker::new();
+        assert_eq!(
+            broker.issue_for(
+                requester,
+                Authority::Guest,
+                network,
+                stable,
+                Operations::NETWORK,
+                100,
+            ),
+            Err(CapabilityError::Denied)
+        );
+        let handle = broker
+            .issue_for(
+                requester,
+                Authority::Power,
+                network,
+                stable,
+                Operations::NETWORK,
+                100,
+            )
+            .unwrap();
+        assert!(broker
+            .authorize_requester(
+                handle.id,
+                requester,
+                network,
+                stable,
+                Operations::NETWORK,
+                1,
+            )
+            .is_ok());
     }
 
     #[test]

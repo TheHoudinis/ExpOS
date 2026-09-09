@@ -1,64 +1,79 @@
-# ayo v2
+# Ayo v3
 
-`ayo` is the Go implementation of the HexaOS Package Form manager. Packages
-are persistent Forms identified by FIN and scoped to a Dimension; they are not
-archives copied into Unix-style directories.
+Ayo is ExpOS's Go Package Form manager. It keeps Form identity, dependencies,
+capabilities, PIMP state and revisions while also performing the job expected
+of a real package manager: obtaining verified bytes and safely materializing
+them under an explicit install root.
 
-## Interactive catalog
+## Use it
 
-Running `ayo` without a command opens the Package Form deck:
-
-```sh
-./bin/ayo --authority operator
-```
-
-Choose a package number/name to preview and install it. The TUI searches with
-`/text`, shows details with `d NAME`, lists installed Forms with `i`, and
-removes with `x NAME`. Dependencies are resolved before confirmation and the
-entire plan commits as one transaction. The built-in starter catalog works
-offline.
-
-Remote registries are metadata catalogs because HexaOS packages are Forms, not
-file archives:
-
-```sh
-./bin/ayo --authority operator \
-  --registry https://packages.example/ayo-v2.json \
-  --registry-key BASE64_ED25519_PUBLIC_KEY
-```
-
-Remote sources must use HTTPS, remain below 2 MiB, and include a valid SHA-256
-checksum for every Package Form. When a public key is supplied, the complete
-catalog must also pass Ed25519 signature verification.
-
-Implemented command vocabulary (unchanged from the philosophy):
-
-- `slap` activates or revises a Package Form after dependency validation;
-- `yeet` revokes activation, with dependent protection and optional `--force`;
-- `glance` inspects identity, state, capabilities and relationships;
-- `chill` reconciles desired PIMP state and dependency availability;
-- `fix` normalizes metadata and repairs activation state;
-- `ghost` hides a Form while retaining its FIN and history;
-- `manifest` creates a named, checksummed revision checkpoint;
-- `highfive` performs a controlled capabilities/provided-Forms merge;
-- `dodge` excludes a Form from future reconciliation;
-- `vibecheck` validates FINs, state and versioned dependencies;
-- `flex` reports Package Form statistics.
-
-Example:
+Build and open the searchable TUI:
 
 ```sh
 make build
-./bin/ayo --authority operator slap --cap socket --provide NetworkService Network 2.1.0
-./bin/ayo --authority operator slap --dep 'Network@>=2.0.0' Browser 1.0.0
-./bin/ayo glance Browser
-./bin/ayo vibecheck
-./bin/ayo --authority operator manifest known-good
+./bin/ayo --authority operator
 ```
 
-The JSON bridge models HexaFS transaction boundaries for host development. It
-uses a single-writer lock, validates a cloned state before commit, writes a
-pending journal, syncs and atomically renames the next state, and retains the
-previous valid commit for recovery. It remains a bridge—not the final on-disk
-HexaFS format. Native integration will replace it with kernel Form Handle
-calls; the authoritative package engine and all command semantics stay in Go.
+The built-in 21-package catalog works offline and every package installs a real
+owned `.form` artifact. The TUI accepts a package number or name, `/text` to
+search, `d NAME` for details, `i` for installed packages, and `x NAME` to
+remove one.
+
+The same operations are available directly:
+
+```sh
+./bin/ayo --authority operator install TextLab
+./bin/ayo glance TextLab
+./bin/ayo files TextLab
+./bin/ayo --authority operator yeet TextLab
+./bin/ayo --authority operator recover
+```
+
+By default, state and artifacts live in user-owned XDG locations. Use `--state`
+and `--root` for isolated or system-integrated deployments. Ayo rejects broad
+system roots such as `/`, `/usr`, and `/etc`.
+
+## Registries and artifacts
+
+Select a local JSON catalog or an HTTPS registry:
+
+```sh
+./bin/ayo --authority operator \
+  --registry https://packages.example/ayo-v3.json \
+  --registry-key BASE64_ED25519_PUBLIC_KEY
+```
+
+Remote catalogs are size-bounded and package metadata is checksummed. The
+optional registry key requires a valid Ed25519 signature. Ayo v3 catalog
+entries include an artifact source, SHA-256 digest, format and optional raw-file
+target. Sources may be HTTPS, `file://`, local files or `builtin://`; supported
+formats are raw, tar and tar.gz.
+
+Downloads are bounded, staged and digest-checked before installation. Archive
+paths must stay beneath the selected root; absolute paths, traversal, backslash
+aliases, symlinks and hard links are rejected. Ayo records each file's path,
+digest, size and mode, blocks ownership collisions, and only uninstalls an
+owned file when its digest is unchanged. It intentionally runs no package
+scripts or hooks.
+
+An install plan resolves dependencies first, stages every artifact, then
+publishes files and Package Form state as one recoverable transaction. Backups
+and a journal permit rollback after a failed commit or recovery after an
+interrupted process.
+
+For a one-off local artifact:
+
+```sh
+./bin/ayo --authority operator slap \
+  --source ./tool.bin --sha256 HEX_DIGEST --format raw \
+  --target bin/tool --mode 755 Tool 1.0.0
+```
+
+The philosophy command vocabulary remains available: `slap`, `yeet`, `glance`,
+`chill`, `fix`, `ghost`, `manifest`, `highfive`, `dodge`, `vibecheck`, and
+`flex`. Ayo v3 adds `install`, `files`, and `recover` for artifact workflows.
+
+The JSON state store is a development HexaFS bridge. It uses a single-writer
+lock, pending journal, atomic rename and recovery snapshot. Native integration
+will replace that bridge with kernel Form Handle calls without changing the
+package transaction model.

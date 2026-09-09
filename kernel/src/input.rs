@@ -14,12 +14,6 @@ pub const KEY_SUPER_BROWSER: u8 = 0x92;
 pub const KEY_SUPER_CLOSE: u8 = 0x93;
 pub const KEY_SUPER_CYCLE: u8 = 0x94;
 pub const KEY_SUPER_FULLSCREEN: u8 = 0x95;
-pub const KEY_SUPER_FLOAT: u8 = 0x96;
-pub const KEY_SUPER_OVERVIEW: u8 = 0x97;
-pub const KEY_SUPER_WORKSPACE_1: u8 = 0x98;
-pub const KEY_SUPER_WORKSPACE_2: u8 = 0x99;
-pub const KEY_SUPER_WORKSPACE_3: u8 = 0x9A;
-pub const KEY_SUPER_WORKSPACE_4: u8 = 0x9F;
 pub const KEY_SUPER_LEFT: u8 = 0x9B;
 pub const KEY_SUPER_RIGHT: u8 = 0x9C;
 pub const KEY_SUPER_UP: u8 = 0x9D;
@@ -373,12 +367,6 @@ fn super_binding(key: u8) -> Option<u8> {
         b'q' => Some(KEY_SUPER_CLOSE),
         b'\t' => Some(KEY_SUPER_CYCLE),
         b'f' => Some(KEY_SUPER_FULLSCREEN),
-        b'v' => Some(KEY_SUPER_FLOAT),
-        b'o' => Some(KEY_SUPER_OVERVIEW),
-        b'1' => Some(KEY_SUPER_WORKSPACE_1),
-        b'2' => Some(KEY_SUPER_WORKSPACE_2),
-        b'3' => Some(KEY_SUPER_WORKSPACE_3),
-        b'4' => Some(KEY_SUPER_WORKSPACE_4),
         _ => None,
     }
 }

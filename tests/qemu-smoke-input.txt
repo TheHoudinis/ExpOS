@@ -1,4 +1,4 @@
-
+2222
 operator
 expos
 help
@@ -7,10 +7,12 @@ users
 useradd artist power nightowl
 users
 login
+2
 artist
 nightowl
 whoami
 login
+2
 operator
 expos
 passwd artist starlight
@@ -47,7 +49,7 @@ recover Notes
 forms
 grant DemoBrowser execute
 handles
-handlecheck 2 Root execute
+handlecheck 3 Root execute
 pimp Browser network=restricted
 neofetch
 history

@@ -25,16 +25,23 @@ func run(arguments []string) int {
 	dimension := flags.String("dimension", "Stable", "active Dimension")
 	registrySource := flags.String("registry", os.Getenv("AYO_REGISTRY"), "HTTPS URL or local ayo catalog JSON")
 	registryKey := flags.String("registry-key", os.Getenv("AYO_REGISTRY_KEY"), "base64 Ed25519 registry public key")
+	installRoot := flags.String("root", defaultInstallRoot(), "user-owned artifact install root")
 	plainTUI := flags.Bool("plain", false, "do not clear the screen while using the TUI")
+	showVersion := flags.Bool("version", false, "print ayo version")
+	flags.Usage = usage
 	if err := flags.Parse(arguments); err != nil {
 		return 2
+	}
+	if *showVersion {
+		fmt.Println("ayo v3")
+		return 0
 	}
 	level := model.Authority(strings.ToLower(*authority))
 	if level != model.Operator && level != model.Power && level != model.Guest {
 		fmt.Fprintln(os.Stderr, "ayo: unknown authority", *authority)
 		return 2
 	}
-	ayo := manager.Manager{Store: store.JSONBridge{Path: *statePath}, Authority: level, Dimension: *dimension}
+	ayo := manager.Manager{Store: store.JSONBridge{Path: *statePath}, Authority: level, Dimension: *dimension, InstallRoot: *installRoot}
 	args := flags.Args()
 	if len(args) == 0 || args[0] == "tui" {
 		loaded, err := catalog.Load(context.Background(), *registrySource, *registryKey)
@@ -51,6 +58,8 @@ func run(arguments []string) int {
 	command, operands := args[0], args[1:]
 	var err error
 	switch command {
+	case "install":
+		err = install(context.Background(), ayo, *registrySource, *registryKey, operands)
 	case "slap":
 		err = slap(ayo, operands)
 	case "yeet":
@@ -89,6 +98,16 @@ func run(arguments []string) int {
 		err = vibecheck(ayo)
 	case "flex":
 		err = flex(ayo)
+	case "files":
+		err = files(ayo, operands)
+	case "recover":
+		if len(operands) != 0 {
+			err = errorsFor("recover accepts no operands")
+		} else {
+			err = ayo.RecoverArtifacts()
+		}
+	case "version":
+		fmt.Println("ayo v3")
 	default:
 		err = fmt.Errorf("unknown command %q", command)
 	}
@@ -100,6 +119,28 @@ func run(arguments []string) int {
 		fmt.Printf("ayo %s: HexaFS transaction committed in %s. nice.\n", command, *dimension)
 	}
 	return 0
+}
+
+func install(ctx context.Context, ayo manager.Manager, source, publicKey string, operands []string) error {
+	if len(operands) != 1 {
+		return errorsFor("install needs one package name")
+	}
+	registry, err := catalog.Load(ctx, source, publicKey)
+	if err != nil {
+		return err
+	}
+	state, err := ayo.Read()
+	if err != nil {
+		return err
+	}
+	plan, err := registry.Resolve(operands[0], ayo.Dimension, state)
+	if err != nil {
+		return err
+	}
+	if len(plan) == 0 {
+		return fmt.Errorf("%s is already installed and compatible", operands[0])
+	}
+	return ayo.InstallPlanContext(ctx, plan)
 }
 
 type listFlag []string
@@ -123,6 +164,11 @@ func slap(ayo manager.Manager, args []string) error {
 	flags.Var(&provided, "provide", "provided Form")
 	flags.Var(&compatibility, "compat", "compatibility requirement")
 	flags.Var(&pimpValues, "pimp", "PIMP key=value specification")
+	source := flags.String("source", "", "HTTPS URL, file URL, or local artifact path")
+	checksum := flags.String("sha256", "", "artifact SHA-256")
+	format := flags.String("format", "", "raw, tar, or tar.gz")
+	target := flags.String("target", "", "install path for a raw artifact")
+	mode := flags.Uint("mode", 0o644, "raw artifact mode (executable bits only)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -142,7 +188,14 @@ func slap(ayo manager.Manager, args []string) error {
 		}
 		pimp[pair[0]] = pair[1]
 	}
-	return ayo.SlapSpec(manager.InstallSpec{Name: operands[0], Version: version, Capabilities: capabilities, Dependencies: dependencies, ProvidedForms: provided, Compatibility: compatibility, PIMP: pimp})
+	var artifactSpec *model.ArtifactSpec
+	if *source != "" || *checksum != "" || *format != "" || *target != "" {
+		if *source == "" || *checksum == "" || *format == "" {
+			return errorsFor("artifact slap requires --source, --sha256, and --format")
+		}
+		artifactSpec = &model.ArtifactSpec{Source: *source, SHA256: *checksum, Format: *format, Target: *target, Mode: uint32(*mode)}
+	}
+	return ayo.SlapSpec(manager.InstallSpec{Name: operands[0], Version: version, Capabilities: capabilities, Dependencies: dependencies, ProvidedForms: provided, Compatibility: compatibility, PIMP: pimp, Artifact: artifactSpec})
 }
 
 func yeet(ayo manager.Manager, args []string) error {
@@ -182,10 +235,35 @@ func glance(ayo manager.Manager, operands []string) error {
 		fmt.Printf("%s  %s  v%s  %s  rev=%d\n", form.FIN, form.Name, form.Version, status, form.Revision)
 		if len(operands) == 1 {
 			fmt.Printf("  capabilities=%s provides=%s depends=%s\n", display(form.Capabilities), display(form.ProvidedForms), display(form.Dependencies))
+			if form.Artifact != nil {
+				fmt.Printf("  artifact=%s sha256=%s files=%d root=%s\n", form.Artifact.Source, form.Artifact.SHA256, len(form.Artifact.Files), ayo.InstallRoot)
+			}
 			if form.LastError != "" {
 				fmt.Println("  diagnostic=" + form.LastError)
 			}
 		}
+	}
+	return nil
+}
+
+func files(ayo manager.Manager, operands []string) error {
+	if len(operands) != 1 {
+		return errorsFor("files needs one FIN or package name")
+	}
+	state, err := ayo.Read()
+	if err != nil {
+		return err
+	}
+	form, err := state.Find(operands[0], ayo.Dimension)
+	if err != nil {
+		return err
+	}
+	if form.Artifact == nil {
+		fmt.Println("metadata-only Package Form; no artifact files")
+		return nil
+	}
+	for _, file := range form.Artifact.Files {
+		fmt.Printf("%s  %s  %d bytes\n", file.SHA256, file.Path, file.Size)
 	}
 	return nil
 }
@@ -218,7 +296,13 @@ func flex(ayo manager.Manager) error {
 			relationships += len(form.Dependencies)
 		}
 	}
-	fmt.Printf("Dimension %s: forms=%d active=%d ghosted=%d excluded=%d capabilities=%d relationships=%d journal=%d manifests=%d\n", ayo.Dimension, forms, report.Active, report.Hidden, report.Excluded, capabilities, relationships, len(state.Journal), len(state.Manifests))
+	files := 0
+	for _, form := range state.Packages {
+		if form.Dimension == ayo.Dimension && form.Artifact != nil {
+			files += len(form.Artifact.Files)
+		}
+	}
+	fmt.Printf("Dimension %s: forms=%d active=%d ghosted=%d excluded=%d capabilities=%d relationships=%d owned-files=%d journal=%d manifests=%d\n", ayo.Dimension, forms, report.Active, report.Hidden, report.Excluded, capabilities, relationships, files, len(state.Journal), len(state.Manifests))
 	return nil
 }
 
@@ -231,7 +315,7 @@ func display(values []string) string {
 func errorsFor(message string) error { return fmt.Errorf("%s", message) }
 func isMutation(command string) bool {
 	switch command {
-	case "slap", "yeet", "ghost", "dodge", "highfive", "chill", "fix", "manifest":
+	case "install", "slap", "yeet", "ghost", "dodge", "highfive", "chill", "fix", "manifest", "recover":
 		return true
 	}
 	return false
@@ -243,16 +327,31 @@ func defaultStatePath() string {
 	return "ayo-bridge.json"
 }
 
-func usage() {
-	fmt.Fprintln(os.Stderr, `ayo v2 — HexaOS Package Form manager
+func defaultInstallRoot() string {
+	if configured := os.Getenv("AYO_ROOT"); configured != "" {
+		return configured
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".local", "share", "hexaos", "ayo-root")
+	}
+	return "ayo-root"
+}
 
-usage: ayo [--authority operator|power|guest] [--dimension Stable]
+func usage() {
+	fmt.Fprintln(os.Stderr, `ayo v3 — verified artifact + Package Form manager
+
+usage: ayo [--authority operator|power|guest] [--dimension Stable] [--root PATH]
        ayo [global options] COMMAND
 
-No command opens the interactive package catalog. Use --authority operator to install.
+No command opens the interactive package catalog. Operator authority is required to install.
 Registry options: --registry HTTPS_URL --registry-key BASE64_ED25519_KEY --plain
 
-commands: slap yeet glance chill fix ghost manifest highfive dodge vibecheck flex
+commands: install slap yeet files recover glance chill fix ghost manifest
+          highfive dodge vibecheck flex version
 
-slap options: --cap NAME --dep 'NAME@>=VERSION' --provide FORM --compat RULE --pimp KEY=VALUE`)
+install NAME resolves, downloads, verifies, stages, and owns catalog artifacts.
+slap artifact options: --source URL --sha256 HEX --format raw|tar|tar.gz [--target PATH]
+metadata options: --cap NAME --dep 'NAME@>=VERSION' --provide FORM --compat RULE --pimp KEY=VALUE
+
+Ayo never executes package scripts and refuses system/root installation paths.`)
 }

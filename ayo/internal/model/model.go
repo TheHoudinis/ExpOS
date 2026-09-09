@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"path"
 	"sort"
 	"strings"
 	"time"
@@ -12,7 +13,7 @@ import (
 
 type Authority string
 
-const CurrentSchema uint32 = 2
+const CurrentSchema uint32 = 3
 
 const (
 	Operator Authority = "operator"
@@ -23,24 +24,54 @@ const (
 // PackageForm is a persistent Form-native package record. Dependencies use
 // Name@constraint syntax (for example Network@>=2.0.0), never filesystem paths.
 type PackageForm struct {
-	FIN           string            `json:"fin"`
-	Name          string            `json:"name"`
-	Version       string            `json:"version"`
-	Dimension     string            `json:"dimension"`
-	Active        bool              `json:"active"`
-	DesiredActive bool              `json:"desired_active"`
-	Hidden        bool              `json:"hidden"`
-	Excluded      bool              `json:"excluded"`
-	Revision      uint64            `json:"revision"`
-	Capabilities  []string          `json:"capabilities,omitempty"`
-	ProvidedForms []string          `json:"provided_forms,omitempty"`
-	Dependencies  []string          `json:"dependencies,omitempty"`
-	Compatibility []string          `json:"compatibility,omitempty"`
-	PIMP          map[string]string `json:"pimp,omitempty"`
-	MergedFrom    []string          `json:"merged_from,omitempty"`
-	LastError     string            `json:"last_error,omitempty"`
-	InstalledAt   time.Time         `json:"installed_at"`
-	UpdatedAt     time.Time         `json:"updated_at"`
+	FIN           string             `json:"fin"`
+	Name          string             `json:"name"`
+	Version       string             `json:"version"`
+	Dimension     string             `json:"dimension"`
+	Active        bool               `json:"active"`
+	DesiredActive bool               `json:"desired_active"`
+	Hidden        bool               `json:"hidden"`
+	Excluded      bool               `json:"excluded"`
+	Revision      uint64             `json:"revision"`
+	Capabilities  []string           `json:"capabilities,omitempty"`
+	ProvidedForms []string           `json:"provided_forms,omitempty"`
+	Dependencies  []string           `json:"dependencies,omitempty"`
+	Compatibility []string           `json:"compatibility,omitempty"`
+	PIMP          map[string]string  `json:"pimp,omitempty"`
+	MergedFrom    []string           `json:"merged_from,omitempty"`
+	Artifact      *InstalledArtifact `json:"artifact,omitempty"`
+	LastError     string             `json:"last_error,omitempty"`
+	InstalledAt   time.Time          `json:"installed_at"`
+	UpdatedAt     time.Time          `json:"updated_at"`
+}
+
+// ArtifactSpec describes immutable package bytes. Source may be HTTPS, file,
+// a local path, or ayo's offline builtin source. Remote artifacts always need
+// a SHA-256 digest before they are allowed near the install root.
+type ArtifactSpec struct {
+	Source string `json:"source"`
+	SHA256 string `json:"sha256"`
+	Format string `json:"format"`
+	Target string `json:"target,omitempty"`
+	Mode   uint32 `json:"mode,omitempty"`
+}
+
+// OwnedFile is the install manifest entry used for collision detection and
+// safe removal. Paths are always slash-separated and relative to the selected
+// Ayo root.
+type OwnedFile struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+	Mode   uint32 `json:"mode"`
+	Size   int64  `json:"size"`
+}
+
+type InstalledArtifact struct {
+	Source      string      `json:"source"`
+	SHA256      string      `json:"sha256"`
+	Format      string      `json:"format"`
+	Files       []OwnedFile `json:"files"`
+	InstalledAt time.Time   `json:"installed_at"`
 }
 
 type JournalEntry struct {
@@ -66,6 +97,9 @@ type State struct {
 	Journal       []JournalEntry `json:"journal"`
 	Manifests     []Manifest     `json:"manifests"`
 	Sequence      uint64         `json:"sequence"`
+	// ArtifactTransaction lets crash recovery distinguish a filesystem
+	// transaction whose state commit completed from one that must roll back.
+	ArtifactTransaction string `json:"artifact_transaction,omitempty"`
 }
 
 func NewFIN() (string, error) {
@@ -126,6 +160,11 @@ func clonePackages(forms []PackageForm) []PackageForm {
 		next[index].Dependencies = append([]string(nil), forms[index].Dependencies...)
 		next[index].Compatibility = append([]string(nil), forms[index].Compatibility...)
 		next[index].MergedFrom = append([]string(nil), forms[index].MergedFrom...)
+		if forms[index].Artifact != nil {
+			artifact := *forms[index].Artifact
+			artifact.Files = append([]OwnedFile(nil), forms[index].Artifact.Files...)
+			next[index].Artifact = &artifact
+		}
 		if forms[index].PIMP != nil {
 			next[index].PIMP = make(map[string]string, len(forms[index].PIMP))
 			for key, value := range forms[index].PIMP {
@@ -142,6 +181,7 @@ func (state State) Validate() error {
 	}
 	seenFIN := make(map[string]bool)
 	seenName := make(map[string]bool)
+	ownedPaths := make(map[string]string)
 	for _, form := range state.Packages {
 		if form.FIN == "" || form.Name == "" || form.Version == "" || form.Dimension == "" || form.Revision == 0 {
 			return errors.New("invalid Package Form record")
@@ -157,6 +197,30 @@ func (state State) Validate() error {
 			return fmt.Errorf("duplicate Package Form %s in Dimension %s", form.Name, form.Dimension)
 		}
 		seenFIN[form.FIN], seenName[identity] = true, true
+		if form.Artifact != nil {
+			if form.Artifact.Source == "" || form.Artifact.SHA256 == "" {
+				return fmt.Errorf("Package Form %s has an incomplete artifact receipt", form.Name)
+			}
+			packageFiles := make(map[string]bool)
+			for _, file := range form.Artifact.Files {
+				if file.Path == "" || file.SHA256 == "" || file.Size < 0 {
+					return fmt.Errorf("Package Form %s has an invalid artifact receipt", form.Name)
+				}
+				clean := path.Clean(file.Path)
+				if clean != file.Path || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, "/") || strings.ContainsRune(clean, '\\') {
+					return fmt.Errorf("Package Form %s owns unsafe path %q", form.Name, file.Path)
+				}
+				key := form.Dimension + "\x00" + strings.ToLower(file.Path)
+				if packageFiles[key] {
+					return fmt.Errorf("Package Form %s owns %s more than once", form.Name, file.Path)
+				}
+				if owner, claimed := ownedPaths[key]; claimed {
+					return fmt.Errorf("Package Forms %s and %s both own %s", owner, form.Name, file.Path)
+				}
+				packageFiles[key] = true
+				ownedPaths[key] = form.Name
+			}
+		}
 	}
 	for index, entry := range state.Journal {
 		if entry.Sequence == 0 || (index > 0 && entry.Sequence <= state.Journal[index-1].Sequence) {

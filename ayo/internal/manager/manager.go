@@ -1,16 +1,19 @@
 package manager
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"hexaos.dev/ayo/internal/artifact"
 	"hexaos.dev/ayo/internal/model"
 	"hexaos.dev/ayo/internal/store"
 )
@@ -19,6 +22,10 @@ type Manager struct {
 	Store     store.Store
 	Authority model.Authority
 	Dimension string
+	// InstallRoot is a user-owned package tree. Ayo never writes to /, /usr,
+	// /etc, or other system locations.
+	InstallRoot string
+	HTTPClient  *http.Client
 }
 
 type InstallSpec struct {
@@ -28,6 +35,7 @@ type InstallSpec struct {
 	Dependencies  []string
 	Compatibility []string
 	PIMP          map[string]string
+	Artifact      *model.ArtifactSpec
 }
 
 type HealthReport struct {
@@ -65,15 +73,22 @@ func (manager Manager) SlapSpec(spec InstallSpec) error {
 	if err := validateInstallSpec(spec, manager.Dimension); err != nil {
 		return err
 	}
+	if spec.Artifact != nil {
+		return manager.InstallPlanContext(context.Background(), []InstallSpec{spec})
+	}
 	return manager.mutate("slap", func(state *model.State) (string, string, error) {
 		fin, err := applyInstallSpec(state, manager.Dimension, spec)
-		return fin, "activated " + spec.Name + "@" + spec.Version, err
+		return fin, "registered " + spec.Name + "@" + spec.Version + " without an artifact", err
 	})
 }
 
 // InstallPlan activates a dependency-ordered set in one transaction. Either
 // every Package Form is committed, or none of them are.
 func (manager Manager) InstallPlan(specs []InstallSpec) error {
+	return manager.InstallPlanContext(context.Background(), specs)
+}
+
+func (manager Manager) InstallPlanContext(ctx context.Context, specs []InstallSpec) error {
 	if len(specs) == 0 {
 		return errors.New("install plan is empty")
 	}
@@ -88,30 +103,72 @@ func (manager Manager) InstallPlan(specs []InstallSpec) error {
 		}
 		seen[key] = true
 	}
-	return manager.mutate("slap-plan", func(state *model.State) (string, string, error) {
-		pending := append([]InstallSpec(nil), specs...)
-		installed := 0
-		for len(pending) > 0 {
-			progress := false
-			for index := 0; index < len(pending); {
-				spec := pending[index]
-				if err := checkDependencies(*state, manager.Dimension, spec.Dependencies); err != nil {
-					index++
-					continue
-				}
-				if _, err := applyInstallSpec(state, manager.Dimension, spec); err != nil {
+	artifacts := make([]artifact.Package, 0, len(specs))
+	for _, spec := range specs {
+		if spec.Artifact != nil {
+			artifacts = append(artifacts, artifact.Package{Name: spec.Name, Version: spec.Version, Artifact: *spec.Artifact})
+		}
+	}
+	if len(artifacts) > 0 {
+		if manager.Authority != model.Operator {
+			return errors.New("DIESE denied slap-plan: Operator authority is required")
+		}
+		state, err := manager.Store.Load()
+		if err != nil {
+			return err
+		}
+		preview := state.Clone()
+		if _, err := applyPlan(&preview, manager.Dimension, specs); err != nil {
+			return err
+		}
+		installer := artifact.Installer{Root: manager.InstallRoot, Client: manager.HTTPClient}
+		return installer.Install(ctx, artifacts, state, manager.Dimension, func(transactionID string, receipts map[string]*model.InstalledArtifact) error {
+			return manager.mutate("slap-plan", func(next *model.State) (string, string, error) {
+				installed, err := applyPlan(next, manager.Dimension, specs)
+				if err != nil {
 					return "", "", err
 				}
-				pending = append(pending[:index], pending[index+1:]...)
-				installed++
-				progress = true
-			}
-			if !progress {
-				return "", "", fmt.Errorf("dependency plan is cyclic or unresolved near %s", pending[0].Name)
-			}
-		}
-		return "", fmt.Sprintf("activated %d Package Forms", installed), nil
+				for name, receipt := range receipts {
+					form, err := next.Find(name, manager.Dimension)
+					if err != nil {
+						return "", "", err
+					}
+					form.Artifact = receipt
+				}
+				next.ArtifactTransaction = transactionID
+				return "", fmt.Sprintf("installed %d Package Forms with %d verified artifacts", installed, len(receipts)), nil
+			})
+		})
+	}
+	return manager.mutate("slap-plan", func(state *model.State) (string, string, error) {
+		installed, err := applyPlan(state, manager.Dimension, specs)
+		return "", fmt.Sprintf("registered %d metadata-only Package Forms", installed), err
 	})
+}
+
+func applyPlan(state *model.State, dimension string, specs []InstallSpec) (int, error) {
+	pending := append([]InstallSpec(nil), specs...)
+	installed := 0
+	for len(pending) > 0 {
+		progress := false
+		for index := 0; index < len(pending); {
+			spec := pending[index]
+			if err := checkDependencies(*state, dimension, spec.Dependencies); err != nil {
+				index++
+				continue
+			}
+			if _, err := applyInstallSpec(state, dimension, spec); err != nil {
+				return installed, err
+			}
+			pending = append(pending[:index], pending[index+1:]...)
+			installed++
+			progress = true
+		}
+		if !progress {
+			return installed, fmt.Errorf("dependency plan is cyclic or unresolved near %s", pending[0].Name)
+		}
+	}
+	return installed, nil
 }
 
 func validateInstallSpec(spec InstallSpec, dimension string) error {
@@ -185,6 +242,41 @@ func applyInstallSpec(state *model.State, dimension string, spec InstallSpec) (s
 func (manager Manager) Yeet(identity string) error { return manager.YeetForce(identity, false) }
 
 func (manager Manager) YeetForce(identity string, force bool) error {
+	state, readErr := manager.Store.Load()
+	if readErr != nil {
+		return readErr
+	}
+	existing, findErr := state.Find(identity, manager.Dimension)
+	if findErr != nil {
+		return findErr
+	}
+	if existing.Artifact != nil {
+		if manager.Authority != model.Operator {
+			return errors.New("DIESE denied yeet: Operator authority is required")
+		}
+		if dependents := activeDependents(state, manager.Dimension, existing.Name); len(dependents) > 0 && !force {
+			return fmt.Errorf("cannot yeet %s; active dependents: %s (use --force to reconcile them off)", existing.Name, strings.Join(dependents, ", "))
+		}
+		name, receipt := existing.Name, *existing.Artifact
+		installer := artifact.Installer{Root: manager.InstallRoot, Client: manager.HTTPClient}
+		return installer.Remove(state, manager.Dimension, name, receipt, func(transactionID string) error {
+			return manager.mutate("yeet", func(next *model.State) (string, string, error) {
+				form, err := next.Find(name, manager.Dimension)
+				if err != nil {
+					return "", "", err
+				}
+				form.Active, form.DesiredActive, form.Hidden = false, false, false
+				form.Artifact = nil
+				form.Revision++
+				form.UpdatedAt = time.Now().UTC()
+				if force {
+					reconcile(next, manager.Dimension)
+				}
+				next.ArtifactTransaction = transactionID
+				return form.FIN, fmt.Sprintf("removed %d owned files and revoked capabilities", len(receipt.Files)), nil
+			})
+		})
+	}
 	return manager.mutate("yeet", func(state *model.State) (string, string, error) {
 		form, err := state.Find(identity, manager.Dimension)
 		if err != nil {
@@ -201,6 +293,14 @@ func (manager Manager) YeetForce(identity string, force bool) error {
 		}
 		return form.FIN, "revoked activation and capabilities", nil
 	})
+}
+
+func (manager Manager) RecoverArtifacts() error {
+	state, err := manager.Store.Load()
+	if err != nil {
+		return err
+	}
+	return (artifact.Installer{Root: manager.InstallRoot, Client: manager.HTTPClient}).Recover(state.ArtifactTransaction)
 }
 
 func (manager Manager) Ghost(identity string) error {

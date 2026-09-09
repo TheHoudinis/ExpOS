@@ -6,8 +6,8 @@ use crate::{
 };
 use hexa_core::{
     Authority, BootReport, CapabilityBroker, Dimension, Fin, Form, FormHandle, FormKind, Lifecycle,
-    Operations, PimpScope, PimpSpec, Relationship, RelationshipGraph, RelationshipKind, Text,
-    GO_ABI_VERSION,
+    NetworkPolicy, Operations, PimpScope, PimpSpec, PimpValue, Relationship, RelationshipGraph,
+    RelationshipKind, SpecKey, Text, GO_ABI_VERSION,
 };
 
 const MAX_LINE: usize = 128;
@@ -99,6 +99,7 @@ struct Shell {
     next_fin: u32,
     next_dimension_fin: u32,
     journal_sequence: u32,
+    network_policy: NetworkPolicy,
 }
 
 impl Shell {
@@ -117,6 +118,11 @@ impl Shell {
             FormKind::Interface,
         ));
         forms[4] = Some(Form::new(GO_ABI_FIN, "GoABI", FormKind::Interface));
+        let mut network_form = Form::new(crate::network::NETWORK_FIN, "Network", FormKind::Driver);
+        if !crate::network::available() {
+            network_form.lifecycle = Lifecycle::Recoverable;
+        }
+        forms[5] = Some(network_form);
         let mut broker = CapabilityBroker::new();
         let boot_operations = if session.authority() == Authority::Guest {
             Operations::READ
@@ -135,6 +141,18 @@ impl Shell {
             .expect("the trusted boot Handle must be issuable");
         let mut handles = [None; MAX_HANDLES];
         handles[0] = Some(boot_handle);
+        if crate::network::available() {
+            if let Ok(network_handle) = broker.issue_for(
+                report.root_fin,
+                session.authority(),
+                crate::network::NETWORK_FIN,
+                report.stable_fin,
+                Operations::NETWORK,
+                u64::MAX,
+            ) {
+                handles[1] = Some(network_handle);
+            }
+        }
         let mut dimensions = [None; MAX_DIMENSIONS];
         dimensions[0] = Some(Dimension::new(report.stable_fin, "Stable", true));
         let mut relationships = RelationshipGraph::new();
@@ -179,13 +197,31 @@ impl Shell {
                 kind: RelationshipKind::DependsOn,
                 dimension: Some(report.stable_fin),
             },
+            Relationship {
+                source: report.root_fin,
+                target: crate::network::NETWORK_FIN,
+                kind: RelationshipKind::Contains,
+                dimension: Some(report.stable_fin),
+            },
+            Relationship {
+                source: crate::desktop::BROWSER_FIN,
+                target: crate::network::NETWORK_FIN,
+                kind: RelationshipKind::DependsOn,
+                dimension: Some(report.stable_fin),
+            },
+            Relationship {
+                source: crate::network::NETWORK_FIN,
+                target: crate::desktop::BROWSER_FIN,
+                kind: RelationshipKind::Provides,
+                dimension: Some(report.stable_fin),
+            },
         ] {
             relationships
                 .relate(relationship)
                 .expect("built-in graphical relationship must fit");
         }
         let mut content = [FormContent::empty(); MAX_FORMS];
-        let ayo_description = b"ayo v2 Package Form manager; commands: slap yeet glance chill fix ghost manifest highfive dodge vibecheck flex";
+        let ayo_description = b"ayo v3 verified artifact manager; download, SHA-256, safe staging, ownership, rollback, remove, and recovery";
         content[1].bytes[..ayo_description.len()].copy_from_slice(ayo_description);
         content[1].length = ayo_description.len() as u16;
         seed_content(
@@ -199,6 +235,10 @@ impl Shell {
         seed_content(
             &mut content[4],
             b"Go ABI v1: versioned capability-gated Form, surface, browser, event, and package calls",
+        );
+        seed_content(
+            &mut content[5],
+            b"Network Driver Form: RTL8139 bus-master packet I/O, Ethernet, ARP, static IPv4, ICMP echo",
         );
         Self {
             report,
@@ -216,6 +256,7 @@ impl Shell {
             next_fin: 2,
             next_dimension_fin: 2,
             journal_sequence: report.journal_sequence,
+            network_policy: NetworkPolicy::Restricted,
         }
     }
 
@@ -285,7 +326,10 @@ impl Shell {
                 true
             }
             "policy" => {
-                println!("Root@Stable: use=service network=restricted isolation=enabled");
+                println!(
+                    "Root@Stable: use=service network={} isolation=enabled",
+                    network_policy_name(self.network_policy)
+                );
                 true
             }
             "handles" => {
@@ -326,12 +370,15 @@ impl Shell {
                 true
             }
             "ifconfig" => {
-                println!("network: no v8 Driver Form bound");
-                println!("legacy RTL8139 stack: make run-alpha");
+                crate::network::print_configuration();
                 true
             }
             "netstat" => {
-                println!("no active v8 network Handles or connections");
+                crate::network::print_statistics();
+                true
+            }
+            "ping" => {
+                self.ping(args);
                 true
             }
             "dmesg" | "bootlog" => {
@@ -350,7 +397,9 @@ impl Shell {
             "displayinfo" => {
                 println!("HexaDisplay protocol v1: surfaces attach damage commit focus hit-test");
                 println!(
-                    "framebuffer: 800x600 XRGB8888 scanout available={}",
+                    "framebuffer: {}x{} XRGB8888 scanout available={}",
+                    crate::framebuffer::WIDTH,
+                    crate::framebuffer::HEIGHT,
                     crate::framebuffer::available()
                 );
                 println!("buffer protocols: XRGB8888 ARGB8888 RGB565 TextCells");
@@ -454,7 +503,12 @@ impl Shell {
                 true
             }
             "login" | "logout" => {
-                self.session = crate::session::login(input);
+                let requested_mode = crate::session::choose_boot_mode(input);
+                let login = crate::session::login(input, requested_mode);
+                self.session = login.session;
+                if login.mode == crate::session::BootMode::Graphical {
+                    crate::desktop::run(input, false, self.session);
+                }
                 true
             }
             "mkform" => {
@@ -572,11 +626,11 @@ impl Shell {
                 true
             }
             "ayo" => {
-                println!("ayo v2 is registered as Package Form {}.", AYO_FIN);
-                println!("Commands: slap yeet glance chill fix ghost manifest highfive dodge");
-                println!("          vibecheck flex");
+                println!("ayo v3 is registered as Package Form {}.", AYO_FIN);
+                println!("Commands: install slap yeet files recover glance chill fix ghost");
+                println!("          manifest highfive dodge vibecheck flex");
                 println!("Host TUI: ./ayo/bin/ayo --authority operator");
-                println!("CLI:      ./ayo/bin/ayo --authority operator <command>");
+                println!("CLI:      ./ayo/bin/ayo --authority operator install <package>");
                 true
             }
             "games" | "arcade" => {
@@ -619,7 +673,9 @@ impl Shell {
         println!("  mkform <name> [service|interface|package|driver|data|policy]");
         println!("  view/cat write append head delete recover move copy");
         println!("  hexdump du shasum df which resolve retire activate reclaim");
-        println!("  grant <name> <read|execute|configure|relate|retire|package|display|input>");
+        println!(
+            "  grant <name> <read|execute|configure|relate|retire|package|display|input|network>"
+        );
         println!("  revoke <id>  handlecheck <id> <requester> <operation>");
         println!("  pimp <name> <key=value>");
         println!("  relate/unrelate <source> <kind> <target>  relationships <source>");
@@ -628,7 +684,7 @@ impl Shell {
         println!(
             "  date clock cpuinfo features kernelcaps lspci neofetch sysinfo mem free env uptime ps"
         );
-        println!("  kstat dmesg bootlog ifconfig netstat mode");
+        println!("  kstat dmesg bootlog ifconfig netstat ping <IPv4-address> [count] mode");
         println!("  calc len hex reverse tolower toupper factor rand dice ascii");
         println!("  palette morse fortune 8ball cowsay banner logo matrix sleep");
     }
@@ -655,6 +711,40 @@ impl Shell {
         println!("active Forms: {}  active Handles: {}", active, handle_count);
         println!("typed relationships: {}", self.relationships.count());
         println!("journal sequence: {}", self.journal_sequence);
+    }
+
+    fn ping(&self, arguments: &str) {
+        if !self
+            .find_form("Network")
+            .is_some_and(|form| form.lifecycle == Lifecycle::Active)
+        {
+            println!("ping: DIESE denied I/O because the Network Driver Form is not active");
+            slog!("HEXA_PING_DENIED lifecycle\r\n");
+            return;
+        }
+        if self.network_policy == NetworkPolicy::Disabled {
+            println!("ping: DIESE denied I/O because PIMP network=disabled");
+            slog!("HEXA_PING_DENIED policy=disabled\r\n");
+            return;
+        }
+        let Some(handle) = self.handles.iter().flatten().find(|handle| {
+            !handle.revoked
+                && handle.requester == self.report.root_fin
+                && handle.target == crate::network::NETWORK_FIN
+                && handle.dimension == self.report.stable_fin
+                && handle.operations.contains(Operations::NETWORK)
+        }) else {
+            println!("ping: DIESE denied I/O because no active Network Handle is bound");
+            slog!("HEXA_PING_DENIED handle=missing\r\n");
+            return;
+        };
+        crate::network::ping_text(
+            &self.broker,
+            handle.id,
+            self.report.root_fin,
+            self.report.stable_fin,
+            arguments,
+        );
     }
 
     fn list_dimensions(&self) {
@@ -730,7 +820,9 @@ impl Shell {
                 );
             }
         }
-        println!("Package mutations are committed by the Go ayo v2 engine.");
+        println!(
+            "Package metadata and verified owned files are committed by the Go ayo v3 engine."
+        );
     }
 
     fn relate(
@@ -1348,7 +1440,16 @@ impl Shell {
             Some(self.report.stable_fin),
             setting,
         ) {
-            Ok(_) => {
+            Ok(spec) => {
+                if form.fin == crate::network::NETWORK_FIN {
+                    for entry in spec.entries() {
+                        if entry.key == SpecKey::Network {
+                            if let PimpValue::Network(policy) = entry.value {
+                                self.network_policy = policy;
+                            }
+                        }
+                    }
+                }
                 self.commit_action();
                 println!("PIMP accepted '{}'; DIESE validation passed.", setting);
             }
@@ -1499,6 +1600,7 @@ fn is_shell_command(name: &str) -> bool {
             | "kstat"
             | "ifconfig"
             | "netstat"
+            | "ping"
             | "dmesg"
             | "bootlog"
             | "mode"
@@ -1566,6 +1668,7 @@ fn is_mutating_command(name: &str) -> bool {
             | "pimp"
             | "relate"
             | "unrelate"
+            | "ping"
             | "reboot"
             | "shutdown"
             | "halt"
@@ -1622,6 +1725,7 @@ fn parse_operation(raw: &str) -> Option<Operations> {
         "package" => Some(Operations::PACKAGE),
         "display" => Some(Operations::DISPLAY),
         "input" => Some(Operations::INPUT),
+        "network" => Some(Operations::NETWORK),
         _ => None,
     }
 }
@@ -1643,8 +1747,18 @@ fn operation_name(operation: Operations) -> &'static str {
         "display"
     } else if operation == Operations::INPUT {
         "input"
+    } else if operation == Operations::NETWORK {
+        "network"
     } else {
         "unknown"
+    }
+}
+
+const fn network_policy_name(policy: NetworkPolicy) -> &'static str {
+    match policy {
+        NetworkPolicy::Open => "open",
+        NetworkPolicy::Restricted => "restricted",
+        NetworkPolicy::Disabled => "disabled",
     }
 }
 

@@ -1,0 +1,7 @@
+2222
+operator
+expos
+ifconfig
+ping 10.0.2.2 160
+netstat
+shutdown

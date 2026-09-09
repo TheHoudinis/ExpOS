@@ -1,9 +1,12 @@
 package manager
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"hexaos.dev/ayo/internal/artifact"
 	"hexaos.dev/ayo/internal/model"
 )
 
@@ -146,5 +149,42 @@ func TestInstallPlanResolvesUnorderedDependenciesAtomically(t *testing.T) {
 	state, _ = storage.Load()
 	if len(state.Packages) != 2 || state.Sequence != 1 {
 		t.Fatalf("failed plan leaked state: %#v", state)
+	}
+}
+
+func TestArtifactPlanPersistsOwnershipAndYeetRemovesFiles(t *testing.T) {
+	storage := &memoryStore{}
+	root := t.TempDir()
+	source := filepath.Join(t.TempDir(), "notes.bin")
+	payload := []byte("actual package bytes")
+	if err := os.WriteFile(source, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ayo := Manager{Store: storage, Authority: model.Operator, Dimension: "Stable", InstallRoot: root}
+	spec := InstallSpec{
+		Name: "Notes", Version: "3.0.0",
+		Artifact: &model.ArtifactSpec{Source: source, SHA256: artifact.Digest(payload), Format: "raw", Target: "share/notes/data"},
+	}
+	if err := ayo.InstallPlan([]InstallSpec{spec}); err != nil {
+		t.Fatal(err)
+	}
+	state, _ := storage.Load()
+	form, err := state.Find("Notes", "Stable")
+	if err != nil || form.Artifact == nil || len(form.Artifact.Files) != 1 {
+		t.Fatalf("artifact ownership was not committed: %#v, %v", form, err)
+	}
+	if content, err := os.ReadFile(filepath.Join(root, "share", "notes", "data")); err != nil || string(content) != string(payload) {
+		t.Fatalf("artifact payload missing: %q, %v", content, err)
+	}
+	if err := ayo.Yeet("Notes"); err != nil {
+		t.Fatal(err)
+	}
+	state, _ = storage.Load()
+	form, _ = state.Find("Notes", "Stable")
+	if form.Active || form.Artifact != nil {
+		t.Fatalf("uninstall did not clear activation receipt: %#v", form)
+	}
+	if _, err := os.Stat(filepath.Join(root, "share", "notes", "data")); !os.IsNotExist(err) {
+		t.Fatalf("owned payload survived yeet: %v", err)
 	}
 }

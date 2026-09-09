@@ -3,11 +3,11 @@ BUILD      := build
 ISO        := $(BUILD)/hexaos.iso
 KERNEL_ELF := $(BUILD)/kernel.elf
 RUST_LIB   := target/$(TARGET)/release/libhexa_kernel.a
-QEMU       := qemu-system-x86_64 -m 256M
+QEMU       := qemu-system-x86_64 -m 256M -netdev user,id=net0 -device rtl8139,netdev=net0
 
-.PHONY: all iso test check display-check session-check run debug clean legacy-alpha-check run-alpha ayo go-sdk kernel-build
+.PHONY: all iso test check display-check session-check network-check run debug clean legacy-alpha-check run-alpha ayo go-sdk kernel-build
 
-all: test check display-check session-check ayo go-sdk
+all: test check display-check session-check network-check ayo go-sdk
 
 test:
 	cargo test -p hexa-core
@@ -34,6 +34,7 @@ check: $(ISO)
 	rm -f $(BUILD)/serial.log
 	timeout 20 $(QEMU) -device isa-debug-exit,iobase=0xf4,iosize=0x04 -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-smoke-input.txt > $(BUILD)/serial.log 2>&1 || true
 	grep -q "HEXA_BOOT_OK" $(BUILD)/serial.log
+	grep -q "HEXA_BOOT_MODE console" $(BUILD)/serial.log
 	grep -q "HEXA_LOGIN_OK user=operator" $(BUILD)/serial.log
 	grep -q "HEXA_SHELL_READY" $(BUILD)/serial.log
 	grep -q "HEXA_COMMAND_OK help" $(BUILD)/serial.log
@@ -52,7 +53,7 @@ check: $(ISO)
 	grep -q "Reclaimed 'Scratch'" $(BUILD)/serial.log
 	grep -q "Created and bound 'DemoBrowser'" $(BUILD)/serial.log
 	grep -q "Granted Handle" $(BUILD)/serial.log
-	grep -q "Handle #2 authorizes execute for requester 'Root'" $(BUILD)/serial.log
+	grep -q "Handle #3 authorizes execute for requester 'Root'" $(BUILD)/serial.log
 	grep -q "^42" $(BUILD)/serial.log
 	grep -q "HexaOS Forms can carry structured state and revisions" $(BUILD)/serial.log
 	grep -q "NotesBackup" $(BUILD)/serial.log
@@ -64,10 +65,14 @@ check: $(ISO)
 display-check: $(ISO)
 	rm -f $(BUILD)/display-serial.log
 	timeout 20 $(QEMU) -device isa-debug-exit,iobase=0xf4,iosize=0x04 -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-display-input.txt > $(BUILD)/display-serial.log 2>&1 || true
-	grep -q "framebuffer: 800x600 XRGB8888 scanout available=true" $(BUILD)/display-serial.log
-	grep -q "HEXA_DISPLAY_READY surfaces=10 commit=10" $(BUILD)/display-serial.log
+	grep -q "framebuffer: 1024x768 XRGB8888 scanout available=true" $(BUILD)/display-serial.log
+	grep -q "HEXA_BOOT_MODE graphical" $(BUILD)/display-serial.log
+	grep -q "HEXA_DISPLAY_READY surfaces=11 commit=11" $(BUILD)/display-serial.log
+	grep -q "HEXA_DESKTOP_EMPTY open_apps=0 pinned_apps=0" $(BUILD)/display-serial.log
 	grep -q "HEXA_MOUSE_READY enabled=true" $(BUILD)/display-serial.log
+	grep -q "HEXA_APP_OPENED TERMINAL" $(BUILD)/display-serial.log
 	grep -q "HEXA_APP_CLOSED TERMINAL" $(BUILD)/display-serial.log
+	grep -q "HEXA_APP_REOPENED TERMINAL" $(BUILD)/display-serial.log
 	grep -q "HEXA_DISPLAY_CLOSED" $(BUILD)/display-serial.log
 	grep -q "HEXA_COMMAND_OK desktop" $(BUILD)/display-serial.log
 	grep -q "HexaOS Go ABI v1" $(BUILD)/display-serial.log
@@ -81,6 +86,17 @@ session-check: $(ISO)
 	grep -q "DIESE denied 'mkform' for Guest authority" $(BUILD)/guest-serial.log
 	! grep -q "Created and bound 'Forbidden'" $(BUILD)/guest-serial.log
 	@echo ">>> EXPOS SESSION AUTHORITY TEST PASSED <<<"
+
+network-check: $(ISO)
+	rm -f $(BUILD)/network-serial.log
+	timeout 20 $(QEMU) -device isa-debug-exit,iobase=0xf4,iosize=0x04 -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-network-input.txt > $(BUILD)/network-serial.log 2>&1 || true
+	grep -q "HEXA_NET_READY driver=rtl8139" $(BUILD)/network-serial.log
+	grep -q "ether0  up" $(BUILD)/network-serial.log
+	grep -q "HEXA_PING_REPLY address=10.0.2.2 sequence=1" $(BUILD)/network-serial.log
+	grep -q "HEXA_PING_SUMMARY sent=160 received=160" $(BUILD)/network-serial.log
+	! grep -q "HEXA_PING_ERROR" $(BUILD)/network-serial.log
+	grep -q "rtl8139-poll up" $(BUILD)/network-serial.log
+	@echo ">>> EXPOS NATIVE NETWORK TEST PASSED <<<"
 
 run: $(ISO)
 	$(QEMU) -cdrom $(ISO) -serial stdio -no-reboot

@@ -299,7 +299,7 @@ fn logo() {
 
 fn neofetch() {
     logo();
-    println!("OS: ExpOS v8.0.0-alpha.11");
+    println!("OS: ExpOS v{}", env!("CARGO_PKG_VERSION"));
     println!("Kernel: x86_64 Rust no_std");
     println!("Model: Form-native / Dimension-oriented");
     println!("Authority: Operator");

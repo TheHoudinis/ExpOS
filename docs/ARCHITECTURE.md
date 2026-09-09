@@ -56,21 +56,20 @@ firmware / GRUB (temporary)
   recursively revokes its descendants.
 - Relationships are typed, FIN-to-FIN and optionally Dimension-scoped; package
   dependencies use the same model instead of paths.
-- The Go ayo catalog maps verified registry metadata into Package Forms. A
-  dependency plan is validated and committed as one state transaction rather
-  than downloading archives into paths.
+- Ayo v3 maps verified registry metadata into Package Forms and materializes
+  raw, tar or tar.gz artifacts beneath an explicit user-owned root. Downloads,
+  extraction, owned-file receipts, state publication, uninstall and recovery
+  share an atomic transaction; scripts, symlinks and path traversal are denied.
 - HexaDisplay uses a Wayland-like ownership model without copying Wayland's
   Unix socket/file-descriptor ABI: clients own surfaces and Buffer Handles,
   mutate pending state, report damage, and publish atomically with `commit`.
   Focus, configure, frame-complete, key and pointer events are routed back to the owning
   FIN. The alpha renderer targets the mapped Bochs/QEMU XRGB framebuffer.
 - The Prism desktop creates separate Browser, Terminal, Forms, Packages,
-  Settings, System and Games surfaces, plus Root, panel and launcher surfaces.
-  Its original dark Win/KDE-style shell provides a left application launcher
-  and bottom panel without copied third-party assets. Four workspaces provide
-  master-stack tiling, floating/fullscreen windows, dragging and overview.
-  Panel activation follows an existing app to its workspace or reopens a closed
-  app. Closing the final app leaves a valid empty workspace. Each application
+  Settings, System, Games and Notes surfaces, plus Root, taskbar and launcher
+  surfaces. Its original dark shell provides a Start launcher and bottom
+  taskbar without copied third-party assets. It starts with no open or pinned
+  apps and supports focus, dragging, minimize, maximize, close and reopen. Each application
   receives a child Handle containing
   only Display and Input rights; the compositor checks it before visibility,
   geometry, commit or key routing. Leaving graphics restores the VGA mode 3
@@ -88,10 +87,13 @@ firmware / GRUB (temporary)
   change passwords; password-bearing commands are omitted from shell history.
   Persistent account Forms, salted password hashes and lockout policy remain
   future storage/security work.
+- Network is a Driver Form protected by requester-bound Network Handles and
+  PIMP policy. Its current polling RTL8139 path implements Ethernet, ARP,
+  static QEMU-user IPv4 and ICMP echo. TCP, UDP, DNS, DHCP, TLS, Wi-Fi and
+  interrupt-driven I/O are explicitly future work.
 - The Browser is an Interface Form above HexaDisplay. Its current document
   engine intentionally accepts local `hexa://` and `data:text/html` resources;
-  external HTTPS, CSS and JavaScript are not claimed while the v8 network and
-  isolation layers remain unbound.
+  external HTTPS, CSS and JavaScript are not claimed until TCP/DNS/TLS exist.
 - Go ABI v1 gives Go clients stable call numbers and request/response layouts
   for Forms, Handles, display surfaces, events, browser navigation and package
   transactions. The Go SDK and emulator are runnable today; native Go binary
@@ -118,10 +120,9 @@ The command environment is deliberately backed by fixed-capacity, in-memory
 tables at this stage. Its mutations exercise the core semantics but are not
 durable until the HexaFS block driver and recovery path are connected.
 
-Alpha.11 includes the broad hardware, utility and Form-content command layer,
-Prism Arcade, command recall in both terminals, PS/2 pointer routing, runtime
-account management, expanded graphics primitives, and the redesigned dark
-Prism shell. The Diamond II build is
+Alpha.12 adds the 1024x768 empty-start Prism desktop, Notes, dual graphical and
+console login selection, Ayo v3 artifact transactions, and capability-gated
+native RTL8139/ARP/IPv4/ICMP networking. The Diamond II build is
 also exposed through `make run-alpha`, providing a runnable migration fallback
 for networking, scheduling, ATA persistence and the games not yet redesigned
 around v8 semantics.
