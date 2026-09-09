@@ -64,7 +64,10 @@ firmware / GRUB (temporary)
   Unix socket/file-descriptor ABI: clients own surfaces and Buffer Handles,
   mutate pending state, report damage, and publish atomically with `commit`.
   Focus, configure, frame-complete, key and pointer events are routed back to the owning
-  FIN. The software renderer targets the mapped Bochs/QEMU XRGB framebuffer.
+  FIN. The software renderer targets a 1920x1080x32 XRGB scanout in QEMU
+  standard VGA's 16 MiB linear framebuffer BAR. The bootstrap maps the entire
+  fourth-GiB PCI window, and HexaDisplay checks the adapter's active geometry,
+  stride and required byte count before the first framebuffer write.
 - The desktop creates separate Browser, Terminal, Forms, Packages,
   Settings, System, Games and Notes surfaces, plus Root, taskbar and launcher
   surfaces. Its flat dark shell provides a compact application menu and bottom
@@ -93,6 +96,12 @@ firmware / GRUB (temporary)
   bounded synchronous TCP client and HTTP/1.0 GET. DHCP, IPv6, TLS, physical
   Wi-Fi, concurrent sockets, TCP servers and interrupt-driven I/O are explicitly
   future work.
+- Connectivity settings target a distinct Radio FIN through a requester-bound
+  Configure Handle. The manager keeps software policy, PCI/USB presence, driver
+  readiness and connection state separate. Disabling Network is checked by the
+  real packet authorization path. PCI Wi-Fi/Bluetooth functions are discovered,
+  while missing 802.11 drivers and the absent USB host stack remain visibly
+  unavailable instead of being reported as connected.
 - The Browser is an Interface Form above HexaDisplay. Its current document
   engine accepts local `hexa://`, `data:text/html` and bounded `http://`
   resources. It receives a requester-bound Network Handle only for non-Guest
@@ -124,7 +133,7 @@ The command environment is deliberately backed by fixed-capacity, in-memory
 tables at this stage. Its mutations exercise the core semantics but are not
 durable until the HexaFS block driver and recovery path are connected.
 
-Alpha.12 includes the 1024x768 empty-start desktop, normal case-sensitive text,
+Alpha.12 includes the 1920x1080 empty-start desktop, normal case-sensitive text,
 Notes, dual graphical and console login selection, Ayo v3 artifact transactions,
 and capability-gated native RTL8139/ARP/IPv4/ICMP/UDP/DNS/TCP/HTTP networking.
 The Diamond II build is

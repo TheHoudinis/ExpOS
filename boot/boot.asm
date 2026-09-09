@@ -3,8 +3,8 @@
 ; GRUB (Multiboot2) enters here in 32-bit protected mode with paging
 ; disabled. This stub:
 ;   1. verifies the CPU supports 64-bit long mode
-;   2. builds identity-mapped page tables covering the first 1 GiB
-;      (2 MiB huge pages)
+;   2. builds identity-mapped page tables covering the first 1 GiB and the
+;      fourth-GiB PCI/MMIO window (2 MiB huge pages)
 ;   3. enables PAE + LME + paging, loads a 64-bit GDT, far-jumps
 ;      into long mode
 ;   4. hands control to the Rust kernel: kernel_main(magic, mbi_phys)
@@ -33,7 +33,7 @@ header_start:
 header_end:
 
 ; ---------------------------------------------------------------------------
-; Page tables (identity map of the first 1 GiB)
+; Page tables (identity map of RAM below 1 GiB plus PCI/MMIO in the fourth GiB)
 ; ---------------------------------------------------------------------------
 section .bss
 align 4096
@@ -120,7 +120,9 @@ _start:
         mov [pdpt_table], eax
 
         ; pdpt[3] -> high identity map for 0xC0000000..0xFFFFFFFF.
-        ; The Bochs/QEMU linear framebuffer lives at 0xFD000000.
+        ; QEMU standard VGA maps its 16 MiB linear framebuffer BAR at
+        ; 0xFD000000. A 1920x1080x32 scanout consumes 8,294,400 bytes and
+        ; therefore ends at 0xFD7E8FFF, well within this high mapping.
         mov eax, pd_high_table
         or  eax, 0b11
         mov [pdpt_table + 3*8], eax

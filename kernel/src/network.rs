@@ -68,6 +68,7 @@ const TCP_ACK: u8 = 0x10;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NetworkError {
     CapabilityDenied,
+    PolicyDisabled,
     BadAddress,
     BadHostname,
     BadUrl,
@@ -90,6 +91,7 @@ impl NetworkError {
     pub const fn message(self) -> &'static str {
         match self {
             Self::CapabilityDenied => "DIESE denied the Network Handle",
+            Self::PolicyDisabled => "network access is disabled in Settings",
             Self::BadAddress => "invalid IPv4 address",
             Self::BadHostname => "invalid DNS hostname",
             Self::BadUrl => "invalid HTTP URL",
@@ -957,6 +959,11 @@ pub fn available() -> bool {
     NETWORK.lock().initialized
 }
 
+/// Report the physical Ethernet carrier independently of policy/capabilities.
+pub fn link_up() -> bool {
+    NETWORK.lock().link_up()
+}
+
 pub fn print_configuration() {
     let network = NETWORK.lock();
     if !network.initialized {
@@ -1018,6 +1025,11 @@ pub fn ping_text(
     dimension: Fin,
     arguments: &str,
 ) {
+    if !crate::radio::network_allowed() {
+        println!("ping: network access is disabled in Settings");
+        slog!("HEXA_PING_DENIED policy=disabled\r\n");
+        return;
+    }
     if let Err(error) = broker.authorize_requester(
         handle_id,
         requester,
@@ -1104,6 +1116,9 @@ fn authorize_network(
     requester: Fin,
     dimension: Fin,
 ) -> Result<(), NetworkError> {
+    if !crate::radio::network_allowed() {
+        return Err(NetworkError::PolicyDisabled);
+    }
     broker
         .authorize_requester(
             handle_id,

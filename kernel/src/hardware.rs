@@ -1,6 +1,21 @@
 use crate::{port, println};
 use core::arch::x86_64::{__cpuid, _rdtsc};
 
+/// Allocation-free PCI identity used by early kernel services.  Keeping this
+/// scanner in the hardware layer lets drivers report detected-but-unsupported
+/// devices without each service inventing a second PCI walk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PciFunction {
+    pub bus: u8,
+    pub slot: u8,
+    pub function: u8,
+    pub vendor_id: u16,
+    pub device_id: u16,
+    pub class_code: u8,
+    pub subclass: u8,
+    pub programming_interface: u8,
+}
+
 pub fn print_date() {
     let second = read_cmos(0x00);
     let minute = read_cmos(0x02);
@@ -102,7 +117,10 @@ pub fn print_kernel_features() {
         "desktop: empty-start taskbar shell, window controls, pointer hit-testing, routed input"
     );
     println!("network: Ethernet, ARP, IPv4, ICMP, UDP, DNS, TCP and HTTP (polling)");
-    println!("pending: interrupts, native storage/audio, DHCP, IPv6, TLS and Wi-Fi drivers");
+    println!("radio: capability policy plus PCI Wi-Fi/Bluetooth class discovery");
+    println!(
+        "pending: interrupts, native storage/audio, DHCP, IPv6, TLS, Wi-Fi drivers and USB/Bluetooth"
+    );
 }
 
 pub fn print_pci() {
@@ -131,6 +149,19 @@ pub fn print_pci() {
     if found == 0 {
         println!("No PCI functions detected.");
     }
+}
+
+/// Return the first PCI function with the requested class and subclass.
+///
+/// The scan includes secondary buses and multifunction devices.  It only
+/// reads PCI configuration space and does not claim or configure the device.
+pub fn find_pci_class(class_code: u8, subclass: u8) -> Option<PciFunction> {
+    find_pci(|function| function.class_code == class_code && function.subclass == subclass)
+}
+
+/// Return the first PCI function with an exact vendor/device identity.
+pub fn find_pci_device(vendor_id: u16, device_id: u16) -> Option<PciFunction> {
+    find_pci(|function| function.vendor_id == vendor_id && function.device_id == device_id)
 }
 
 pub fn print_memory_architecture() {
@@ -162,6 +193,55 @@ fn read_cmos(register: u8) -> u8 {
         port::outb(0x70, register | 0x80);
         port::inb(0x71)
     }
+}
+
+fn find_pci(mut matches: impl FnMut(PciFunction) -> bool) -> Option<PciFunction> {
+    for bus in 0_u16..=255 {
+        for slot in 0_u8..32 {
+            let Some(primary) = read_pci_function(bus as u8, slot, 0) else {
+                continue;
+            };
+            if matches(primary) {
+                return Some(primary);
+            }
+
+            // Header Type is byte 0x0E.  Bit seven advertises a
+            // multifunction slot, so only then are functions 1..7 valid to
+            // probe.
+            let header = pci_read(bus as u8, slot, 0, 0x0C);
+            if header & (1 << 23) == 0 {
+                continue;
+            }
+            for function in 1_u8..8 {
+                let Some(candidate) = read_pci_function(bus as u8, slot, function) else {
+                    continue;
+                };
+                if matches(candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn read_pci_function(bus: u8, slot: u8, function: u8) -> Option<PciFunction> {
+    let identity = pci_read(bus, slot, function, 0);
+    let vendor_id = identity as u16;
+    if vendor_id == 0xFFFF {
+        return None;
+    }
+    let class = pci_read(bus, slot, function, 0x08);
+    Some(PciFunction {
+        bus,
+        slot,
+        function,
+        vendor_id,
+        device_id: (identity >> 16) as u16,
+        class_code: (class >> 24) as u8,
+        subclass: (class >> 16) as u8,
+        programming_interface: (class >> 8) as u8,
+    })
 }
 
 fn pci_read(bus: u8, slot: u8, function: u8, offset: u8) -> u32 {

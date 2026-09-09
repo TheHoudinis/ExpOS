@@ -6,6 +6,11 @@ displayinfo
 browser
 q
 desktop
+s2
+1
+3
+3
+4
 t
 close
 t

@@ -1,8 +1,21 @@
 use crate::port;
 
-pub const WIDTH: usize = 1024;
-pub const HEIGHT: usize = 768;
-const LFB: usize = 0xFD00_0000;
+pub const WIDTH: usize = 1920;
+pub const HEIGHT: usize = 1080;
+pub const BITS_PER_PIXEL: usize = 32;
+pub const BYTES_PER_PIXEL: usize = BITS_PER_PIXEL / 8;
+pub const STRIDE_BYTES: usize = WIDTH * BYTES_PER_PIXEL;
+pub const SCANOUT_BYTES: usize = STRIDE_BYTES * HEIGHT;
+
+// QEMU's standard VGA device exposes a 16 MiB prefetchable BAR0 at this
+// address in the i440FX machine used by the Makefile. The bootstrap maps the
+// complete 0xC000_0000..=0xFFFF_FFFF PCI/MMIO window, so the 7.91 MiB 1080p
+// scanout is both inside the BAR aperture and inside the identity map.
+pub const LFB_PHYSICAL_ADDRESS: usize = 0xFD00_0000;
+pub const LFB_APERTURE_BYTES: usize = 16 * 1024 * 1024;
+const _: () = assert!(SCANOUT_BYTES <= LFB_APERTURE_BYTES);
+
+const LFB: usize = LFB_PHYSICAL_ADDRESS;
 const VBE_INDEX: u16 = 0x01CE;
 const VBE_DATA: u16 = 0x01CF;
 
@@ -12,9 +25,31 @@ const INDEX_YRES: u16 = 2;
 const INDEX_BPP: u16 = 3;
 const INDEX_ENABLE: u16 = 4;
 const INDEX_VIRT_WIDTH: u16 = 6;
+const INDEX_VIRT_HEIGHT: u16 = 7;
+const INDEX_X_OFFSET: u16 = 8;
+const INDEX_Y_OFFSET: u16 = 9;
 const DISABLED: u16 = 0;
 const ENABLED: u16 = 0x01;
 const LFB_ENABLED: u16 = 0x40;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Mode {
+    pub width: u16,
+    pub height: u16,
+    pub bits_per_pixel: u16,
+    pub virtual_width: u16,
+    pub virtual_height: u16,
+}
+
+impl Mode {
+    pub const fn stride_bytes(self) -> usize {
+        self.virtual_width as usize * self.bits_per_pixel as usize / 8
+    }
+
+    pub const fn scanout_bytes(self) -> usize {
+        self.stride_bytes() * self.height as usize
+    }
+}
 
 pub mod color {
     pub const BACKGROUND: u32 = 0x0010_1212;
@@ -35,6 +70,16 @@ pub fn available() -> bool {
     (0xB0C0..=0xB0C5).contains(&id)
 }
 
+/// Return the geometry reported by the adapter while graphics are enabled.
+/// Callers can distinguish the requested build-time mode from the active
+/// hardware mode instead of assuming that register programming succeeded.
+pub fn active_mode() -> Option<Mode> {
+    if !available() || read(INDEX_ENABLE) & ENABLED == 0 {
+        return None;
+    }
+    Some(read_mode())
+}
+
 pub fn enter() -> bool {
     if !available() {
         return false;
@@ -42,9 +87,60 @@ pub fn enter() -> bool {
     write(INDEX_ENABLE, DISABLED);
     write(INDEX_XRES, WIDTH as u16);
     write(INDEX_YRES, HEIGHT as u16);
-    write(INDEX_BPP, 32);
+    write(INDEX_BPP, BITS_PER_PIXEL as u16);
     write(INDEX_VIRT_WIDTH, WIDTH as u16);
+    write(INDEX_VIRT_HEIGHT, HEIGHT as u16);
+    write(INDEX_X_OFFSET, 0);
+    write(INDEX_Y_OFFSET, 0);
     write(INDEX_ENABLE, ENABLED | LFB_ENABLED);
+
+    // Bochs-compatible adapters are allowed to reject an unsupported mode.
+    // Never draw through the larger stride unless the programmed geometry was
+    // accepted exactly; doing so could otherwise walk beyond the active mode.
+    let active = active_mode();
+    let configured = active.is_some_and(|mode| {
+        mode.width == WIDTH as u16
+            && mode.height == HEIGHT as u16
+            && mode.bits_per_pixel == BITS_PER_PIXEL as u16
+            && mode.virtual_width == WIDTH as u16
+            && mode.virtual_height >= HEIGHT as u16
+            && mode.scanout_bytes() <= LFB_APERTURE_BYTES
+    });
+    if !configured {
+        if let Some(mode) = active {
+            crate::slog!(
+                "HEXA_DISPLAY_MODE_REJECTED requested={}x{}x{} actual={}x{}x{} virtual={}x{}\r\n",
+                WIDTH,
+                HEIGHT,
+                BITS_PER_PIXEL,
+                mode.width,
+                mode.height,
+                mode.bits_per_pixel,
+                mode.virtual_width,
+                mode.virtual_height
+            );
+        } else {
+            crate::slog!(
+                "HEXA_DISPLAY_MODE_REJECTED requested={}x{}x{} actual=disabled\r\n",
+                WIDTH,
+                HEIGHT,
+                BITS_PER_PIXEL
+            );
+        }
+        write(INDEX_ENABLE, DISABLED);
+        restore_vga_text_mode();
+        return false;
+    }
+
+    let mode = active.expect("configured mode must be readable");
+    crate::slog!(
+        "HEXA_DISPLAY_MODE width={} height={} bpp={} stride={} bytes={}\r\n",
+        mode.width,
+        mode.height,
+        mode.bits_per_pixel,
+        mode.stride_bytes(),
+        mode.scanout_bytes()
+    );
     clear(color::BACKGROUND);
     true
 }
@@ -261,6 +357,16 @@ fn read(index: u16) -> u16 {
     unsafe {
         port::outw(VBE_INDEX, index);
         port::inw(VBE_DATA)
+    }
+}
+
+fn read_mode() -> Mode {
+    Mode {
+        width: read(INDEX_XRES),
+        height: read(INDEX_YRES),
+        bits_per_pixel: read(INDEX_BPP),
+        virtual_width: read(INDEX_VIRT_WIDTH),
+        virtual_height: read(INDEX_VIRT_HEIGHT),
     }
 }
 

@@ -5,7 +5,7 @@ use crate::{
         KEY_SUPER_CLOSE, KEY_SUPER_CYCLE, KEY_SUPER_DOWN, KEY_SUPER_FULLSCREEN, KEY_SUPER_LAUNCHER,
         KEY_SUPER_LEFT, KEY_SUPER_RIGHT, KEY_SUPER_TERMINAL, KEY_SUPER_UP, KEY_UP,
     },
-    network, slog,
+    network, radio, slog,
 };
 use framebuffer::color;
 use hexa_core::{
@@ -24,30 +24,49 @@ pub const GAMES_FIN: Fin = Fin::from_u128(0x4741_4D45_5300_0000_0000_0000_0000_0
 pub const NOTES_FIN: Fin = Fin::from_u128(0x4E4F_5445_5300_0000_0000_0000_0000_0001);
 
 const APP_COUNT: usize = 8;
-const APP_WIDTH: u16 = 860;
-const APP_HEIGHT: u16 = 610;
-const BUFFER_WIDTH: u16 = 1024;
-const BUFFER_HEIGHT: u16 = 712;
+const APP_WIDTH: u16 = if framebuffer::WIDTH >= 1600 {
+    1280
+} else {
+    860
+};
+const APP_HEIGHT: u16 = if framebuffer::HEIGHT >= 1000 {
+    800
+} else {
+    610
+};
+const BUFFER_WIDTH: u16 = framebuffer::WIDTH as u16;
+const BUFFER_HEIGHT: u16 = framebuffer::HEIGHT as u16;
 const TERMINAL_HISTORY: usize = 12;
 const TERMINAL_CAPACITY: usize = 48;
 const NOTES_CAPACITY: usize = 2048;
 const CURSOR_WIDTH: usize = 14;
 const CURSOR_HEIGHT: usize = 20;
-const TASKBAR_Y: i16 = 730;
-const TASKBAR_HEIGHT: i16 = 38;
+const TASKBAR_HEIGHT: i16 = 48;
+const TASKBAR_Y: i16 = framebuffer::HEIGHT as i16 - TASKBAR_HEIGHT;
 const START_X: i16 = 8;
 const TASK_ICON_X: i16 = 48;
 const TASK_ICON_STEP: i16 = 36;
 const LAUNCHER_X: i16 = 8;
-const LAUNCHER_Y: i16 = 404;
+const LAUNCHER_Y: i16 = TASKBAR_Y - LAUNCHER_HEIGHT as i16 - 8;
 const LAUNCHER_WIDTH: u16 = 250;
 const LAUNCHER_HEIGHT: u16 = 318;
+const SETTINGS_SIDEBAR_WIDTH: i16 = 206;
+const SETTINGS_CATEGORY_TOP: i16 = 92;
+const SETTINGS_CATEGORY_STEP: i16 = 42;
+const SETTINGS_ROW_TOP: i16 = 112;
+const SETTINGS_ROW_HEIGHT: i16 = 54;
+const SETTINGS_ROW_STEP: i16 = 62;
+const DISPLAY_MODE_LABEL: &str = if framebuffer::WIDTH == 1920 && framebuffer::HEIGHT == 1080 {
+    "1920 x 1080"
+} else {
+    "Current framebuffer"
+};
 const STABLE_FIN: Fin = Fin::from_u128(0x4449_4D00_0000_0000_0000_0000_0000_0001);
 
 const HOME: &str = "<title>Home</title><h1>ExpOS</h1><a href='hexa://about'>About</a><a href='hexa://packages'>Packages</a><a href='hexa://system'>System</a>";
 const ABOUT: &str = "<title>About</title><h1>Browser</h1><p>A small native document browser.</p><a href='hexa://home'>Home</a>";
 const BROWSER_PACKAGES: &str = "<title>Packages</title><h1>Packages</h1><li>Core tools</li><li>Display</li><li>Notes</li><li>Games</li><a href='hexa://home'>Home</a>";
-const BROWSER_SYSTEM: &str = "<title>System</title><h1>System</h1><li>1024 x 768 display</li><li>Keyboard and mouse</li><li>RTL8139 network</li><a href='hexa://home'>Home</a>";
+const BROWSER_SYSTEM: &str = "<title>System</title><h1>System</h1><li>1920 x 1080 display</li><li>Keyboard and mouse</li><li>RTL8139 network</li><a href='hexa://home'>Home</a>";
 const NETWORK_BLOCKED: &str = "<title>Offline</title><h1>Offline</h1><p>The address could not be loaded.</p><a href='hexa://home'>Home</a>";
 const NETWORK_ERROR: &str = "<title>Load failed</title><h1>Could not load page</h1><p>Check the address and use plain http.</p><a href='hexa://home'>Home</a>";
 
@@ -154,19 +173,248 @@ impl AppKind {
     }
 }
 
+const SETTINGS_CATEGORY_COUNT: usize = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsCategory {
+    System,
+    Appearance,
+    Network,
+    Bluetooth,
+    Display,
+    Input,
+    Privacy,
+    About,
+}
+
+impl SettingsCategory {
+    const ALL: [Self; SETTINGS_CATEGORY_COUNT] = [
+        Self::System,
+        Self::Appearance,
+        Self::Network,
+        Self::Bluetooth,
+        Self::Display,
+        Self::Input,
+        Self::Privacy,
+        Self::About,
+    ];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::System => 0,
+            Self::Appearance => 1,
+            Self::Network => 2,
+            Self::Bluetooth => 3,
+            Self::Display => 4,
+            Self::Input => 5,
+            Self::Privacy => 6,
+            Self::About => 7,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::System => "System",
+            Self::Appearance => "Appearance",
+            Self::Network => "Network & Wi-Fi",
+            Self::Bluetooth => "Bluetooth",
+            Self::Display => "Display",
+            Self::Input => "Mouse & keyboard",
+            Self::Privacy => "Privacy",
+            Self::About => "About",
+        }
+    }
+
+    const fn description(self) -> &'static str {
+        match self {
+            Self::System => "Desktop behavior",
+            Self::Appearance => "Colors and window style",
+            Self::Network => "Connections and network access",
+            Self::Bluetooth => "Nearby wireless devices",
+            Self::Display => "HexaDisplay output",
+            Self::Input => "Pointer and keyboard",
+            Self::Privacy => "Local data and access",
+            Self::About => "ExpOS system information",
+        }
+    }
+
+    const fn row_count(self) -> usize {
+        match self {
+            Self::System => 2,
+            Self::Appearance => 4,
+            Self::Network => 4,
+            Self::Bluetooth => 2,
+            Self::Display => 4,
+            Self::Input => 3,
+            Self::Privacy => 2,
+            Self::About => 4,
+        }
+    }
+
+    fn shifted(self, direction: i8) -> Self {
+        let index = if direction < 0 {
+            (self.index() + SETTINGS_CATEGORY_COUNT - 1) % SETTINGS_CATEGORY_COUNT
+        } else {
+            (self.index() + 1) % SETTINGS_CATEGORY_COUNT
+        };
+        Self::ALL[index]
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AccentChoice {
+    Green,
+    Cyan,
+    Purple,
+    Amber,
+}
+
+impl AccentChoice {
+    const fn color(self) -> u32 {
+        match self {
+            Self::Green => color::GREEN,
+            Self::Cyan => color::CYAN,
+            Self::Purple => color::PURPLE,
+            Self::Amber => 0x00B6_8B50,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Green => "Forest",
+            Self::Cyan => "Ocean",
+            Self::Purple => "Violet",
+            Self::Amber => "Amber",
+        }
+    }
+
+    fn shifted(self, direction: i8) -> Self {
+        match (self, direction < 0) {
+            (Self::Green, false) | (Self::Purple, true) => Self::Cyan,
+            (Self::Cyan, false) | (Self::Amber, true) => Self::Purple,
+            (Self::Purple, false) | (Self::Green, true) => Self::Amber,
+            (Self::Amber, false) | (Self::Cyan, true) => Self::Green,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BackdropChoice {
+    Graphite,
+    Midnight,
+    Black,
+}
+
+impl BackdropChoice {
+    const fn color(self) -> u32 {
+        match self {
+            Self::Graphite => color::BACKGROUND,
+            Self::Midnight => 0x0009_1019,
+            Self::Black => 0x0000_0000,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Graphite => "Graphite",
+            Self::Midnight => "Midnight",
+            Self::Black => "Black",
+        }
+    }
+
+    fn shifted(self, direction: i8) -> Self {
+        match (self, direction < 0) {
+            (Self::Graphite, false) | (Self::Black, true) => Self::Midnight,
+            (Self::Midnight, false) | (Self::Graphite, true) => Self::Black,
+            (Self::Black, false) | (Self::Midnight, true) => Self::Graphite,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DesktopPreferences {
+    accent: AccentChoice,
+    backdrop: BackdropChoice,
+    pure_black_apps: bool,
+    rounded_controls: bool,
+    taskbar_visible: bool,
+    status_visible: bool,
+    window_borders: bool,
+    high_contrast: bool,
+    pointer_speed: u8,
+}
+
+impl DesktopPreferences {
+    const fn new() -> Self {
+        Self {
+            accent: AccentChoice::Green,
+            backdrop: BackdropChoice::Graphite,
+            pure_black_apps: true,
+            rounded_controls: true,
+            taskbar_visible: true,
+            status_visible: true,
+            window_borders: true,
+            high_contrast: false,
+            pointer_speed: 1,
+        }
+    }
+
+    const fn window_color(self) -> u32 {
+        if self.pure_black_apps {
+            0x0000_0000
+        } else {
+            color::WINDOW
+        }
+    }
+
+    const fn border_color(self, focused: bool) -> u32 {
+        if self.high_contrast {
+            if focused {
+                color::WHITE
+            } else {
+                color::MUTED
+            }
+        } else if focused {
+            color::MUTED
+        } else {
+            color::BORDER
+        }
+    }
+
+    const fn pointer_speed_label(self) -> &'static str {
+        match self.pointer_speed {
+            1 => "Normal",
+            2 => "Fast",
+            _ => "Very fast",
+        }
+    }
+}
+
+// Preferences are retained for the current boot. HexaFS-backed account
+// settings are still a queued storage integration, so reboot persistence is
+// deliberately not claimed here.
+static DESKTOP_PREFERENCES: crate::sync::SpinMutex<DesktopPreferences> =
+    crate::sync::SpinMutex::new(DesktopPreferences::new());
+
 struct DesktopState {
     server: DisplayServer,
     broker: CapabilityBroker,
     app_surfaces: [u32; APP_COUNT],
     app_handles: [u32; APP_COUNT],
     browser_network_handle: Option<u32>,
+    settings_radio_handle: Option<u32>,
     app_open: [bool; APP_COUNT],
     app_ever_opened: [bool; APP_COUNT],
     app_minimized: [bool; APP_COUNT],
+    panel_surface: u32,
     launcher_surface: u32,
     active: AppKind,
     launcher_open: bool,
     fullscreen: bool,
+    preferences: DesktopPreferences,
+    settings_category: SettingsCategory,
+    settings_row: usize,
+    settings_notice: &'static str,
     document: Document,
     browser_line: [u8; 96],
     browser_len: usize,
@@ -282,6 +530,7 @@ impl DesktopState {
         allow_network: bool,
     ) -> Self {
         let active = start_app.unwrap_or(AppKind::Terminal);
+        let preferences = *DESKTOP_PREFERENCES.lock();
         let mut server = DisplayServer::new();
         let mut broker = CapabilityBroker::new();
         let compositor_handle = broker
@@ -358,6 +607,17 @@ impl DesktopState {
         } else {
             None
         };
+        let settings_radio_handle = broker
+            .issue_for(
+                SETTINGS_FIN,
+                session.authority(),
+                radio::RADIO_FIN,
+                STABLE_FIN,
+                Operations::CONFIGURE,
+                u64::MAX,
+            )
+            .ok()
+            .map(|handle| handle.id);
 
         let launcher_surface = server
             .create_surface(
@@ -387,6 +647,7 @@ impl DesktopState {
                 TASKBAR_HEIGHT as u16,
             ),
         );
+        let _ = server.set_visible(DISPLAY_FIN, panel, preferences.taskbar_visible);
         let _ = server.attach(
             DISPLAY_FIN,
             launcher_surface,
@@ -403,20 +664,25 @@ impl DesktopState {
         if start_app.is_some() {
             let _ = server.focus(app_surfaces[active.index()]);
         }
-
         Self {
             server,
             broker,
             app_surfaces,
             app_handles,
             browser_network_handle,
+            settings_radio_handle,
             app_open: core::array::from_fn(|index| start_app == Some(AppKind::ALL[index])),
             app_ever_opened: core::array::from_fn(|index| start_app == Some(AppKind::ALL[index])),
             app_minimized: [false; APP_COUNT],
+            panel_surface: panel,
             launcher_surface,
             active,
             launcher_open: false,
             fullscreen: false,
+            preferences,
+            settings_category: SettingsCategory::System,
+            settings_row: 0,
+            settings_notice: "Changes apply immediately for this boot.",
             document: Document::parse("hexa://home", HOME).expect("built-in home document"),
             browser_line: [0; 96],
             browser_len: 0,
@@ -457,6 +723,22 @@ impl DesktopState {
             .is_ok()
     }
 
+    fn network_active(&self) -> bool {
+        radio::snapshot().network_enabled && self.browser_network_handle.is_some()
+    }
+
+    fn save_preferences(&self) {
+        *DESKTOP_PREFERENCES.lock() = self.preferences;
+    }
+
+    fn work_area_bottom(&self) -> i16 {
+        if self.preferences.taskbar_visible {
+            TASKBAR_Y
+        } else {
+            framebuffer::HEIGHT as i16
+        }
+    }
+
     fn route_key(&mut self, key: u8) {
         if !self.launcher_open
             && self.app_is_visible(self.active)
@@ -467,7 +749,10 @@ impl DesktopState {
     }
 
     fn handle_pointer(&mut self, pointer: PointerEvent) -> bool {
-        self.cursor.move_by(pointer.dx, pointer.dy);
+        let speed = self.preferences.pointer_speed as i16;
+        let motion_x = pointer.dx.saturating_mul(speed);
+        let motion_y = pointer.dy.saturating_mul(speed);
+        self.cursor.move_by(motion_x, motion_y);
         self.route_pointer(pointer);
         if pointer.released & 1 != 0 {
             self.dragging = None;
@@ -476,7 +761,7 @@ impl DesktopState {
             && self.dragging.is_some()
             && (pointer.dx != 0 || pointer.dy != 0)
         {
-            self.drag_active(pointer.dx, pointer.dy);
+            self.drag_active(motion_x, motion_y);
             return true;
         }
         if pointer.pressed & 1 != 0 {
@@ -508,7 +793,7 @@ impl DesktopState {
     }
 
     fn pointer_press(&mut self, x: i16, y: i16) -> bool {
-        if y >= TASKBAR_Y {
+        if self.preferences.taskbar_visible && y >= TASKBAR_Y {
             if (START_X..START_X + 32).contains(&x) {
                 self.toggle_launcher();
                 return true;
@@ -595,6 +880,9 @@ impl DesktopState {
         if app == AppKind::Browser && self.browser_click(x, y, rect) {
             return true;
         }
+        if app == AppKind::Settings && self.settings_click(x, y, rect) {
+            return true;
+        }
         true
     }
 
@@ -608,7 +896,7 @@ impl DesktopState {
             return;
         };
         let max_x = (framebuffer::WIDTH as i32 - rect.width as i32).max(0);
-        let max_y = (TASKBAR_Y as i32 - rect.height as i32).max(0);
+        let max_y = (self.work_area_bottom() as i32 - rect.height as i32).max(0);
         let next_x = (rect.x as i32 + dx as i32).clamp(0, max_x) as i16;
         let next_y = (rect.y as i32 + dy as i32).clamp(0, max_y) as i16;
         let _ = self.server.set_position(owner, id, next_x, next_y);
@@ -735,13 +1023,9 @@ impl DesktopState {
         }
         self.fullscreen = !self.fullscreen;
         self.sync_visibility();
+        let bottom = self.work_area_bottom();
         let rect = if self.fullscreen {
-            Rect::new(
-                10,
-                10,
-                framebuffer::WIDTH as u16 - 20,
-                TASKBAR_Y as u16 - 20,
-            )
+            Rect::new(10, 10, framebuffer::WIDTH as u16 - 20, bottom as u16 - 20)
         } else {
             default_rect(self.active)
         };
@@ -797,7 +1081,7 @@ impl DesktopState {
             return;
         };
         let max_x = (framebuffer::WIDTH as i32 - rect.width as i32 - 8).max(8);
-        let max_y = (TASKBAR_Y as i32 - rect.height as i32).max(8);
+        let max_y = (self.work_area_bottom() as i32 - rect.height as i32).max(8);
         let x = (rect.x as i32 + dx as i32).clamp(8, max_x) as i16;
         let y = (rect.y as i32 + dy as i32).clamp(8, max_y) as i16;
         let _ = self.server.set_position(owner, id, x, y);
@@ -849,9 +1133,12 @@ impl DesktopState {
             self.navigate("hexa://error", NETWORK_ERROR);
             return;
         }
-        let Some(handle_id) = self.browser_network_handle else {
+        if !self.network_active() {
             self.navigate("hexa://offline", NETWORK_BLOCKED);
             slog!("HEXA_BROWSER_HTTP_ERROR error=CapabilityDenied\r\n");
+            return;
+        }
+        let Some(handle_id) = self.browser_network_handle else {
             return;
         };
         match network::http_get(&self.broker, handle_id, BROWSER_FIN, STABLE_FIN, address) {
@@ -921,6 +1208,274 @@ impl DesktopState {
             }
         }
         false
+    }
+
+    fn select_settings_category(&mut self, category: SettingsCategory) {
+        self.settings_category = category;
+        self.settings_row = 0;
+    }
+
+    fn shift_settings_category(&mut self, direction: i8) {
+        self.select_settings_category(self.settings_category.shifted(direction));
+    }
+
+    fn settings_click(&mut self, x: i16, y: i16, rect: Rect) -> bool {
+        let local_x = x - rect.x;
+        let local_y = y - rect.y;
+        if (12..SETTINGS_SIDEBAR_WIDTH).contains(&local_x) && local_y >= SETTINGS_CATEGORY_TOP {
+            let index = ((local_y - SETTINGS_CATEGORY_TOP) / SETTINGS_CATEGORY_STEP) as usize;
+            if let Some(category) = SettingsCategory::ALL.get(index).copied() {
+                if local_y
+                    < SETTINGS_CATEGORY_TOP
+                        + index as i16 * SETTINGS_CATEGORY_STEP
+                        + SETTINGS_CATEGORY_STEP
+                        - 4
+                {
+                    self.select_settings_category(category);
+                    return true;
+                }
+            }
+        }
+
+        if local_x >= SETTINGS_SIDEBAR_WIDTH + 24
+            && local_x < rect.width as i16 - 20
+            && local_y >= SETTINGS_ROW_TOP
+        {
+            let row = ((local_y - SETTINGS_ROW_TOP) / SETTINGS_ROW_STEP) as usize;
+            if row < self.settings_category.row_count()
+                && local_y < SETTINGS_ROW_TOP + row as i16 * SETTINGS_ROW_STEP + SETTINGS_ROW_HEIGHT
+            {
+                self.settings_row = row;
+                self.activate_setting(1);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn handle_settings_key(&mut self, key: u8) -> bool {
+        match key {
+            KEY_LEFT | b'[' => self.shift_settings_category(-1),
+            KEY_RIGHT | b']' => self.shift_settings_category(1),
+            KEY_UP => {
+                self.settings_row = self.settings_row.saturating_sub(1);
+            }
+            KEY_DOWN => {
+                self.settings_row = (self.settings_row + 1)
+                    .min(self.settings_category.row_count().saturating_sub(1));
+            }
+            b'1'..=b'8' => {
+                let index = (key - b'1') as usize;
+                self.select_settings_category(SettingsCategory::ALL[index]);
+            }
+            b'\n' | b' ' | b'+' | b'=' => self.activate_setting(1),
+            b'-' => self.activate_setting(-1),
+            _ => return false,
+        }
+        true
+    }
+
+    fn change_network_policy(&mut self) {
+        let Some(handle_id) = self.settings_radio_handle else {
+            self.settings_notice = "Read-only: DIESE did not grant Configure access.";
+            slog!("HEXA_SETTING_DENIED key=network error=CapabilityDenied\r\n");
+            return;
+        };
+        let enabled = !radio::snapshot().network_enabled;
+        match radio::set_network_enabled(&self.broker, handle_id, SETTINGS_FIN, STABLE_FIN, enabled)
+        {
+            Ok(_) => {
+                self.settings_notice = if enabled {
+                    "Network packet access is enabled."
+                } else {
+                    "Network packet access is disabled."
+                };
+                slog!(
+                    "HEXA_SETTING_CHANGED key=network value={}\r\n",
+                    if enabled { "on" } else { "off" }
+                );
+            }
+            Err(error) => {
+                self.settings_notice = error.message();
+                slog!("HEXA_SETTING_DENIED key=network error={:?}\r\n", error);
+            }
+        }
+    }
+
+    fn change_radio_policy(&mut self, kind: radio::RadioKind) {
+        let Some(handle_id) = self.settings_radio_handle else {
+            self.settings_notice = "Read-only: DIESE did not grant Configure access.";
+            slog!("HEXA_SETTING_DENIED key=radio error=CapabilityDenied\r\n");
+            return;
+        };
+        let snapshot = radio::snapshot();
+        let (enabled, key) = match kind {
+            radio::RadioKind::Wifi => (!snapshot.wifi_requested, "wifi"),
+            radio::RadioKind::Bluetooth => (!snapshot.bluetooth_requested, "bluetooth"),
+        };
+        match radio::set_radio_enabled(
+            &self.broker,
+            handle_id,
+            SETTINGS_FIN,
+            STABLE_FIN,
+            kind,
+            enabled,
+        ) {
+            Ok(_) => {
+                self.settings_notice = if enabled {
+                    "Radio power is enabled."
+                } else {
+                    "Radio power is disabled."
+                };
+                slog!(
+                    "HEXA_SETTING_CHANGED key={} value={}\r\n",
+                    key,
+                    if enabled { "on" } else { "off" }
+                );
+            }
+            Err(error) => {
+                self.settings_notice = error.message();
+                slog!("HEXA_SETTING_DENIED key={} error={:?}\r\n", key, error);
+            }
+        }
+    }
+
+    fn activate_setting(&mut self, direction: i8) {
+        match (self.settings_category, self.settings_row) {
+            (SettingsCategory::System, 0) => {
+                self.preferences.taskbar_visible = !self.preferences.taskbar_visible;
+                let visible = self.preferences.taskbar_visible;
+                let _ = self
+                    .server
+                    .set_visible(DISPLAY_FIN, self.panel_surface, visible);
+                let _ = self.server.commit(DISPLAY_FIN, self.panel_surface);
+                if self.fullscreen {
+                    self.set_app_geometry(
+                        self.active,
+                        Rect::new(
+                            10,
+                            10,
+                            framebuffer::WIDTH as u16 - 20,
+                            self.work_area_bottom() as u16 - 20,
+                        ),
+                    );
+                }
+                slog!(
+                    "HEXA_SETTING_CHANGED key=taskbar value={}\r\n",
+                    if visible { "on" } else { "off" }
+                );
+                self.settings_notice = "Taskbar visibility updated.";
+            }
+            (SettingsCategory::System, 1) | (SettingsCategory::Network, 1) => {
+                self.preferences.status_visible = !self.preferences.status_visible;
+                slog!(
+                    "HEXA_SETTING_CHANGED key=status-indicator value={}\r\n",
+                    if self.preferences.status_visible {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                );
+                self.settings_notice = "Status area visibility updated.";
+            }
+            (SettingsCategory::Appearance, 0) => {
+                self.preferences.accent = self.preferences.accent.shifted(direction);
+                slog!(
+                    "HEXA_SETTING_CHANGED key=accent value={}\r\n",
+                    self.preferences.accent.label()
+                );
+                self.settings_notice = "Accent color updated.";
+            }
+            (SettingsCategory::Appearance, 1) => {
+                self.preferences.backdrop = self.preferences.backdrop.shifted(direction);
+                slog!(
+                    "HEXA_SETTING_CHANGED key=background value={}\r\n",
+                    self.preferences.backdrop.label()
+                );
+                self.settings_notice = "Desktop background updated.";
+            }
+            (SettingsCategory::Appearance, 2) => {
+                self.preferences.pure_black_apps = !self.preferences.pure_black_apps;
+                slog!(
+                    "HEXA_SETTING_CHANGED key=pure-black-apps value={}\r\n",
+                    if self.preferences.pure_black_apps {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                );
+                self.settings_notice = "Application background updated.";
+            }
+            (SettingsCategory::Appearance, 3) => {
+                self.preferences.rounded_controls = !self.preferences.rounded_controls;
+                slog!(
+                    "HEXA_SETTING_CHANGED key=rounded-controls value={}\r\n",
+                    if self.preferences.rounded_controls {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                );
+                self.settings_notice = "Control shape updated.";
+            }
+            (SettingsCategory::Network, 0) => self.change_network_policy(),
+            (SettingsCategory::Network, 2) => self.change_radio_policy(radio::RadioKind::Wifi),
+            (SettingsCategory::Bluetooth, 0) => {
+                self.change_radio_policy(radio::RadioKind::Bluetooth)
+            }
+            (SettingsCategory::Display, 2) => {
+                self.preferences.window_borders = !self.preferences.window_borders;
+                slog!(
+                    "HEXA_SETTING_CHANGED key=window-borders value={}\r\n",
+                    if self.preferences.window_borders {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                );
+                self.settings_notice = "Window border rendering updated.";
+            }
+            (SettingsCategory::Display, 3) => {
+                self.preferences.high_contrast = !self.preferences.high_contrast;
+                slog!(
+                    "HEXA_SETTING_CHANGED key=high-contrast value={}\r\n",
+                    if self.preferences.high_contrast {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                );
+                self.settings_notice = "Contrast rendering updated.";
+            }
+            (SettingsCategory::Input, 0) => {
+                self.preferences.pointer_speed = if direction < 0 {
+                    match self.preferences.pointer_speed {
+                        1 => 3,
+                        speed => speed - 1,
+                    }
+                } else {
+                    match self.preferences.pointer_speed {
+                        1 | 2 => self.preferences.pointer_speed + 1,
+                        _ => 1,
+                    }
+                };
+                slog!(
+                    "HEXA_SETTING_CHANGED key=pointer-speed value={}\r\n",
+                    self.preferences.pointer_speed_label()
+                );
+                self.settings_notice = "Pointer speed updated.";
+            }
+            (SettingsCategory::Privacy, 0) => {
+                self.browser_line.fill(0);
+                self.browser_len = 0;
+                self.browser_editing = false;
+                self.navigate("hexa://home", HOME);
+                slog!("HEXA_SETTING_CHANGED key=browser-data value=cleared\r\n");
+                self.settings_notice = "Browser session data cleared.";
+            }
+            _ => {}
+        }
+        self.save_preferences();
     }
 
     fn handle_browser_key(&mut self, key: u8) -> bool {
@@ -1181,6 +1736,13 @@ fn run_session(
             render_active_window(&mut desktop);
             continue;
         }
+        if desktop.active == AppKind::Settings
+            && desktop.app_is_visible(AppKind::Settings)
+            && desktop.handle_settings_key(key)
+        {
+            render(&mut desktop);
+            continue;
+        }
         match key {
             KEY_SUPER_TERMINAL => desktop.switch_to(AppKind::Terminal),
             KEY_SUPER_BROWSER => desktop.switch_to(AppKind::Browser),
@@ -1314,12 +1876,19 @@ fn buffer(id: u32, owner: Fin, width: u16, height: u16) -> BufferHandle {
 
 fn default_rect(app: AppKind) -> Rect {
     let offset = (app.index() % 4) as i16;
-    Rect::new(64 + offset * 22, 76 + offset * 8, APP_WIDTH, APP_HEIGHT)
+    let centered_x = ((framebuffer::WIDTH as i32 - APP_WIDTH as i32) / 2).max(8) as i16;
+    let centered_y = ((TASKBAR_Y as i32 - APP_HEIGHT as i32) / 2).max(8) as i16;
+    Rect::new(
+        centered_x + offset * 18,
+        centered_y + offset * 8,
+        APP_WIDTH,
+        APP_HEIGHT,
+    )
 }
 
 fn render(desktop: &mut DesktopState) {
     desktop.cursor.invalidate();
-    framebuffer::clear(color::BACKGROUND);
+    framebuffer::clear(desktop.preferences.backdrop.color());
 
     for app in AppKind::ALL {
         if app != desktop.active && desktop.app_is_visible(app) {
@@ -1329,7 +1898,9 @@ fn render(desktop: &mut DesktopState) {
     if desktop.app_is_visible(desktop.active) {
         draw_app(desktop, desktop.active, true);
     }
-    draw_dock(desktop);
+    if desktop.preferences.taskbar_visible {
+        draw_dock(desktop);
+    }
     if desktop.launcher_open {
         draw_launcher(desktop);
     }
@@ -1352,7 +1923,7 @@ fn draw_app(desktop: &DesktopState, app: AppKind, focused: bool) {
         .surface(desktop.app_surfaces[app.index()])
         .map(|surface| surface.current.rect)
         .unwrap_or(Rect::new(48, 58, APP_WIDTH, APP_HEIGHT));
-    draw_window(rect, app.label(), focused);
+    draw_window(rect, app.label(), focused, desktop.preferences);
     let responsive_full = matches!(app, AppKind::Browser | AppKind::Terminal)
         && rect.width >= 480
         && rect.height >= 430;
@@ -1362,7 +1933,7 @@ fn draw_app(desktop: &DesktopState, app: AppKind, focused: bool) {
             AppKind::Terminal => draw_terminal(rect, desktop),
             AppKind::Forms => draw_forms(rect),
             AppKind::Packages => draw_packages(rect),
-            AppKind::Settings => draw_settings(rect),
+            AppKind::Settings => draw_settings(rect, desktop),
             AppKind::System => draw_system(rect, desktop),
             AppKind::Games => desktop.games.render(rect),
             AppKind::Notes => draw_notes(rect, desktop),
@@ -1370,21 +1941,17 @@ fn draw_app(desktop: &DesktopState, app: AppKind, focused: bool) {
     }
 }
 
-fn draw_window(rect: Rect, title: &str, focused: bool) {
+fn draw_window(rect: Rect, title: &str, focused: bool, preferences: DesktopPreferences) {
     let x = rect.x as i32;
     let y = rect.y as i32;
     let width = rect.width as i32;
     let height = rect.height as i32;
-    framebuffer::rect(x, y, width, height, color::WINDOW);
-    framebuffer::outline(
-        x,
-        y,
-        width,
-        height,
-        if focused { color::MUTED } else { color::BORDER },
-    );
+    framebuffer::rect(x, y, width, height, preferences.window_color());
+    if preferences.window_borders {
+        framebuffer::outline(x, y, width, height, preferences.border_color(focused));
+    }
     if focused {
-        framebuffer::rect(x + 1, y + 1, width - 2, 2, color::GREEN);
+        framebuffer::rect(x + 1, y + 1, width - 2, 2, preferences.accent.color());
     }
     framebuffer::rect(x + 1, y + 3, width - 2, 29, color::PANEL);
     framebuffer::text(x + 12, y + 13, title, color::INK, 1);
@@ -1417,7 +1984,7 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
         y + 65,
         5,
         5,
-        if desktop.browser_network_handle.is_some() {
+        if desktop.network_active() {
             color::GREEN
         } else {
             color::MUTED
@@ -1656,78 +2223,623 @@ fn package_card(x: i32, y: i32, width: i32, name: &str, status: &str, detail: &s
     );
 }
 
-fn draw_settings(rect: Rect) {
+#[derive(Clone, Copy)]
+enum SettingControl {
+    Toggle { on: bool, available: bool },
+    Choice,
+    Status { ready: bool },
+    Action { available: bool },
+    Plain,
+}
+
+fn draw_settings(rect: Rect, desktop: &DesktopState) {
     let x = rect.x as i32;
     let y = rect.y as i32;
-    let content_width = rect.width as i32 - 56;
-    framebuffer::text(x + 28, y + 58, "Settings", color::INK, 2);
-    setting_row(
-        x + 28,
-        y + 112,
-        content_width,
-        "Renderer",
-        "HexaDisplay v1",
-        true,
+    let width = rect.width as i32;
+    let height = rect.height as i32;
+    let sidebar_width = SETTINGS_SIDEBAR_WIDTH as i32;
+    let accent = desktop.preferences.accent.color();
+    let connectivity = radio::snapshot();
+    let can_configure_radios = desktop.settings_radio_handle.is_some();
+
+    framebuffer::rect(x + 1, y + 32, sidebar_width, height - 33, 0x0008_0A0D);
+    framebuffer::line(
+        x + sidebar_width,
+        y + 32,
+        x + sidebar_width,
+        y + height - 1,
+        desktop.preferences.border_color(false),
     );
-    setting_row(
-        x + 28,
-        y + 157,
-        content_width,
-        "Resolution",
-        "1024 x 768 XRGB",
-        true,
-    );
-    setting_row(x + 28, y + 202, content_width, "Theme", "Dark", true);
-    setting_row(
-        x + 28,
-        y + 247,
-        content_width,
-        "Input",
-        "PS/2 and serial",
-        true,
-    );
-    setting_row(
-        x + 28,
-        y + 292,
-        content_width,
-        "Users",
-        "Account manager",
-        true,
-    );
-    setting_row(x + 28, y + 337, content_width, "Policy", "DIESE", true);
+    framebuffer::text(x + 20, y + 54, "Settings", color::INK, 2);
+
+    for category in SettingsCategory::ALL {
+        let row_y = y
+            + SETTINGS_CATEGORY_TOP as i32
+            + category.index() as i32 * SETTINGS_CATEGORY_STEP as i32;
+        let selected = category == desktop.settings_category;
+        if selected {
+            settings_rect(
+                desktop.preferences,
+                x + 12,
+                row_y,
+                sidebar_width - 24,
+                SETTINGS_CATEGORY_STEP as i32 - 4,
+                5,
+                0x001B_2225,
+            );
+            framebuffer::rect(x + 12, row_y + 6, 3, 26, accent);
+        }
+        framebuffer::text(
+            x + 26,
+            row_y + 14,
+            category.label(),
+            if selected { color::WHITE } else { color::MUTED },
+            1,
+        );
+    }
+
+    let content_x = x + sidebar_width + 28;
+    let content_width = width - sidebar_width - 50;
     framebuffer::text(
-        x + rect.width as i32 - 180,
-        y + 305,
-        "Users",
+        content_x,
+        y + 55,
+        desktop.settings_category.label(),
+        color::INK,
+        2,
+    );
+    framebuffer::text(
+        content_x,
+        y + 82,
+        desktop.settings_category.description(),
         color::MUTED,
         1,
     );
-    draw_number(
-        x + rect.width as i32 - 92,
-        y + 305,
-        crate::session::account_count() as u64,
-        color::CYAN,
-    );
+
+    match desktop.settings_category {
+        SettingsCategory::System => {
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                0,
+                "Taskbar",
+                "Show running apps and the launcher button",
+                if desktop.preferences.taskbar_visible {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.taskbar_visible,
+                    available: true,
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                1,
+                "Status area",
+                "Show connection state on the taskbar",
+                if desktop.preferences.status_visible {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.status_visible,
+                    available: true,
+                },
+            );
+        }
+        SettingsCategory::Appearance => {
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                0,
+                "Accent color",
+                "Used for focus, selections, and switches",
+                desktop.preferences.accent.label(),
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                1,
+                "Desktop background",
+                "Choose a clean solid desktop color",
+                desktop.preferences.backdrop.label(),
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                2,
+                "Pure black apps",
+                "Use black instead of charcoal for windows",
+                if desktop.preferences.pure_black_apps {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.pure_black_apps,
+                    available: true,
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                3,
+                "Rounded controls",
+                "Round buttons, selections, and switches",
+                if desktop.preferences.rounded_controls {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.rounded_controls,
+                    available: true,
+                },
+            );
+        }
+        SettingsCategory::Network => {
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                0,
+                "Network access",
+                "Master policy for real packet input and output",
+                if connectivity.network_enabled {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: connectivity.network_enabled,
+                    available: can_configure_radios,
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                1,
+                "Network indicator",
+                "Show connection state in the taskbar",
+                if desktop.preferences.status_visible {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.status_visible,
+                    available: true,
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                2,
+                "Wi-Fi power",
+                connectivity.wifi.status_text(),
+                if connectivity.wifi_connected() {
+                    "Connected"
+                } else if connectivity.wifi_requested {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: connectivity.wifi_requested,
+                    available: can_configure_radios,
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                3,
+                "Wired network",
+                "Native RTL8139 Ethernet driver",
+                connectivity.ethernet.status_text(),
+                SettingControl::Status {
+                    ready: connectivity.ethernet.connected(),
+                },
+            );
+        }
+        SettingsCategory::Bluetooth => {
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                0,
+                "Bluetooth power",
+                connectivity.bluetooth.status_text(),
+                if connectivity.bluetooth_connected() {
+                    "Connected"
+                } else if connectivity.bluetooth_requested {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: connectivity.bluetooth_requested,
+                    available: can_configure_radios,
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                1,
+                "USB controller",
+                "Device enumeration needs the queued USB host stack",
+                if connectivity.usb_controller_detected {
+                    "Detected"
+                } else {
+                    "Not detected"
+                },
+                SettingControl::Status {
+                    ready: connectivity.usb_controller_detected,
+                },
+            );
+            framebuffer::text(content_x, y + 260, "Paired devices", color::INK, 1);
+            framebuffer::text(
+                content_x,
+                y + 288,
+                "Unavailable until a supported Bluetooth data path is active.",
+                color::MUTED,
+                1,
+            );
+        }
+        SettingsCategory::Display => {
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                0,
+                "Resolution",
+                "Current HexaDisplay framebuffer mode",
+                DISPLAY_MODE_LABEL,
+                SettingControl::Plain,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                1,
+                "Renderer",
+                "Direct XRGB8888 software composition",
+                "HexaDisplay",
+                SettingControl::Status { ready: true },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                2,
+                "Window borders",
+                "Draw an outline around application windows",
+                if desktop.preferences.window_borders {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.window_borders,
+                    available: true,
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                3,
+                "High contrast",
+                "Strengthen edges and active window focus",
+                if desktop.preferences.high_contrast {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.high_contrast,
+                    available: true,
+                },
+            );
+        }
+        SettingsCategory::Input => {
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                0,
+                "Pointer speed",
+                "Scale PS/2 mouse movement",
+                desktop.preferences.pointer_speed_label(),
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                1,
+                "Mouse",
+                "PS/2 pointer with buttons and window dragging",
+                "Ready",
+                SettingControl::Status { ready: true },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                2,
+                "Keyboard",
+                "PS/2 and serial input with desktop shortcuts",
+                "Ready",
+                SettingControl::Status { ready: true },
+            );
+        }
+        SettingsCategory::Privacy => {
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                0,
+                "Clear browser data",
+                "Reset the address field and current document",
+                "Clear",
+                SettingControl::Action { available: true },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                1,
+                "Telemetry",
+                "ExpOS does not send usage or settings data",
+                "Off",
+                SettingControl::Toggle {
+                    on: false,
+                    available: false,
+                },
+            );
+        }
+        SettingsCategory::About => {
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                0,
+                "Operating system",
+                "Capability-native experimental system",
+                "ExpOS",
+                SettingControl::Plain,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                1,
+                "Display server",
+                "Form-owned surfaces and explicit input routing",
+                "HexaDisplay",
+                SettingControl::Plain,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                2,
+                "Session user",
+                "Current authenticated account",
+                desktop.session.name(),
+                SettingControl::Plain,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                3,
+                "Local accounts",
+                "Accounts stored by the session manager",
+                "Available",
+                SettingControl::Plain,
+            );
+            framebuffer::text(
+                content_x + content_width - 42,
+                y + SETTINGS_ROW_TOP as i32 + 3 * SETTINGS_ROW_STEP as i32 + 31,
+                "#",
+                color::MUTED,
+                1,
+            );
+            draw_number(
+                content_x + content_width - 28,
+                y + SETTINGS_ROW_TOP as i32 + 3 * SETTINGS_ROW_STEP as i32 + 31,
+                crate::session::account_count() as u64,
+                color::CYAN,
+            );
+        }
+    }
+
+    if height >= 560 {
+        framebuffer::rect(content_x, y + height - 29, 6, 6, accent);
+        framebuffer::text(
+            content_x + 16,
+            y + height - 30,
+            desktop.settings_notice,
+            color::MUTED,
+            1,
+        );
+    }
 }
 
-fn setting_row(x: i32, y: i32, width: i32, label: &str, value: &str, enabled: bool) {
-    framebuffer::rect(x, y, width, 35, 0x0015_1922);
-    framebuffer::text(x + 15, y + 13, label, color::INK, 1);
-    framebuffer::text(x + 235, y + 13, value, color::MUTED, 1);
-    framebuffer::rect(
-        x + width - 48,
-        y + 11,
-        27,
-        13,
-        if enabled { color::GREEN } else { color::RED },
+#[allow(clippy::too_many_arguments)]
+fn settings_row(
+    desktop: &DesktopState,
+    x: i32,
+    window_y: i32,
+    width: i32,
+    index: usize,
+    label: &str,
+    detail: &str,
+    value: &str,
+    control: SettingControl,
+) {
+    let y = window_y + SETTINGS_ROW_TOP as i32 + index as i32 * SETTINGS_ROW_STEP as i32;
+    let selected = desktop.settings_row == index;
+    let accent = desktop.preferences.accent.color();
+    settings_rect(
+        desktop.preferences,
+        x,
+        y,
+        width,
+        SETTINGS_ROW_HEIGHT as i32,
+        6,
+        if selected { 0x0019_2024 } else { 0x000D_1114 },
     );
-    framebuffer::rect(
-        x + width - if enabled { 32 } else { 46 },
-        y + 13,
-        9,
-        9,
-        color::WHITE,
-    );
+    if selected {
+        framebuffer::outline(x, y, width, SETTINGS_ROW_HEIGHT as i32, accent);
+    }
+    framebuffer::text(x + 16, y + 12, label, color::INK, 1);
+    framebuffer::text(x + 16, y + 33, detail, color::MUTED, 1);
+
+    match control {
+        SettingControl::Toggle { on, available } => {
+            let control_x = x + width - 62;
+            settings_rect(
+                desktop.preferences,
+                control_x,
+                y + 17,
+                42,
+                20,
+                10,
+                if !available {
+                    color::BORDER
+                } else if on {
+                    accent
+                } else {
+                    0x0036_3D42
+                },
+            );
+            let knob_x = if on { control_x + 23 } else { control_x + 3 };
+            settings_rect(
+                desktop.preferences,
+                knob_x,
+                y + 20,
+                14,
+                14,
+                7,
+                if available {
+                    color::WHITE
+                } else {
+                    color::MUTED
+                },
+            );
+            framebuffer::text(
+                control_x - 88,
+                y + 23,
+                value,
+                if available { color::INK } else { color::MUTED },
+                1,
+            );
+        }
+        SettingControl::Choice => {
+            let control_width = 154;
+            let control_x = x + width - control_width - 20;
+            settings_rect(
+                desktop.preferences,
+                control_x,
+                y + 12,
+                control_width,
+                30,
+                5,
+                0x0018_1D21,
+            );
+            framebuffer::outline(control_x, y + 12, control_width, 30, color::BORDER);
+            framebuffer::text(control_x + 10, y + 22, "<", color::MUTED, 1);
+            framebuffer::text(control_x + 30, y + 22, value, color::INK, 1);
+            framebuffer::text(control_x + control_width - 18, y + 22, ">", color::MUTED, 1);
+        }
+        SettingControl::Status { ready } => {
+            let value_x = x + width - 20 - value.len() as i32 * framebuffer::text_advance(1);
+            let marker_x = value_x - 16;
+            framebuffer::rect(
+                marker_x,
+                y + 24,
+                7,
+                7,
+                if ready { accent } else { color::MUTED },
+            );
+            framebuffer::text(value_x, y + 23, value, color::MUTED, 1);
+        }
+        SettingControl::Action { available } => {
+            let button_x = x + width - 104;
+            settings_rect(
+                desktop.preferences,
+                button_x,
+                y + 12,
+                84,
+                30,
+                5,
+                if available { accent } else { color::BORDER },
+            );
+            framebuffer::text(button_x + 20, y + 22, value, color::WHITE, 1);
+        }
+        SettingControl::Plain => {
+            let value_x = x + width - 20 - value.len() as i32 * framebuffer::text_advance(1);
+            framebuffer::text(value_x, y + 23, value, color::MUTED, 1);
+        }
+    }
+}
+
+fn settings_rect(
+    preferences: DesktopPreferences,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    radius: i32,
+    value: u32,
+) {
+    if preferences.rounded_controls {
+        framebuffer::rounded_rect(x, y, width, height, radius, value);
+    } else {
+        framebuffer::rect(x, y, width, height, value);
+    }
 }
 
 fn draw_system(rect: Rect, desktop: &DesktopState) {
@@ -1749,7 +2861,7 @@ fn draw_system(rect: Rect, desktop: &DesktopState) {
         y + 98,
         metric_width,
         "Framebuffer",
-        "1024 x 768",
+        DISPLAY_MODE_LABEL,
         color::CYAN,
     );
     metric(
@@ -1804,6 +2916,7 @@ fn metric(x: i32, y: i32, width: i32, label: &str, value: &str, accent: u32) {
 
 fn draw_dock(desktop: &DesktopState) {
     let y = TASKBAR_Y as i32;
+    let accent = desktop.preferences.accent.color();
     framebuffer::alpha_rect(
         0,
         y,
@@ -1818,9 +2931,17 @@ fn draw_dock(desktop: &DesktopState) {
     } else {
         0x0017_1B25
     };
-    framebuffer::rounded_rect(START_X as i32, y + 5, 32, 28, 6, start_color);
-    framebuffer::rounded_rect(16, y + 11, 16, 16, 4, color::GREEN);
-    framebuffer::text(20, y + 15, "E", color::WHITE, 1);
+    settings_rect(
+        desktop.preferences,
+        START_X as i32,
+        y + 7,
+        32,
+        34,
+        7,
+        start_color,
+    );
+    settings_rect(desktop.preferences, 16, y + 15, 16, 16, 4, accent);
+    framebuffer::text(20, y + 19, "E", color::WHITE, 1);
     let mut running_index = 0_i32;
     for app in AppKind::ALL {
         if !desktop.app_open[app.index()] {
@@ -1828,34 +2949,37 @@ fn draw_dock(desktop: &DesktopState) {
         }
         let x = TASK_ICON_X as i32 + running_index * TASK_ICON_STEP as i32;
         if app == desktop.active && desktop.app_is_visible(app) {
-            framebuffer::rounded_rect(x, y + 5, 32, 28, 6, 0x0024_292F);
+            settings_rect(desktop.preferences, x, y + 7, 32, 34, 7, 0x0024_292F);
         }
-        framebuffer::rounded_rect(x + 8, y + 10, 18, 18, 4, app.accent());
-        framebuffer::text(x + 13, y + 15, app.shortcut(), color::WHITE, 1);
+        settings_rect(desktop.preferences, x + 8, y + 15, 18, 18, 4, app.accent());
+        framebuffer::text(x + 13, y + 19, app.shortcut(), color::WHITE, 1);
         framebuffer::rect(
             x + 8,
-            y + 32,
+            y + 40,
             18,
             2,
             if desktop.app_minimized[app.index()] {
                 color::MUTED
             } else {
-                color::PURPLE
+                accent
             },
         );
         running_index += 1;
     }
-    framebuffer::rect(
-        framebuffer::WIDTH as i32 - 18,
-        y + 15,
-        6,
-        6,
-        if desktop.browser_network_handle.is_some() {
-            color::GREEN
-        } else {
-            color::MUTED
-        },
-    );
+    if desktop.preferences.status_visible {
+        let connectivity = radio::snapshot();
+        framebuffer::rect(
+            framebuffer::WIDTH as i32 - 22,
+            y + 21,
+            7,
+            7,
+            if connectivity.network_enabled && connectivity.ethernet.connected() {
+                accent
+            } else {
+                color::MUTED
+            },
+        );
+    }
 }
 
 fn draw_launcher(desktop: &DesktopState) {

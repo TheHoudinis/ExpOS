@@ -6,10 +6,12 @@ ExpOS is the Form-native HexaOS rebuild described by
 - an x86_64 Multiboot2 kernel with VGA, serial, PS/2 keyboard and mouse input;
 - FIN identity, Dimensions, PIMP/DIESE policy, capability-scoped Form Handles,
   typed relationships and transactional HexaFS metadata;
-- HexaDisplay, a 1024x768 software compositor with Form-owned surfaces;
+- HexaDisplay, a 1920x1080 software compositor with Form-owned surfaces;
 - a flat dark desktop with an application menu and taskbar, no default or
   pinned applications, and movable, closable, minimizable and maximizable
   windows;
+- an interactive Settings control center for appearance, display, input,
+  network, Wi-Fi, Bluetooth, privacy and system behavior;
 - readable case-sensitive 8x8 framebuffer text and an expanded 8x16 VGA
   console font;
 - Ayo v3 package installation, verification, ownership, rollback and recovery;
@@ -78,6 +80,12 @@ The graphical Terminal supports bounded command history with Up and Down. In
 Browser, click the address field or press `/`, type a plain `http://` URL, and
 press Enter.
 
+Settings controls are clickable and keyboard-accessible. Appearance, taskbar,
+status-area, border, contrast and pointer-speed changes take effect immediately
+and remain active for the current boot. The Network switch is enforced by the
+native packet path through a requester-bound Configure Handle; it is not a
+painted UI flag.
+
 ## Network and Browser
 
 QEMU provides the current static guest configuration: `10.0.2.15/24`, gateway
@@ -96,10 +104,14 @@ Use `ifconfig`, `ping`, `dns`, `fetch` and `netstat` in the console to inspect
 and exercise the network. Type an `http://` URL in Browser to fetch it through
 the same native stack.
 
+Settings reports Ethernet carrier state and separately reports Wi-Fi and
+Bluetooth hardware presence, driver state and requested power state. ExpOS
+does not claim a connection when an adapter or driver is unavailable.
+
 This is not a modern standards-complete browser. HTTPS/TLS, DHCP, IPv6,
-physical Wi-Fi drivers, concurrent sockets, TCP servers, CSS, JavaScript,
-cookies, downloads and media decoding are not implemented. HTTP response and
-document sizes are fixed and bounded.
+physical Wi-Fi drivers, a USB host/Bluetooth data path, concurrent sockets, TCP
+servers, CSS, JavaScript, cookies, downloads and media decoding are not
+implemented. HTTP response and document sizes are fixed and bounded.
 
 ## Ayo v3
 

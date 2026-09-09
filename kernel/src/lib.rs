@@ -3,8 +3,8 @@
 //! Booted by GRUB via Multiboot2. `boot/boot.asm` enters long mode and
 //! calls `kernel_main(magic, mbi_phys)`.
 
-#![no_std]
-#![no_main]
+#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(test), no_main)]
 
 mod compat;
 mod desktop;
@@ -14,6 +14,7 @@ mod hardware;
 mod input;
 mod network;
 mod port;
+mod radio;
 mod serial;
 mod session;
 mod shell;
@@ -22,6 +23,7 @@ mod vga;
 mod volatile;
 
 use core::fmt;
+#[cfg(not(test))]
 use core::panic::PanicInfo;
 
 const MULTIBOOT2_BOOTLOADER_MAGIC: u32 = 0x36D76289;
@@ -78,6 +80,7 @@ pub fn _slog(args: fmt::Arguments<'_>) {
 // Panic handling
 // ---------------------------------------------------------------------------
 
+#[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     // Serial first: it works even if VGA is broken or locked.
@@ -148,7 +151,8 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
         }
         Err(error) => panic!("Form-native bootstrap failed: {:?}", error),
     };
-    let _ = network::initialize();
+    let ethernet_ready = network::initialize();
+    radio::initialize(ethernet_ready, network::link_up());
     println!();
     println!("Core architecture online. Starting session manager.");
     let mut input = input::Input::new();

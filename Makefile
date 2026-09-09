@@ -3,7 +3,7 @@ BUILD      := build
 ISO        := $(BUILD)/hexaos.iso
 KERNEL_ELF := $(BUILD)/kernel.elf
 RUST_LIB   := target/$(TARGET)/release/libhexa_kernel.a
-QEMU       := qemu-system-x86_64 -m 256M -netdev user,id=net0 -device rtl8139,netdev=net0
+QEMU       := qemu-system-x86_64 -machine pc -m 256M -vga std -global VGA.vgamem_mb=16 -netdev user,id=net0 -device rtl8139,netdev=net0
 
 .PHONY: all iso test check display-check session-check network-check internet-check run debug clean legacy-alpha-check run-alpha ayo go-sdk kernel-build
 
@@ -65,11 +65,18 @@ check: $(ISO)
 display-check: $(ISO)
 	rm -f $(BUILD)/display-serial.log
 	timeout 20 $(QEMU) -device isa-debug-exit,iobase=0xf4,iosize=0x04 -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-display-input.txt > $(BUILD)/display-serial.log 2>&1 || true
-	grep -q "framebuffer: 1024x768 XRGB8888 scanout available=true" $(BUILD)/display-serial.log
+	grep -q "framebuffer: 1920x1080 XRGB8888 scanout available=true" $(BUILD)/display-serial.log
 	grep -q "HEXA_BOOT_MODE graphical" $(BUILD)/display-serial.log
+	grep -q "HEXA_DISPLAY_MODE width=1920 height=1080 bpp=32 stride=7680 bytes=8294400" $(BUILD)/display-serial.log
 	grep -q "HEXA_DISPLAY_READY surfaces=11 commit=11" $(BUILD)/display-serial.log
 	grep -q "HEXA_DESKTOP_EMPTY open_apps=0 pinned_apps=0" $(BUILD)/display-serial.log
 	grep -q "HEXA_MOUSE_READY enabled=true" $(BUILD)/display-serial.log
+	grep -q "HEXA_APP_OPENED SETTINGS" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=accent value=Ocean" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=taskbar value=off" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=network value=off" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=network value=on" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_DENIED key=bluetooth error=BusUnsupported" $(BUILD)/display-serial.log
 	grep -q "HEXA_APP_OPENED TERMINAL" $(BUILD)/display-serial.log
 	grep -q "HEXA_APP_CLOSED TERMINAL" $(BUILD)/display-serial.log
 	grep -q "HEXA_APP_REOPENED TERMINAL" $(BUILD)/display-serial.log
