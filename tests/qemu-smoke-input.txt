@@ -38,7 +38,7 @@ mkform Scratch data
 retire Scratch
 reclaim Scratch
 mkform Notes data
-write Notes HexaOS Forms can carry structured state
+write Notes ExpOS Forms can carry structured state
 append Notes  and revisions
 cat Notes
 hexdump Notes

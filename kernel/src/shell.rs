@@ -26,7 +26,7 @@ pub fn run(report: BootReport, mut input: Input, session: Session) -> ! {
     let mut history_cursor = None;
 
     println!();
-    println!("Hexa command environment ready. Type 'help'.");
+    println!("ExpOS shell. Type 'help'.");
     slog!("HEXA_SHELL_READY\r\n");
     prompt(shell.session);
 
@@ -238,7 +238,7 @@ impl Shell {
         );
         seed_content(
             &mut content[5],
-            b"Network Driver Form: RTL8139 bus-master packet I/O, Ethernet, ARP, static IPv4, ICMP echo",
+            b"Network Driver Form: RTL8139, Ethernet, ARP, IPv4, ICMP, UDP, DNS, TCP and HTTP",
         );
         Self {
             report,
@@ -287,10 +287,7 @@ impl Shell {
                 true
             }
             "about" | "version" => {
-                println!(
-                    "HexaOS v{} interactive architecture alpha",
-                    env!("CARGO_PKG_VERSION")
-                );
+                println!("ExpOS v{}", env!("CARGO_PKG_VERSION"));
                 println!(
                     "Form-native x86_64 kernel; authority={}; Dimension=Stable",
                     self.session.authority_name()
@@ -381,6 +378,14 @@ impl Shell {
                 self.ping(args);
                 true
             }
+            "dns" => {
+                self.dns(args);
+                true
+            }
+            "fetch" => {
+                self.fetch(args);
+                true
+            }
             "dmesg" | "bootlog" => {
                 println!("[ok] x86_64 long mode, VGA, COM1");
                 println!("[ok] Root Form + Stable Dimension");
@@ -408,15 +413,25 @@ impl Shell {
                 true
             }
             "desktop" => {
-                crate::desktop::run(input, false, self.session);
+                crate::desktop::run_with_network(
+                    input,
+                    false,
+                    self.session,
+                    self.desktop_network_allowed(),
+                );
                 true
             }
             "browser" => {
-                crate::desktop::run(input, true, self.session);
+                crate::desktop::run_with_network(
+                    input,
+                    true,
+                    self.session,
+                    self.desktop_network_allowed(),
+                );
                 true
             }
             "goabi" => {
-                println!("HexaOS Go ABI v{} FIN={}", GO_ABI_VERSION, GO_ABI_FIN);
+                println!("ExpOS Go ABI v{} FIN={}", GO_ABI_VERSION, GO_ABI_FIN);
                 println!(
                     "calls: resolve authorize surface attach damage commit event navigate package"
                 );
@@ -507,7 +522,12 @@ impl Shell {
                 let login = crate::session::login(input, requested_mode);
                 self.session = login.session;
                 if login.mode == crate::session::BootMode::Graphical {
-                    crate::desktop::run(input, false, self.session);
+                    crate::desktop::run_with_network(
+                        input,
+                        false,
+                        self.session,
+                        self.desktop_network_allowed(),
+                    );
                 }
                 true
             }
@@ -645,12 +665,12 @@ impl Shell {
                 true
             }
             "reboot" => {
-                println!("Rebooting HexaOS...");
+                println!("Rebooting ExpOS...");
                 slog!("HEXA_COMMAND_OK reboot\r\n");
                 port::reboot();
             }
             "shutdown" | "halt" => {
-                println!("Shutting down HexaOS...");
+                println!("Shutting down ExpOS...");
                 slog!("HEXA_COMMAND_OK shutdown\r\n");
                 port::shutdown();
             }
@@ -665,7 +685,7 @@ impl Shell {
     }
 
     fn help(&self) {
-        println!("HexaOS commands:");
+        println!("ExpOS commands:");
         println!("  help clear echo about status whoami users login logout");
         println!("  useradd <name> <operator|power|guest> <password>");
         println!("  userdel <name>  passwd <name> <new-password>");
@@ -684,9 +704,9 @@ impl Shell {
         println!(
             "  date clock cpuinfo features kernelcaps lspci neofetch sysinfo mem free env uptime ps"
         );
-        println!("  kstat dmesg bootlog ifconfig netstat ping <IPv4-address> [count] mode");
-        println!("  calc len hex reverse tolower toupper factor rand dice ascii");
-        println!("  palette morse fortune 8ball cowsay banner logo matrix sleep");
+        println!("  kstat dmesg bootlog ifconfig netstat ping <IPv4-address> [count]");
+        println!("  dns <host>  fetch <http://host[:port]/path>  mode");
+        println!("  calc len hex reverse tolower toupper factor rand sleep true false");
     }
 
     fn status(&self) {
@@ -714,18 +734,37 @@ impl Shell {
     }
 
     fn ping(&self, arguments: &str) {
+        let Some(handle_id) = self.network_handle("ping") else {
+            return;
+        };
+        crate::network::ping_text(
+            &self.broker,
+            handle_id,
+            self.report.root_fin,
+            self.report.stable_fin,
+            arguments,
+        );
+    }
+
+    fn network_handle(&self, command: &str) -> Option<u32> {
         if !self
             .find_form("Network")
             .is_some_and(|form| form.lifecycle == Lifecycle::Active)
         {
-            println!("ping: DIESE denied I/O because the Network Driver Form is not active");
-            slog!("HEXA_PING_DENIED lifecycle\r\n");
-            return;
+            println!(
+                "{}: DIESE denied I/O because the Network Driver Form is not active",
+                command
+            );
+            slog!("HEXA_NET_DENIED command={} lifecycle\r\n", command);
+            return None;
         }
         if self.network_policy == NetworkPolicy::Disabled {
-            println!("ping: DIESE denied I/O because PIMP network=disabled");
-            slog!("HEXA_PING_DENIED policy=disabled\r\n");
-            return;
+            println!(
+                "{}: DIESE denied I/O because PIMP network=disabled",
+                command
+            );
+            slog!("HEXA_NET_DENIED command={} policy=disabled\r\n", command);
+            return None;
         }
         let Some(handle) = self.handles.iter().flatten().find(|handle| {
             !handle.revoked
@@ -734,17 +773,118 @@ impl Shell {
                 && handle.dimension == self.report.stable_fin
                 && handle.operations.contains(Operations::NETWORK)
         }) else {
-            println!("ping: DIESE denied I/O because no active Network Handle is bound");
-            slog!("HEXA_PING_DENIED handle=missing\r\n");
+            println!(
+                "{}: DIESE denied I/O because no active Network Handle is bound",
+                command
+            );
+            slog!("HEXA_NET_DENIED command={} handle=missing\r\n", command);
+            return None;
+        };
+        Some(handle.id)
+    }
+
+    fn desktop_network_allowed(&self) -> bool {
+        self.network_policy != NetworkPolicy::Disabled
+            && self
+                .find_form("Network")
+                .is_some_and(|form| form.lifecycle == Lifecycle::Active)
+    }
+
+    fn dns(&self, arguments: &str) {
+        let mut words = arguments.split_ascii_whitespace();
+        let Some(hostname) = words.next() else {
+            println!("usage: dns <host>");
             return;
         };
-        crate::network::ping_text(
+        if words.next().is_some() {
+            println!("usage: dns <host>");
+            return;
+        }
+        let Some(handle_id) = self.network_handle("dns") else {
+            return;
+        };
+        match crate::network::dns_lookup(
             &self.broker,
-            handle.id,
+            handle_id,
             self.report.root_fin,
             self.report.stable_fin,
-            arguments,
-        );
+            hostname,
+        ) {
+            Ok(address) => {
+                println!(
+                    "{} has address {}.{}.{}.{}",
+                    hostname, address[0], address[1], address[2], address[3]
+                );
+                slog!(
+                    "HEXA_DNS_OK host={} address={}.{}.{}.{}\r\n",
+                    hostname,
+                    address[0],
+                    address[1],
+                    address[2],
+                    address[3]
+                );
+            }
+            Err(error) => {
+                println!("dns: {}", error.message());
+                slog!("HEXA_DNS_ERROR host={} error={:?}\r\n", hostname, error);
+            }
+        }
+    }
+
+    fn fetch(&self, arguments: &str) {
+        let mut words = arguments.split_ascii_whitespace();
+        let Some(url) = words.next() else {
+            println!("usage: fetch <http://host[:port]/path>");
+            return;
+        };
+        if words.next().is_some() {
+            println!("usage: fetch <http://host[:port]/path>");
+            return;
+        }
+        let Some(handle_id) = self.network_handle("fetch") else {
+            return;
+        };
+        match crate::network::http_get(
+            &self.broker,
+            handle_id,
+            self.report.root_fin,
+            self.report.stable_fin,
+            url,
+        ) {
+            Ok(response) => {
+                println!(
+                    "HTTP {} from {}.{}.{}.{} ({} bytes{})",
+                    response.status,
+                    response.peer[0],
+                    response.peer[1],
+                    response.peer[2],
+                    response.peer[3],
+                    response.body_len,
+                    if response.truncated {
+                        ", truncated"
+                    } else {
+                        ""
+                    }
+                );
+                match core::str::from_utf8(response.body()) {
+                    Ok(body) => println!("{}", body),
+                    Err(_) => println!("[response body is not UTF-8]"),
+                }
+                slog!(
+                    "HEXA_HTTP_OK status={} bytes={} peer={}.{}.{}.{}\r\n",
+                    response.status,
+                    response.body_len,
+                    response.peer[0],
+                    response.peer[1],
+                    response.peer[2],
+                    response.peer[3]
+                );
+            }
+            Err(error) => {
+                println!("fetch: {}", error.message());
+                slog!("HEXA_HTTP_ERROR url={} error={:?}\r\n", url, error);
+            }
+        }
     }
 
     fn list_dimensions(&self) {
@@ -1601,6 +1741,8 @@ fn is_shell_command(name: &str) -> bool {
             | "ifconfig"
             | "netstat"
             | "ping"
+            | "dns"
+            | "fetch"
             | "dmesg"
             | "bootlog"
             | "mode"
@@ -1669,6 +1811,8 @@ fn is_mutating_command(name: &str) -> bool {
             | "relate"
             | "unrelate"
             | "ping"
+            | "dns"
+            | "fetch"
             | "reboot"
             | "shutdown"
             | "halt"

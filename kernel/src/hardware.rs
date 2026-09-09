@@ -101,8 +101,8 @@ pub fn print_kernel_features() {
     println!(
         "desktop: empty-start taskbar shell, window controls, pointer hit-testing, routed input"
     );
-    println!("network: Ethernet, ARP, static IPv4 and ICMP echo (polling)");
-    println!("pending: interrupt scheduler, native storage/audio, TCP/DNS/TLS, Wi-Fi drivers");
+    println!("network: Ethernet, ARP, IPv4, ICMP, UDP, DNS, TCP and HTTP (polling)");
+    println!("pending: interrupts, native storage/audio, DHCP, IPv6, TLS and Wi-Fi drivers");
 }
 
 pub fn print_pci() {

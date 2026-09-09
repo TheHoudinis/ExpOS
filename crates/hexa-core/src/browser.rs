@@ -73,7 +73,10 @@ pub struct Document {
 
 impl Document {
     pub fn parse(url: &str, source: &str) -> Result<Self, BrowserError> {
-        if !url.starts_with("hexa://") && !url.starts_with("data:text/html,") {
+        if !url.starts_with("hexa://")
+            && !url.starts_with("data:text/html,")
+            && !url.starts_with("http://")
+        {
             return Err(BrowserError::InvalidUrl);
         }
         if !source.is_ascii() {
@@ -196,7 +199,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_network_urls_until_a_driver_form_is_bound() {
+    fn accepts_http_documents_but_not_unimplemented_https() {
+        let document = Document::parse(
+            "http://example.com/",
+            "<title>Example</title><h1>Example Domain</h1><p>Network document.</p>",
+        )
+        .unwrap();
+        assert_eq!(document.url(), "http://example.com/");
         assert_eq!(
             Document::parse("https://example.com", "<p>Nope</p>").err(),
             Some(BrowserError::InvalidUrl)

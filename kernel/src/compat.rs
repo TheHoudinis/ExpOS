@@ -1,4 +1,4 @@
-use crate::{hardware, print, println, vga};
+use crate::{hardware, print, println};
 
 pub fn execute(command: &str, args: &str) -> bool {
     match command {
@@ -24,18 +24,9 @@ pub fn execute(command: &str, args: &str) -> bool {
         "toupper" => map_ascii(args, true),
         "factor" => factor(args),
         "rand" => println!("{}", hardware::random_u32()),
-        "dice" => dice(args),
-        "ascii" => ascii(),
-        "palette" => palette(),
-        "morse" => morse(args),
-        "fortune" => fortune(),
-        "8ball" => eight_ball(),
-        "cowsay" => cowsay(args),
-        "banner" => banner(args),
-        "logo" => logo(),
-        "sysname" | "uname" => println!("HexaOS {} x86_64 Form-native", env!("CARGO_PKG_VERSION")),
+        "sysname" | "uname" => println!("ExpOS {} x86_64 Form-native", env!("CARGO_PKG_VERSION")),
         "env" => {
-            println!("SYSTEM=HexaOS/8");
+            println!("SYSTEM=ExpOS/8");
             println!("ARCH=x86_64");
             println!("AUTHORITY=Operator");
             println!("DIMENSION=Stable");
@@ -44,13 +35,6 @@ pub fn execute(command: &str, args: &str) -> bool {
         "true" => {}
         "false" => println!("false"),
         "sleep" => sleep(args),
-        "beep" => print!("\x07"),
-        "matrix" | "cmatrix" => matrix_sample(),
-        "russian" => println!("Not today. The chamber is empty."),
-        "insult" => println!("Your segmentation fault has better boundaries than that idea."),
-        "excuse" => println!("Cosmic rays flipped the wrong FIN."),
-        "compliment" => println!("Your Forms are exceptionally well identified."),
-        "hack" => println!("Accessing mainframe... just kidding. Capability denied."),
         _ => return false,
     }
     true
@@ -78,29 +62,12 @@ pub fn is_command(name: &str) -> bool {
             | "toupper"
             | "factor"
             | "rand"
-            | "dice"
-            | "ascii"
-            | "palette"
-            | "morse"
-            | "fortune"
-            | "8ball"
-            | "cowsay"
-            | "banner"
-            | "logo"
             | "sysname"
             | "uname"
             | "env"
             | "true"
             | "false"
             | "sleep"
-            | "beep"
-            | "matrix"
-            | "cmatrix"
-            | "russian"
-            | "insult"
-            | "excuse"
-            | "compliment"
-            | "hack"
     )
 }
 
@@ -163,142 +130,7 @@ fn factor(args: &str) {
     println!();
 }
 
-fn dice(args: &str) {
-    let sides = args
-        .trim()
-        .parse::<u32>()
-        .ok()
-        .filter(|sides| (2..=1_000_000).contains(sides))
-        .unwrap_or(6);
-    println!("d{} => {}", sides, hardware::random_u32() % sides + 1);
-}
-
-fn ascii() {
-    for byte in 32_u8..=126 {
-        print!("{} ", byte as char);
-        if (byte - 31) % 16 == 0 {
-            println!();
-        }
-    }
-    println!();
-}
-
-fn palette() {
-    for index in 0_u8..16 {
-        vga::WRITER
-            .lock()
-            .set_color(color(index), vga::Color::Black);
-        print!("{:02} ", index);
-        if index == 7 {
-            println!();
-        }
-    }
-    vga::WRITER
-        .lock()
-        .set_color(vga::Color::LightGray, vga::Color::Black);
-    println!();
-}
-
-fn morse(args: &str) {
-    for byte in args.bytes() {
-        let code = match byte.to_ascii_uppercase() {
-            b'A' => ".-",
-            b'B' => "-...",
-            b'C' => "-.-.",
-            b'D' => "-..",
-            b'E' => ".",
-            b'F' => "..-.",
-            b'G' => "--.",
-            b'H' => "....",
-            b'I' => "..",
-            b'J' => ".---",
-            b'K' => "-.-",
-            b'L' => ".-..",
-            b'M' => "--",
-            b'N' => "-.",
-            b'O' => "---",
-            b'P' => ".--.",
-            b'Q' => "--.-",
-            b'R' => ".-.",
-            b'S' => "...",
-            b'T' => "-",
-            b'U' => "..-",
-            b'V' => "...-",
-            b'W' => ".--",
-            b'X' => "-..-",
-            b'Y' => "-.--",
-            b'Z' => "--..",
-            b'0' => "-----",
-            b'1' => ".----",
-            b'2' => "..---",
-            b'3' => "...--",
-            b'4' => "....-",
-            b'5' => ".....",
-            b'6' => "-....",
-            b'7' => "--...",
-            b'8' => "---..",
-            b'9' => "----.",
-            b' ' => "/",
-            _ => "?",
-        };
-        print!("{} ", code);
-    }
-    println!();
-}
-
-fn fortune() {
-    const MESSAGES: [&str; 4] = [
-        "A stable FIN outlives a fashionable name.",
-        "The Dimension you test in is not always the one you ship.",
-        "Narrow Handles make peaceful systems.",
-        "DIESE sees a conflict in your future—and explains it.",
-    ];
-    println!(
-        "{}",
-        MESSAGES[hardware::random_u32() as usize % MESSAGES.len()]
-    );
-}
-
-fn eight_ball() {
-    const ANSWERS: [&str; 6] = [
-        "Yes.",
-        "No.",
-        "Probably.",
-        "Ask DIESE.",
-        "PIMP says unsupported.",
-        "The FINs align.",
-    ];
-    println!(
-        "{}",
-        ANSWERS[hardware::random_u32() as usize % ANSWERS.len()]
-    );
-}
-
-fn cowsay(args: &str) {
-    let message = if args.is_empty() { "moo" } else { args };
-    println!("< {} >", message);
-    println!("  \\   ^__^");
-    println!("   \\  (oo)\\_______");
-    println!("      (__)\\       )\\/\\");
-    println!("          ||----w |");
-    println!("          ||     ||");
-}
-
-fn banner(args: &str) {
-    println!("========================================");
-    println!(" {}", if args.is_empty() { "HEXA OS" } else { args });
-    println!("========================================");
-}
-
-fn logo() {
-    println!("  /\\  /\\  HEXA OS");
-    println!(" /  \\/  \\ Form-native v8");
-    println!(" \\  /\\  / FIN + Dimension + PIMP/DIESE");
-    println!("  \\/  \\/");
-}
-
 fn neofetch() {
-    logo();
     println!("OS: ExpOS v{}", env!("CARGO_PKG_VERSION"));
     println!("Kernel: x86_64 Rust no_std");
     println!("Model: Form-native / Dimension-oriented");
@@ -317,36 +149,5 @@ fn sleep(args: &str) {
         for _ in 0..5_000_000 {
             core::hint::spin_loop();
         }
-    }
-}
-
-fn matrix_sample() {
-    for row in 0..8 {
-        for col in 0..40 {
-            let value = 33 + (hardware::random_u32().wrapping_add(row * 17 + col) % 94) as u8;
-            print!("{}", value as char);
-        }
-        println!();
-    }
-}
-
-const fn color(index: u8) -> vga::Color {
-    match index {
-        0 => vga::Color::Black,
-        1 => vga::Color::Blue,
-        2 => vga::Color::Green,
-        3 => vga::Color::Cyan,
-        4 => vga::Color::Red,
-        5 => vga::Color::Magenta,
-        6 => vga::Color::Brown,
-        7 => vga::Color::LightGray,
-        8 => vga::Color::DarkGray,
-        9 => vga::Color::LightBlue,
-        10 => vga::Color::LightGreen,
-        11 => vga::Color::LightCyan,
-        12 => vga::Color::LightRed,
-        13 => vga::Color::Pink,
-        14 => vga::Color::Yellow,
-        _ => vga::Color::White,
     }
 }

@@ -1,8 +1,9 @@
 //! Minimal native IPv4 networking for the transitional x86_64 kernel.
 //!
-//! This module deliberately implements only what the kernel can honestly
-//! support today: a polling RTL8139 driver plus Ethernet, ARP, IPv4 and ICMP
-//! echo.  It does not claim Wi-Fi, DHCP, DNS, TCP, TLS or HTTP support.
+//! The stack is deliberately small and allocation-free: a polling RTL8139
+//! driver, Ethernet/ARP, static IPv4, ICMP echo, checksum-correct UDP, DNS A
+//! queries, a single synchronous TCP client, and bounded HTTP/1.0 GET.  TLS,
+//! DHCP, IPv6, TCP servers, and concurrent sockets are not implemented.
 
 use crate::{port, println, slog};
 use core::sync::atomic::{compiler_fence, Ordering};
@@ -44,10 +45,101 @@ const ETHERNET_HEADER_SIZE: usize = 14;
 const LOCAL_IP: [u8; 4] = [10, 0, 2, 15];
 const NETMASK: [u8; 4] = [255, 255, 255, 0];
 const GATEWAY: [u8; 4] = [10, 0, 2, 2];
+const DNS_SERVER: [u8; 4] = [10, 0, 2, 3];
 const BROADCAST_MAC: [u8; 6] = [0xFF; 6];
 
 const IO_WAIT_LIMIT: usize = 2_000_000;
 const RECEIVE_WAIT_LIMIT: usize = 12_000_000;
+const TRANSPORT_RETRIES: usize = 3;
+const UDP_HEADER_SIZE: usize = 8;
+const TCP_HEADER_SIZE: usize = 20;
+const TCP_SYN_HEADER_SIZE: usize = 24;
+const DNS_PACKET_CAPACITY: usize = 512;
+const HTTP_REQUEST_CAPACITY: usize = 768;
+const HTTP_WIRE_CAPACITY: usize = 8 * 1024;
+pub const HTTP_BODY_CAPACITY: usize = 4096;
+
+const TCP_FIN: u8 = 0x01;
+const TCP_SYN: u8 = 0x02;
+const TCP_RST: u8 = 0x04;
+const TCP_PSH: u8 = 0x08;
+const TCP_ACK: u8 = 0x10;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetworkError {
+    CapabilityDenied,
+    BadAddress,
+    BadHostname,
+    BadUrl,
+    UnsupportedScheme,
+    NoDevice,
+    LinkDown,
+    ArpTimeout,
+    TransmitFailed,
+    ReplyTimeout,
+    DnsTimeout,
+    DnsRefused,
+    DnsNoAddress,
+    MalformedDns,
+    TcpTimeout,
+    TcpReset,
+    MalformedHttp,
+}
+
+impl NetworkError {
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::CapabilityDenied => "DIESE denied the Network Handle",
+            Self::BadAddress => "invalid IPv4 address",
+            Self::BadHostname => "invalid DNS hostname",
+            Self::BadUrl => "invalid HTTP URL",
+            Self::UnsupportedScheme => {
+                "only plain http:// URLs are supported; HTTPS/TLS is not implemented"
+            }
+            Self::NoDevice => "RTL8139 network device is unavailable",
+            Self::LinkDown => "RTL8139 link is down",
+            Self::ArpTimeout => "ARP neighbor resolution timed out",
+            Self::TransmitFailed => "RTL8139 transmit failed",
+            Self::ReplyTimeout => "network reply timed out",
+            Self::DnsTimeout => "DNS reply timed out",
+            Self::DnsRefused => "DNS server returned an error",
+            Self::DnsNoAddress => "DNS response contains no IPv4 address",
+            Self::MalformedDns => "malformed DNS response",
+            Self::TcpTimeout => "TCP peer timed out",
+            Self::TcpReset => "TCP peer reset the connection",
+            Self::MalformedHttp => "malformed or incomplete HTTP response",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UdpReply {
+    pub source: [u8; 4],
+    pub source_port: u16,
+    pub bytes: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HttpResponse {
+    pub status: u16,
+    pub body: [u8; HTTP_BODY_CAPACITY],
+    pub body_len: usize,
+    pub truncated: bool,
+    pub peer: [u8; 4],
+}
+
+impl HttpResponse {
+    pub fn body(&self) -> &[u8] {
+        &self.body[..self.body_len]
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HttpUrl<'a> {
+    pub host: &'a str,
+    pub port: u16,
+    pub path: &'a str,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PingError {
@@ -68,6 +160,19 @@ impl PingError {
             Self::ArpTimeout => "ARP neighbor resolution timed out",
             Self::TransmitFailed => "RTL8139 transmit failed",
             Self::ReplyTimeout => "ICMP echo reply timed out",
+        }
+    }
+}
+
+impl From<PingError> for NetworkError {
+    fn from(error: PingError) -> Self {
+        match error {
+            PingError::BadAddress => Self::BadAddress,
+            PingError::NoDevice => Self::NoDevice,
+            PingError::LinkDown => Self::LinkDown,
+            PingError::ArpTimeout => Self::ArpTimeout,
+            PingError::TransmitFailed => Self::TransmitFailed,
+            PingError::ReplyTimeout => Self::ReplyTimeout,
         }
     }
 }
@@ -111,6 +216,9 @@ struct NetworkStack {
     cached_neighbor_mac: [u8; 6],
     neighbor_valid: bool,
     next_echo_sequence: u16,
+    next_ip_identification: u16,
+    next_ephemeral_port: u16,
+    next_dns_identifier: u16,
     dma: DmaBuffers,
 }
 
@@ -131,6 +239,9 @@ impl NetworkStack {
             cached_neighbor_mac: [0; 6],
             neighbor_valid: false,
             next_echo_sequence: 1,
+            next_ip_identification: 1,
+            next_ephemeral_port: 49_152,
+            next_dns_identifier: 1,
             dma: DmaBuffers::new(),
         }
     }
@@ -422,6 +533,362 @@ impl NetworkStack {
         Err(PingError::ReplyTimeout)
     }
 
+    fn prepare_transport(&mut self) -> Result<(), NetworkError> {
+        if !self.initialize() {
+            return Err(NetworkError::NoDevice);
+        }
+        if !self.link_up() {
+            return Err(NetworkError::LinkDown);
+        }
+        Ok(())
+    }
+
+    fn allocate_ephemeral_port(&mut self) -> u16 {
+        let port = self.next_ephemeral_port;
+        self.next_ephemeral_port = if port == u16::MAX { 49_152 } else { port + 1 };
+        port
+    }
+
+    fn allocate_dns_identifier(&mut self) -> u16 {
+        let identifier = self.next_dns_identifier;
+        self.next_dns_identifier = self.next_dns_identifier.wrapping_add(1).max(1);
+        identifier
+    }
+
+    fn send_ipv4(
+        &mut self,
+        destination_mac: [u8; 6],
+        destination: [u8; 4],
+        protocol: u8,
+        payload: &[u8],
+    ) -> Result<(), NetworkError> {
+        if payload.len() > 1500 - 20 {
+            return Err(NetworkError::TransmitFailed);
+        }
+        let ip_length = 20 + payload.len();
+        let frame_length = ETHERNET_HEADER_SIZE + ip_length;
+        let mut frame = [0_u8; MAX_FRAME_SIZE];
+        frame[0..6].copy_from_slice(&destination_mac);
+        frame[6..12].copy_from_slice(&self.mac);
+        frame[12..14].copy_from_slice(&0x0800_u16.to_be_bytes());
+
+        let identification = self.next_ip_identification;
+        self.next_ip_identification = identification.wrapping_add(1).max(1);
+        let ip = &mut frame[ETHERNET_HEADER_SIZE..ETHERNET_HEADER_SIZE + 20];
+        build_ipv4_header(
+            ip,
+            ip_length,
+            identification,
+            protocol,
+            LOCAL_IP,
+            destination,
+        );
+        frame[ETHERNET_HEADER_SIZE + 20..frame_length].copy_from_slice(payload);
+        if self.send_frame(&frame[..frame_length]) {
+            Ok(())
+        } else {
+            Err(NetworkError::TransmitFailed)
+        }
+    }
+
+    fn udp_exchange(
+        &mut self,
+        destination: [u8; 4],
+        destination_port: u16,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> Result<UdpReply, NetworkError> {
+        self.prepare_transport()?;
+        if destination_port == 0 || request.len() > 1500 - 20 - UDP_HEADER_SIZE {
+            return Err(NetworkError::BadAddress);
+        }
+        let destination_mac = self
+            .resolve_neighbor(destination)
+            .map_err(NetworkError::from)?;
+        let source_port = self.allocate_ephemeral_port();
+        let udp_length = UDP_HEADER_SIZE + request.len();
+        let mut segment = [0_u8; 1500 - 20];
+        segment[0..2].copy_from_slice(&source_port.to_be_bytes());
+        segment[2..4].copy_from_slice(&destination_port.to_be_bytes());
+        segment[4..6].copy_from_slice(&(udp_length as u16).to_be_bytes());
+        segment[6..8].fill(0);
+        segment[8..udp_length].copy_from_slice(request);
+        let checksum = transport_checksum(LOCAL_IP, destination, 17, &segment[..udp_length]);
+        segment[6..8].copy_from_slice(&nonzero_checksum(checksum).to_be_bytes());
+
+        let mut frame = [0_u8; MAX_FRAME_SIZE];
+        for _ in 0..TRANSPORT_RETRIES {
+            self.send_ipv4(destination_mac, destination, 17, &segment[..udp_length])?;
+            for _ in 0..RECEIVE_WAIT_LIMIT {
+                if let Some(length) = self.receive_frame(&mut frame) {
+                    self.answer_local_requests(&frame[..length]);
+                    let Some(packet) = parse_udp_packet(
+                        &frame[..length],
+                        destination,
+                        destination_port,
+                        source_port,
+                    ) else {
+                        continue;
+                    };
+                    let copied = packet.payload.len().min(response.len());
+                    response[..copied].copy_from_slice(&packet.payload[..copied]);
+                    return Ok(UdpReply {
+                        source: packet.source,
+                        source_port: packet.source_port,
+                        bytes: copied,
+                    });
+                }
+                core::hint::spin_loop();
+            }
+        }
+        Err(NetworkError::ReplyTimeout)
+    }
+
+    fn dns_lookup(&mut self, hostname: &str) -> Result<[u8; 4], NetworkError> {
+        self.prepare_transport()?;
+        if let Some(address) = parse_ipv4(hostname) {
+            return Ok(address);
+        }
+        validate_hostname(hostname)?;
+        let identifier = self.allocate_dns_identifier();
+        let mut request = [0_u8; DNS_PACKET_CAPACITY];
+        let request_length = build_dns_query(identifier, hostname, &mut request)?;
+        let mut response = [0_u8; DNS_PACKET_CAPACITY];
+        match self.udp_exchange(DNS_SERVER, 53, &request[..request_length], &mut response) {
+            Ok(reply) => parse_dns_a_response(identifier, &response[..reply.bytes]),
+            Err(NetworkError::ReplyTimeout) => Err(NetworkError::DnsTimeout),
+            Err(error) => Err(error),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_tcp_segment(
+        &mut self,
+        destination_mac: [u8; 6],
+        destination: [u8; 4],
+        source_port: u16,
+        destination_port: u16,
+        sequence: u32,
+        acknowledgement: u32,
+        flags: u8,
+        payload: &[u8],
+    ) -> Result<(), NetworkError> {
+        let syn = flags & TCP_SYN != 0;
+        let header_length = if syn {
+            TCP_SYN_HEADER_SIZE
+        } else {
+            TCP_HEADER_SIZE
+        };
+        if payload.len() > 1500 - 20 - header_length {
+            return Err(NetworkError::TransmitFailed);
+        }
+        let length = header_length + payload.len();
+        let mut segment = [0_u8; 1500 - 20];
+        segment[0..2].copy_from_slice(&source_port.to_be_bytes());
+        segment[2..4].copy_from_slice(&destination_port.to_be_bytes());
+        segment[4..8].copy_from_slice(&sequence.to_be_bytes());
+        segment[8..12].copy_from_slice(&acknowledgement.to_be_bytes());
+        segment[12] = ((header_length / 4) as u8) << 4;
+        segment[13] = flags;
+        segment[14..16].copy_from_slice(&(HTTP_WIRE_CAPACITY as u16).to_be_bytes());
+        segment[16..20].fill(0);
+        if syn {
+            // MSS 1460.  Avoiding window scaling and timestamps keeps this
+            // one-connection client deterministic and easy to audit.
+            segment[20..24].copy_from_slice(&[2, 4, 0x05, 0xB4]);
+        }
+        segment[header_length..length].copy_from_slice(payload);
+        let checksum = transport_checksum(LOCAL_IP, destination, 6, &segment[..length]);
+        segment[16..18].copy_from_slice(&checksum.to_be_bytes());
+        self.send_ipv4(destination_mac, destination, 6, &segment[..length])
+    }
+
+    fn tcp_exchange(
+        &mut self,
+        destination: [u8; 4],
+        destination_port: u16,
+        request: &[u8],
+        output: &mut [u8],
+    ) -> Result<(usize, bool), NetworkError> {
+        self.prepare_transport()?;
+        if destination_port == 0 || request.len() > 1500 - 20 - TCP_HEADER_SIZE {
+            return Err(NetworkError::BadAddress);
+        }
+        let destination_mac = self
+            .resolve_neighbor(destination)
+            .map_err(NetworkError::from)?;
+        let source_port = self.allocate_ephemeral_port();
+        let initial_sequence = (crate::hardware::timestamp() as u32)
+            .wrapping_add((source_port as u32) << 16)
+            .max(1);
+        let mut frame = [0_u8; MAX_FRAME_SIZE];
+        let mut remote_next = None;
+
+        for _ in 0..TRANSPORT_RETRIES {
+            self.send_tcp_segment(
+                destination_mac,
+                destination,
+                source_port,
+                destination_port,
+                initial_sequence,
+                0,
+                TCP_SYN,
+                &[],
+            )?;
+            for _ in 0..RECEIVE_WAIT_LIMIT {
+                if let Some(length) = self.receive_frame(&mut frame) {
+                    self.answer_local_requests(&frame[..length]);
+                    let Some(packet) = parse_tcp_packet(
+                        &frame[..length],
+                        destination,
+                        destination_port,
+                        source_port,
+                    ) else {
+                        continue;
+                    };
+                    if packet.flags & TCP_RST != 0 {
+                        return Err(NetworkError::TcpReset);
+                    }
+                    if packet.flags & (TCP_SYN | TCP_ACK) == (TCP_SYN | TCP_ACK)
+                        && packet.acknowledgement == initial_sequence.wrapping_add(1)
+                    {
+                        remote_next = Some(packet.sequence.wrapping_add(1));
+                        break;
+                    }
+                }
+                core::hint::spin_loop();
+            }
+            if remote_next.is_some() {
+                break;
+            }
+        }
+        let mut remote_next = remote_next.ok_or(NetworkError::TcpTimeout)?;
+        let request_sequence = initial_sequence.wrapping_add(1);
+        let mut local_next = request_sequence;
+        self.send_tcp_segment(
+            destination_mac,
+            destination,
+            source_port,
+            destination_port,
+            local_next,
+            remote_next,
+            TCP_ACK,
+            &[],
+        )?;
+        self.send_tcp_segment(
+            destination_mac,
+            destination,
+            source_port,
+            destination_port,
+            local_next,
+            remote_next,
+            TCP_ACK | TCP_PSH,
+            request,
+        )?;
+        local_next = local_next.wrapping_add(request.len() as u32);
+
+        let mut output_length = 0;
+        let mut truncated = false;
+        let mut peer_acked_request = false;
+        let mut idle = 0;
+        let mut retries = 0;
+        let mut remote_closed = false;
+        while !remote_closed && !truncated {
+            let Some(length) = self.receive_frame(&mut frame) else {
+                idle += 1;
+                if idle < RECEIVE_WAIT_LIMIT {
+                    core::hint::spin_loop();
+                    continue;
+                }
+                idle = 0;
+                if retries + 1 >= TRANSPORT_RETRIES {
+                    return Err(NetworkError::TcpTimeout);
+                }
+                retries += 1;
+                if peer_acked_request || output_length != 0 {
+                    self.send_tcp_segment(
+                        destination_mac,
+                        destination,
+                        source_port,
+                        destination_port,
+                        local_next,
+                        remote_next,
+                        TCP_ACK,
+                        &[],
+                    )?;
+                } else {
+                    self.send_tcp_segment(
+                        destination_mac,
+                        destination,
+                        source_port,
+                        destination_port,
+                        request_sequence,
+                        remote_next,
+                        TCP_ACK | TCP_PSH,
+                        request,
+                    )?;
+                }
+                continue;
+            };
+            self.answer_local_requests(&frame[..length]);
+            let Some(packet) =
+                parse_tcp_packet(&frame[..length], destination, destination_port, source_port)
+            else {
+                continue;
+            };
+            idle = 0;
+            if packet.flags & TCP_RST != 0 {
+                return Err(NetworkError::TcpReset);
+            }
+            if packet.flags & TCP_ACK != 0 && packet.acknowledgement == local_next {
+                peer_acked_request = true;
+            }
+
+            if packet.sequence == remote_next {
+                if !packet.payload.is_empty() {
+                    let remaining = output.len().saturating_sub(output_length);
+                    let copied = packet.payload.len().min(remaining);
+                    output[output_length..output_length + copied]
+                        .copy_from_slice(&packet.payload[..copied]);
+                    output_length += copied;
+                    remote_next = remote_next.wrapping_add(packet.payload.len() as u32);
+                    truncated = copied != packet.payload.len();
+                }
+                if packet.flags & TCP_FIN != 0 {
+                    remote_next = remote_next.wrapping_add(1);
+                    remote_closed = true;
+                }
+            }
+            if !packet.payload.is_empty() || packet.flags & TCP_FIN != 0 {
+                self.send_tcp_segment(
+                    destination_mac,
+                    destination,
+                    source_port,
+                    destination_port,
+                    local_next,
+                    remote_next,
+                    TCP_ACK,
+                    &[],
+                )?;
+            }
+        }
+
+        // Active close after a complete peer FIN, or stop a response that hit
+        // the fixed wire bound.  The final ACK is best effort: the response is
+        // already complete from the caller's perspective.
+        let _ = self.send_tcp_segment(
+            destination_mac,
+            destination,
+            source_port,
+            destination_port,
+            local_next,
+            remote_next,
+            TCP_FIN | TCP_ACK,
+            &[],
+        );
+        Ok((output_length, truncated))
+    }
+
     fn answer_local_requests(&mut self, frame: &[u8]) {
         if frame.len() < 42 || frame[12..14] != [0x08, 0x06] {
             return;
@@ -523,7 +990,7 @@ pub fn print_configuration() {
         network.mac[4],
         network.mac[5]
     );
-    println!("policy: restricted; ICMP diagnostics require Power or Operator authority");
+    println!("policy: restricted; network I/O requires Power or Operator authority");
 }
 
 pub fn print_statistics() {
@@ -540,8 +1007,8 @@ pub fn print_statistics() {
         network.received_packets,
         network.dropped_packets
     );
-    println!("transport: Ethernet + ARP + static IPv4 + ICMP echo");
-    println!("tcp/udp/dns/tls: not implemented");
+    println!("transport: Ethernet + ARP + static IPv4 + ICMP + UDP/DNS + TCP/HTTP");
+    println!("tls/https/dhcp/ipv6: not implemented");
 }
 
 pub fn ping_text(
@@ -629,6 +1096,629 @@ pub fn ping_text(
     }
     println!("ping summary: sent={} received={}", count, received);
     slog!("HEXA_PING_SUMMARY sent={} received={}\r\n", count, received);
+}
+
+fn authorize_network(
+    broker: &CapabilityBroker,
+    handle_id: u32,
+    requester: Fin,
+    dimension: Fin,
+) -> Result<(), NetworkError> {
+    broker
+        .authorize_requester(
+            handle_id,
+            requester,
+            NETWORK_FIN,
+            dimension,
+            Operations::NETWORK,
+            crate::hardware::timestamp(),
+        )
+        .map_err(|_| NetworkError::CapabilityDenied)
+}
+
+/// Send one UDP datagram and wait for a reply from the same address and port.
+/// The caller owns the response buffer; excess reply bytes are deliberately
+/// discarded and `UdpReply::bytes` reports the copied length.
+#[allow(dead_code, clippy::too_many_arguments)]
+pub fn udp_exchange(
+    broker: &CapabilityBroker,
+    handle_id: u32,
+    requester: Fin,
+    dimension: Fin,
+    destination: [u8; 4],
+    destination_port: u16,
+    request: &[u8],
+    response: &mut [u8],
+) -> Result<UdpReply, NetworkError> {
+    authorize_network(broker, handle_id, requester, dimension)?;
+    NETWORK
+        .lock()
+        .udp_exchange(destination, destination_port, request, response)
+}
+
+/// Resolve one IPv4 address with the QEMU/SLiRP DNS service at `10.0.2.3`.
+pub fn dns_lookup(
+    broker: &CapabilityBroker,
+    handle_id: u32,
+    requester: Fin,
+    dimension: Fin,
+    hostname: &str,
+) -> Result<[u8; 4], NetworkError> {
+    authorize_network(broker, handle_id, requester, dimension)?;
+    NETWORK.lock().dns_lookup(hostname)
+}
+
+/// Parse the intentionally narrow URL syntax accepted by the native client.
+/// `http://host[:port]/path` is supported.  HTTPS is rejected because this
+/// kernel has no TLS implementation.
+pub fn parse_http_url(url: &str) -> Result<HttpUrl<'_>, NetworkError> {
+    if url.starts_with("https://") {
+        return Err(NetworkError::UnsupportedScheme);
+    }
+    let Some(rest) = url.strip_prefix("http://") else {
+        return Err(NetworkError::UnsupportedScheme);
+    };
+    let without_fragment = rest.split_once('#').map_or(rest, |(before, _)| before);
+    let (authority, path) = match without_fragment.find('/') {
+        Some(index) => (&without_fragment[..index], &without_fragment[index..]),
+        None => (without_fragment, "/"),
+    };
+    if authority.is_empty()
+        || authority.contains('@')
+        || authority.contains('[')
+        || authority.contains(']')
+    {
+        return Err(NetworkError::BadUrl);
+    }
+    let (host, port) = if let Some((host, port)) = authority.rsplit_once(':') {
+        if host.contains(':') || port.is_empty() {
+            return Err(NetworkError::BadUrl);
+        }
+        let port = port.parse::<u16>().map_err(|_| NetworkError::BadUrl)?;
+        if port == 0 {
+            return Err(NetworkError::BadUrl);
+        }
+        (host, port)
+    } else {
+        (authority, 80)
+    };
+    if parse_ipv4(host).is_none() {
+        validate_hostname(host)?;
+    }
+    if path.is_empty()
+        || !path.starts_with('/')
+        || !path.bytes().all(|byte| (0x21..=0x7E).contains(&byte))
+    {
+        return Err(NetworkError::BadUrl);
+    }
+    Ok(HttpUrl { host, port, path })
+}
+
+/// Perform a bounded HTTP/1.0 GET.  Capability authorization happens before
+/// the NIC lock, DNS query, or TCP packet transmission.
+pub fn http_get(
+    broker: &CapabilityBroker,
+    handle_id: u32,
+    requester: Fin,
+    dimension: Fin,
+    url: &str,
+) -> Result<HttpResponse, NetworkError> {
+    authorize_network(broker, handle_id, requester, dimension)?;
+    let parsed = parse_http_url(url)?;
+    let mut request = [0_u8; HTTP_REQUEST_CAPACITY];
+    let mut request_length = 0;
+    append_bytes(&mut request, &mut request_length, b"GET ")?;
+    append_bytes(&mut request, &mut request_length, parsed.path.as_bytes())?;
+    append_bytes(&mut request, &mut request_length, b" HTTP/1.0\r\nHost: ")?;
+    append_bytes(&mut request, &mut request_length, parsed.host.as_bytes())?;
+    if parsed.port != 80 {
+        append_bytes(&mut request, &mut request_length, b":")?;
+        append_decimal_u16(&mut request, &mut request_length, parsed.port)?;
+    }
+    append_bytes(
+        &mut request,
+        &mut request_length,
+        b"\r\nUser-Agent: ExpOS/8\r\nAccept: text/html,text/plain,*/*;q=0.1\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
+    )?;
+
+    let mut network = NETWORK.lock();
+    let peer = network.dns_lookup(parsed.host)?;
+    let mut wire = [0_u8; HTTP_WIRE_CAPACITY];
+    let (wire_length, wire_truncated) =
+        network.tcp_exchange(peer, parsed.port, &request[..request_length], &mut wire)?;
+    parse_http_response(peer, &wire[..wire_length], wire_truncated)
+}
+
+fn append_bytes(output: &mut [u8], length: &mut usize, bytes: &[u8]) -> Result<(), NetworkError> {
+    let end = length
+        .checked_add(bytes.len())
+        .filter(|end| *end <= output.len())
+        .ok_or(NetworkError::BadUrl)?;
+    output[*length..end].copy_from_slice(bytes);
+    *length = end;
+    Ok(())
+}
+
+fn append_decimal_u16(
+    output: &mut [u8],
+    length: &mut usize,
+    value: u16,
+) -> Result<(), NetworkError> {
+    let mut digits = [0_u8; 5];
+    let mut cursor = digits.len();
+    let mut remaining = value;
+    loop {
+        cursor -= 1;
+        digits[cursor] = b'0' + (remaining % 10) as u8;
+        remaining /= 10;
+        if remaining == 0 {
+            break;
+        }
+    }
+    append_bytes(output, length, &digits[cursor..])
+}
+
+fn build_ipv4_header(
+    output: &mut [u8],
+    total_length: usize,
+    identification: u16,
+    protocol: u8,
+    source: [u8; 4],
+    destination: [u8; 4],
+) {
+    debug_assert!(output.len() >= 20);
+    output[..20].fill(0);
+    output[0] = 0x45;
+    output[2..4].copy_from_slice(&(total_length as u16).to_be_bytes());
+    output[4..6].copy_from_slice(&identification.to_be_bytes());
+    output[6..8].copy_from_slice(&0x4000_u16.to_be_bytes());
+    output[8] = 64;
+    output[9] = protocol;
+    output[12..16].copy_from_slice(&source);
+    output[16..20].copy_from_slice(&destination);
+    let checksum = internet_checksum(&output[..20]);
+    output[10..12].copy_from_slice(&checksum.to_be_bytes());
+}
+
+fn nonzero_checksum(checksum: u16) -> u16 {
+    if checksum == 0 {
+        u16::MAX
+    } else {
+        checksum
+    }
+}
+
+fn checksum_sum(bytes: &[u8]) -> u32 {
+    let mut sum = 0_u32;
+    let mut index = 0;
+    while index + 1 < bytes.len() {
+        sum += u16::from_be_bytes([bytes[index], bytes[index + 1]]) as u32;
+        index += 2;
+    }
+    if index < bytes.len() {
+        sum += (bytes[index] as u32) << 8;
+    }
+    sum
+}
+
+fn finish_checksum(mut sum: u32) -> u16 {
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+fn transport_checksum(source: [u8; 4], destination: [u8; 4], protocol: u8, segment: &[u8]) -> u16 {
+    let pseudo_header = [
+        source[0],
+        source[1],
+        source[2],
+        source[3],
+        destination[0],
+        destination[1],
+        destination[2],
+        destination[3],
+        0,
+        protocol,
+        (segment.len() >> 8) as u8,
+        segment.len() as u8,
+    ];
+    finish_checksum(checksum_sum(&pseudo_header) + checksum_sum(segment))
+}
+
+struct Ipv4Packet<'a> {
+    source: [u8; 4],
+    destination: [u8; 4],
+    protocol: u8,
+    payload: &'a [u8],
+}
+
+fn parse_ipv4_packet(frame: &[u8]) -> Option<Ipv4Packet<'_>> {
+    if frame.len() < ETHERNET_HEADER_SIZE + 20 || frame[12..14] != [0x08, 0] {
+        return None;
+    }
+    let ip = &frame[ETHERNET_HEADER_SIZE..];
+    if ip[0] >> 4 != 4 {
+        return None;
+    }
+    let header_length = ((ip[0] & 0x0F) as usize) * 4;
+    if header_length < 20 || ip.len() < header_length {
+        return None;
+    }
+    let total_length = u16::from_be_bytes([ip[2], ip[3]]) as usize;
+    let fragment = u16::from_be_bytes([ip[6], ip[7]]);
+    if total_length < header_length
+        || total_length > ip.len()
+        || fragment & 0x3FFF != 0
+        || internet_checksum(&ip[..header_length]) != 0
+    {
+        return None;
+    }
+    let mut source = [0_u8; 4];
+    source.copy_from_slice(&ip[12..16]);
+    let mut destination = [0_u8; 4];
+    destination.copy_from_slice(&ip[16..20]);
+    if destination != LOCAL_IP {
+        return None;
+    }
+    Some(Ipv4Packet {
+        source,
+        destination,
+        protocol: ip[9],
+        payload: &ip[header_length..total_length],
+    })
+}
+
+struct ParsedUdp<'a> {
+    source: [u8; 4],
+    source_port: u16,
+    payload: &'a [u8],
+}
+
+fn parse_udp_packet<'a>(
+    frame: &'a [u8],
+    expected_source: [u8; 4],
+    expected_source_port: u16,
+    expected_destination_port: u16,
+) -> Option<ParsedUdp<'a>> {
+    let ip = parse_ipv4_packet(frame)?;
+    if ip.protocol != 17 || ip.source != expected_source || ip.payload.len() < UDP_HEADER_SIZE {
+        return None;
+    }
+    let source_port = u16::from_be_bytes([ip.payload[0], ip.payload[1]]);
+    let destination_port = u16::from_be_bytes([ip.payload[2], ip.payload[3]]);
+    let length = u16::from_be_bytes([ip.payload[4], ip.payload[5]]) as usize;
+    if source_port != expected_source_port
+        || destination_port != expected_destination_port
+        || length < UDP_HEADER_SIZE
+        || length > ip.payload.len()
+    {
+        return None;
+    }
+    let datagram = &ip.payload[..length];
+    let received_checksum = u16::from_be_bytes([datagram[6], datagram[7]]);
+    if received_checksum != 0 && transport_checksum(ip.source, ip.destination, 17, datagram) != 0 {
+        return None;
+    }
+    Some(ParsedUdp {
+        source: ip.source,
+        source_port,
+        payload: &datagram[UDP_HEADER_SIZE..],
+    })
+}
+
+struct ParsedTcp<'a> {
+    sequence: u32,
+    acknowledgement: u32,
+    flags: u8,
+    payload: &'a [u8],
+}
+
+fn parse_tcp_packet<'a>(
+    frame: &'a [u8],
+    expected_source: [u8; 4],
+    expected_source_port: u16,
+    expected_destination_port: u16,
+) -> Option<ParsedTcp<'a>> {
+    let ip = parse_ipv4_packet(frame)?;
+    if ip.protocol != 6 || ip.source != expected_source || ip.payload.len() < TCP_HEADER_SIZE {
+        return None;
+    }
+    let source_port = u16::from_be_bytes([ip.payload[0], ip.payload[1]]);
+    let destination_port = u16::from_be_bytes([ip.payload[2], ip.payload[3]]);
+    let header_length = ((ip.payload[12] >> 4) as usize) * 4;
+    if source_port != expected_source_port
+        || destination_port != expected_destination_port
+        || header_length < TCP_HEADER_SIZE
+        || header_length > ip.payload.len()
+        || transport_checksum(ip.source, ip.destination, 6, ip.payload) != 0
+    {
+        return None;
+    }
+    Some(ParsedTcp {
+        sequence: u32::from_be_bytes([ip.payload[4], ip.payload[5], ip.payload[6], ip.payload[7]]),
+        acknowledgement: u32::from_be_bytes([
+            ip.payload[8],
+            ip.payload[9],
+            ip.payload[10],
+            ip.payload[11],
+        ]),
+        flags: ip.payload[13],
+        payload: &ip.payload[header_length..],
+    })
+}
+
+fn validate_hostname(hostname: &str) -> Result<(), NetworkError> {
+    if hostname.is_empty() || hostname.len() > 253 || hostname.ends_with('.') {
+        return Err(NetworkError::BadHostname);
+    }
+    for label in hostname.split('.') {
+        if label.is_empty()
+            || label.len() > 63
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(NetworkError::BadHostname);
+        }
+    }
+    Ok(())
+}
+
+fn build_dns_query(
+    identifier: u16,
+    hostname: &str,
+    output: &mut [u8],
+) -> Result<usize, NetworkError> {
+    validate_hostname(hostname)?;
+    if output.len() < 12 {
+        return Err(NetworkError::BadHostname);
+    }
+    output[..12].fill(0);
+    output[0..2].copy_from_slice(&identifier.to_be_bytes());
+    output[2..4].copy_from_slice(&0x0100_u16.to_be_bytes()); // recursion desired
+    output[4..6].copy_from_slice(&1_u16.to_be_bytes());
+    let mut length = 12;
+    for label in hostname.split('.') {
+        let required = 1 + label.len();
+        if length + required + 5 > output.len() {
+            return Err(NetworkError::BadHostname);
+        }
+        output[length] = label.len() as u8;
+        length += 1;
+        output[length..length + label.len()].copy_from_slice(label.as_bytes());
+        length += label.len();
+    }
+    output[length] = 0;
+    length += 1;
+    output[length..length + 2].copy_from_slice(&1_u16.to_be_bytes()); // A
+    output[length + 2..length + 4].copy_from_slice(&1_u16.to_be_bytes()); // IN
+    Ok(length + 4)
+}
+
+fn skip_dns_name(packet: &[u8], mut offset: usize) -> Option<usize> {
+    for _ in 0..128 {
+        let length = *packet.get(offset)?;
+        if length & 0xC0 == 0xC0 {
+            packet.get(offset + 1)?;
+            return Some(offset + 2);
+        }
+        if length & 0xC0 != 0 {
+            return None;
+        }
+        offset += 1;
+        if length == 0 {
+            return Some(offset);
+        }
+        let label_length = length as usize;
+        if label_length > 63 || offset + label_length > packet.len() {
+            return None;
+        }
+        offset += label_length;
+    }
+    None
+}
+
+fn parse_dns_a_response(identifier: u16, packet: &[u8]) -> Result<[u8; 4], NetworkError> {
+    if packet.len() < 12 || u16::from_be_bytes([packet[0], packet[1]]) != identifier {
+        return Err(NetworkError::MalformedDns);
+    }
+    let flags = u16::from_be_bytes([packet[2], packet[3]]);
+    if flags & 0x8000 == 0 || flags & 0x0200 != 0 {
+        return Err(NetworkError::MalformedDns);
+    }
+    match flags & 0x000F {
+        0 => {}
+        3 => return Err(NetworkError::DnsNoAddress),
+        _ => return Err(NetworkError::DnsRefused),
+    }
+    let questions = u16::from_be_bytes([packet[4], packet[5]]) as usize;
+    let answers = u16::from_be_bytes([packet[6], packet[7]]) as usize;
+    let mut offset = 12;
+    for _ in 0..questions {
+        offset = skip_dns_name(packet, offset).ok_or(NetworkError::MalformedDns)?;
+        if offset + 4 > packet.len() {
+            return Err(NetworkError::MalformedDns);
+        }
+        offset += 4;
+    }
+    for _ in 0..answers {
+        offset = skip_dns_name(packet, offset).ok_or(NetworkError::MalformedDns)?;
+        if offset + 10 > packet.len() {
+            return Err(NetworkError::MalformedDns);
+        }
+        let record_type = u16::from_be_bytes([packet[offset], packet[offset + 1]]);
+        let class = u16::from_be_bytes([packet[offset + 2], packet[offset + 3]]);
+        let data_length = u16::from_be_bytes([packet[offset + 8], packet[offset + 9]]) as usize;
+        offset += 10;
+        if offset + data_length > packet.len() {
+            return Err(NetworkError::MalformedDns);
+        }
+        if record_type == 1 && class == 1 && data_length == 4 {
+            return Ok([
+                packet[offset],
+                packet[offset + 1],
+                packet[offset + 2],
+                packet[offset + 3],
+            ]);
+        }
+        offset += data_length;
+    }
+    Err(NetworkError::DnsNoAddress)
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn parse_ascii_usize(bytes: &[u8]) -> Option<usize> {
+    let mut value = 0_usize;
+    let mut found = false;
+    for byte in bytes.iter().copied() {
+        if byte == b' ' || byte == b'\t' {
+            continue;
+        }
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        found = true;
+        value = value.checked_mul(10)?.checked_add((byte - b'0') as usize)?;
+    }
+    found.then_some(value)
+}
+
+fn parse_chunk_size(line: &[u8]) -> Option<usize> {
+    let value = line.split(|byte| *byte == b';').next()?;
+    let mut result = 0_usize;
+    let mut found = false;
+    for byte in value.iter().copied() {
+        if byte == b' ' || byte == b'\t' {
+            continue;
+        }
+        let digit = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            b'A'..=b'F' => byte - b'A' + 10,
+            _ => return None,
+        };
+        found = true;
+        result = result.checked_mul(16)?.checked_add(digit as usize)?;
+    }
+    found.then_some(result)
+}
+
+fn decode_chunked(input: &[u8], output: &mut [u8]) -> Result<(usize, bool), NetworkError> {
+    let mut input_offset = 0;
+    let mut output_length = 0;
+    loop {
+        let line_end = find_bytes(&input[input_offset..], b"\r\n")
+            .map(|relative| input_offset + relative)
+            .ok_or(NetworkError::MalformedHttp)?;
+        let chunk_length =
+            parse_chunk_size(&input[input_offset..line_end]).ok_or(NetworkError::MalformedHttp)?;
+        input_offset = line_end + 2;
+        if chunk_length == 0 {
+            return Ok((output_length, false));
+        }
+        let chunk_end = input_offset
+            .checked_add(chunk_length)
+            .filter(|end| end.checked_add(2).is_some_and(|tail| tail <= input.len()))
+            .ok_or(NetworkError::MalformedHttp)?;
+        if input[chunk_end..chunk_end + 2] != *b"\r\n" {
+            return Err(NetworkError::MalformedHttp);
+        }
+        let remaining = output.len().saturating_sub(output_length);
+        let copied = chunk_length.min(remaining);
+        output[output_length..output_length + copied]
+            .copy_from_slice(&input[input_offset..input_offset + copied]);
+        output_length += copied;
+        if copied != chunk_length {
+            return Ok((output_length, true));
+        }
+        input_offset = chunk_end + 2;
+    }
+}
+
+fn parse_http_response(
+    peer: [u8; 4],
+    wire: &[u8],
+    wire_truncated: bool,
+) -> Result<HttpResponse, NetworkError> {
+    let header_end = find_bytes(wire, b"\r\n\r\n").ok_or(NetworkError::MalformedHttp)?;
+    let first_line_end = find_bytes(&wire[..header_end], b"\r\n").unwrap_or(header_end);
+    let status_line = &wire[..first_line_end];
+    if !status_line.starts_with(b"HTTP/1.") {
+        return Err(NetworkError::MalformedHttp);
+    }
+    let first_space = status_line
+        .iter()
+        .position(|byte| *byte == b' ')
+        .ok_or(NetworkError::MalformedHttp)?;
+    let status_bytes = status_line
+        .get(first_space + 1..first_space + 4)
+        .ok_or(NetworkError::MalformedHttp)?;
+    if !status_bytes.iter().all(u8::is_ascii_digit) {
+        return Err(NetworkError::MalformedHttp);
+    }
+    let status = ((status_bytes[0] - b'0') as u16) * 100
+        + ((status_bytes[1] - b'0') as u16) * 10
+        + (status_bytes[2] - b'0') as u16;
+
+    let mut content_length = None;
+    let mut chunked = false;
+    let mut cursor = first_line_end.saturating_add(2);
+    while cursor < header_end {
+        let line_length =
+            find_bytes(&wire[cursor..header_end], b"\r\n").unwrap_or(header_end - cursor);
+        let line = &wire[cursor..cursor + line_length];
+        if let Some(colon) = line.iter().position(|byte| *byte == b':') {
+            let name = &line[..colon];
+            let value = &line[colon + 1..];
+            if name.eq_ignore_ascii_case(b"content-length") {
+                content_length = Some(parse_ascii_usize(value).ok_or(NetworkError::MalformedHttp)?);
+            } else if name.eq_ignore_ascii_case(b"transfer-encoding")
+                && value
+                    .windows(7)
+                    .any(|part| part.eq_ignore_ascii_case(b"chunked"))
+            {
+                chunked = true;
+            }
+        }
+        cursor += line_length + 2;
+    }
+
+    let encoded_body = &wire[header_end + 4..];
+    let mut response = HttpResponse {
+        status,
+        body: [0; HTTP_BODY_CAPACITY],
+        body_len: 0,
+        truncated: false,
+        peer,
+    };
+    if chunked {
+        let (length, truncated) = decode_chunked(encoded_body, &mut response.body)?;
+        response.body_len = length;
+        response.truncated = truncated || wire_truncated;
+    } else {
+        let expected = content_length.unwrap_or(encoded_body.len());
+        if encoded_body.len() < expected && !wire_truncated {
+            return Err(NetworkError::MalformedHttp);
+        }
+        let available = expected.min(encoded_body.len());
+        response.body_len = available.min(response.body.len());
+        response.body[..response.body_len].copy_from_slice(&encoded_body[..response.body_len]);
+        response.truncated = expected > response.body.len()
+            || available < expected
+            || (content_length.is_none() && wire_truncated);
+    }
+    Ok(response)
 }
 
 #[derive(Clone, Copy)]

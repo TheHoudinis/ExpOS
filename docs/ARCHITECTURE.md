@@ -64,13 +64,13 @@ firmware / GRUB (temporary)
   Unix socket/file-descriptor ABI: clients own surfaces and Buffer Handles,
   mutate pending state, report damage, and publish atomically with `commit`.
   Focus, configure, frame-complete, key and pointer events are routed back to the owning
-  FIN. The alpha renderer targets the mapped Bochs/QEMU XRGB framebuffer.
-- The Prism desktop creates separate Browser, Terminal, Forms, Packages,
+  FIN. The software renderer targets the mapped Bochs/QEMU XRGB framebuffer.
+- The desktop creates separate Browser, Terminal, Forms, Packages,
   Settings, System, Games and Notes surfaces, plus Root, taskbar and launcher
-  surfaces. Its original dark shell provides a Start launcher and bottom
-  taskbar without copied third-party assets. It starts with no open or pinned
-  apps and supports focus, dragging, minimize, maximize, close and reopen. Each application
-  receives a child Handle containing
+  surfaces. Its flat dark shell provides a compact application menu and bottom
+  taskbar without copied third-party assets, promotional copy or instruction
+  footers. It starts with no open or pinned apps and supports focus, dragging,
+  minimize, maximize, close and reopen. Each application receives a child Handle containing
   only Display and Input rights; the compositor checks it before visibility,
   geometry, commit or key routing. Leaving graphics restores the VGA mode 3
   register set before the kernel redraws its text console.
@@ -89,11 +89,15 @@ firmware / GRUB (temporary)
   future storage/security work.
 - Network is a Driver Form protected by requester-bound Network Handles and
   PIMP policy. Its current polling RTL8139 path implements Ethernet, ARP,
-  static QEMU-user IPv4 and ICMP echo. TCP, UDP, DNS, DHCP, TLS, Wi-Fi and
-  interrupt-driven I/O are explicitly future work.
+  static QEMU-user IPv4, ICMP echo, checksum-validated UDP, DNS A lookup, one
+  bounded synchronous TCP client and HTTP/1.0 GET. DHCP, IPv6, TLS, physical
+  Wi-Fi, concurrent sockets, TCP servers and interrupt-driven I/O are explicitly
+  future work.
 - The Browser is an Interface Form above HexaDisplay. Its current document
-  engine intentionally accepts local `hexa://` and `data:text/html` resources;
-  external HTTPS, CSS and JavaScript are not claimed until TCP/DNS/TLS exist.
+  engine accepts local `hexa://`, `data:text/html` and bounded `http://`
+  resources. It receives a requester-bound Network Handle only for non-Guest
+  sessions when PIMP networking is enabled. HTTPS/TLS, CSS and JavaScript are
+  not claimed.
 - Go ABI v1 gives Go clients stable call numbers and request/response layouts
   for Forms, Handles, display surfaces, events, browser navigation and package
   transactions. The Go SDK and emulator are runnable today; native Go binary
@@ -120,9 +124,10 @@ The command environment is deliberately backed by fixed-capacity, in-memory
 tables at this stage. Its mutations exercise the core semantics but are not
 durable until the HexaFS block driver and recovery path are connected.
 
-Alpha.12 adds the 1024x768 empty-start Prism desktop, Notes, dual graphical and
-console login selection, Ayo v3 artifact transactions, and capability-gated
-native RTL8139/ARP/IPv4/ICMP networking. The Diamond II build is
+Alpha.12 includes the 1024x768 empty-start desktop, normal case-sensitive text,
+Notes, dual graphical and console login selection, Ayo v3 artifact transactions,
+and capability-gated native RTL8139/ARP/IPv4/ICMP/UDP/DNS/TCP/HTTP networking.
+The Diamond II build is
 also exposed through `make run-alpha`, providing a runnable migration fallback
 for networking, scheduling, ATA persistence and the games not yet redesigned
 around v8 semantics.

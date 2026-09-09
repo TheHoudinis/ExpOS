@@ -5,7 +5,7 @@ KERNEL_ELF := $(BUILD)/kernel.elf
 RUST_LIB   := target/$(TARGET)/release/libhexa_kernel.a
 QEMU       := qemu-system-x86_64 -m 256M -netdev user,id=net0 -device rtl8139,netdev=net0
 
-.PHONY: all iso test check display-check session-check network-check run debug clean legacy-alpha-check run-alpha ayo go-sdk kernel-build
+.PHONY: all iso test check display-check session-check network-check internet-check run debug clean legacy-alpha-check run-alpha ayo go-sdk kernel-build
 
 all: test check display-check session-check network-check ayo go-sdk
 
@@ -55,12 +55,12 @@ check: $(ISO)
 	grep -q "Granted Handle" $(BUILD)/serial.log
 	grep -q "Handle #3 authorizes execute for requester 'Root'" $(BUILD)/serial.log
 	grep -q "^42" $(BUILD)/serial.log
-	grep -q "HexaOS Forms can carry structured state and revisions" $(BUILD)/serial.log
+	grep -q "ExpOS Forms can carry structured state and revisions" $(BUILD)/serial.log
 	grep -q "NotesBackup" $(BUILD)/serial.log
 	grep -q "Created Dimension 'Development'" $(BUILD)/serial.log
 	grep -q "Notes is now recoverable" $(BUILD)/serial.log
 	grep -q "Notes is now active" $(BUILD)/serial.log
-	@echo ">>> HEXAOS SMOKE TEST PASSED <<<"
+	@echo ">>> EXPOS SMOKE TEST PASSED <<<"
 
 display-check: $(ISO)
 	rm -f $(BUILD)/display-serial.log
@@ -75,8 +75,8 @@ display-check: $(ISO)
 	grep -q "HEXA_APP_REOPENED TERMINAL" $(BUILD)/display-serial.log
 	grep -q "HEXA_DISPLAY_CLOSED" $(BUILD)/display-serial.log
 	grep -q "HEXA_COMMAND_OK desktop" $(BUILD)/display-serial.log
-	grep -q "HexaOS Go ABI v1" $(BUILD)/display-serial.log
-	@echo ">>> HEXAOS DISPLAY TEST PASSED <<<"
+	grep -q "ExpOS Go ABI v1" $(BUILD)/display-serial.log
+	@echo ">>> EXPOS DISPLAY TEST PASSED <<<"
 
 session-check: $(ISO)
 	rm -f $(BUILD)/guest-serial.log
@@ -89,14 +89,29 @@ session-check: $(ISO)
 
 network-check: $(ISO)
 	rm -f $(BUILD)/network-serial.log
-	timeout 20 $(QEMU) -device isa-debug-exit,iobase=0xf4,iosize=0x04 -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-network-input.txt > $(BUILD)/network-serial.log 2>&1 || true
+	python3 -m http.server 18080 --bind 127.0.0.1 --directory tests > $(BUILD)/http-fixture.log 2>&1 & fixture_pid=$$!; \
+	trap 'kill $$fixture_pid 2>/dev/null || true' EXIT; \
+	timeout 30 $(QEMU) -device isa-debug-exit,iobase=0xf4,iosize=0x04 -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-network-input.txt > $(BUILD)/network-serial.log 2>&1 || true
 	grep -q "HEXA_NET_READY driver=rtl8139" $(BUILD)/network-serial.log
 	grep -q "ether0  up" $(BUILD)/network-serial.log
+	grep -q "HEXA_HTTP_OK status=200 bytes=38 peer=10.0.2.2" $(BUILD)/network-serial.log
+	grep -q "ExpOS native TCP and HTTP are online." $(BUILD)/network-serial.log
+	grep -q "HEXA_BROWSER_HTTP_OK status=200 bytes=38 peer=10.0.2.2" $(BUILD)/network-serial.log
 	grep -q "HEXA_PING_REPLY address=10.0.2.2 sequence=1" $(BUILD)/network-serial.log
 	grep -q "HEXA_PING_SUMMARY sent=160 received=160" $(BUILD)/network-serial.log
 	! grep -q "HEXA_PING_ERROR" $(BUILD)/network-serial.log
+	! grep -q "HEXA_HTTP_ERROR" $(BUILD)/network-serial.log
 	grep -q "rtl8139-poll up" $(BUILD)/network-serial.log
 	@echo ">>> EXPOS NATIVE NETWORK TEST PASSED <<<"
+
+internet-check: $(ISO)
+	rm -f $(BUILD)/internet-serial.log
+	timeout 30 $(QEMU) -device isa-debug-exit,iobase=0xf4,iosize=0x04 -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-internet-input.txt > $(BUILD)/internet-serial.log 2>&1 || true
+	grep -q "HEXA_DNS_OK host=example.com address=" $(BUILD)/internet-serial.log
+	grep -q "HEXA_HTTP_OK status=" $(BUILD)/internet-serial.log
+	! grep -q "HEXA_DNS_ERROR" $(BUILD)/internet-serial.log
+	! grep -q "HEXA_HTTP_ERROR" $(BUILD)/internet-serial.log
+	@echo ">>> EXPOS LIVE INTERNET TEST PASSED <<<"
 
 run: $(ISO)
 	$(QEMU) -cdrom $(ISO) -serial stdio -no-reboot

@@ -1,4 +1,4 @@
-//! HexaOS bootstrap kernel.
+//! ExpOS bootstrap kernel.
 //!
 //! Booted by GRUB via Multiboot2. `boot/boot.asm` enters long mode and
 //! calls `kernel_main(magic, mbi_phys)`.
@@ -106,12 +106,12 @@ fn panic(info: &PanicInfo) -> ! {
 pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
     serial::COM1.lock().init();
 
-    slog!("[HexaOS] kernel entered; serial online\r\n");
+    slog!("[ExpOS] kernel entered; serial online\r\n");
     vga::WRITER.lock().clear();
 
     println!("============================================");
     println!(
-        " HexaOS v{} - Form-native bootstrap",
+        " ExpOS v{} - Form-native bootstrap",
         env!("CARGO_PKG_VERSION")
     );
     println!("============================================");

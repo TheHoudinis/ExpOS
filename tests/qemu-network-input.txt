@@ -2,6 +2,10 @@
 operator
 expos
 ifconfig
+fetch http://10.0.2.2:18080/http-fixture.txt
+browser
+/http://10.0.2.2:18080/http-fixture.txt
+
 ping 10.0.2.2 160
 netstat
 shutdown

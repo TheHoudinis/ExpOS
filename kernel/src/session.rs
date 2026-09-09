@@ -311,13 +311,13 @@ pub fn choose_boot_mode(input: &mut Input) -> BootMode {
                 let center_x = framebuffer::WIDTH as i16 / 2;
                 let center_y = framebuffer::HEIGHT as i16 / 2;
                 if pointer.pressed & 1 != 0 {
-                    if (center_x - 310..center_x - 10).contains(&pointer_x)
-                        && (center_y - 65..center_y + 95).contains(&pointer_y)
+                    if (center_x - 250..center_x - 10).contains(&pointer_x)
+                        && (center_y - 35..center_y + 45).contains(&pointer_y)
                     {
                         selected = BootMode::Graphical;
                         accepted = true;
-                    } else if (center_x + 10..center_x + 310).contains(&pointer_x)
-                        && (center_y - 65..center_y + 95).contains(&pointer_y)
+                    } else if (center_x + 10..center_x + 250).contains(&pointer_x)
+                        && (center_y - 35..center_y + 45).contains(&pointer_y)
                     {
                         selected = BootMode::Console;
                         accepted = true;
@@ -524,73 +524,44 @@ fn render_boot_mode(selected: BootMode) {
     let height = framebuffer::HEIGHT as i32;
     let center_x = width / 2;
     let center_y = height / 2;
-    framebuffer::vertical_gradient(0, 0, width, height, 0x0004_060B, 0x0014_0B20);
-    framebuffer::text(
-        center_x - 144,
-        center_y - 180,
-        "START EXPOS",
-        color::WHITE,
-        4,
-    );
-    framebuffer::text(
-        center_x - 178,
-        center_y - 132,
-        "CHOOSE YOUR SESSION ENVIRONMENT",
-        color::MUTED,
-        2,
-    );
+    framebuffer::clear(0x000B_0D10);
+    framebuffer::text(center_x - 22, center_y - 120, "ExpOS", color::WHITE, 2);
     boot_mode_card(
-        center_x - 310,
-        center_y - 65,
-        "1  PRISM",
-        "GRAPHICAL DESKTOP",
+        center_x - 250,
+        center_y - 35,
+        "1  Desktop",
         selected == BootMode::Graphical,
     );
     boot_mode_card(
         center_x + 10,
-        center_y - 65,
-        "2  CONSOLE",
-        "DIRECT COMMAND SHELL",
+        center_y - 35,
+        "2  Console",
         selected == BootMode::Console,
     );
-    framebuffer::text(
-        center_x - 166,
-        center_y + 140,
-        "ARROWS OR 1/2  ENTER TO CONTINUE",
-        color::MUTED,
-        1,
-    );
+    framebuffer::text(center_x - 20, center_y + 86, "Enter", color::MUTED, 1);
 }
 
-fn boot_mode_card(x: i32, y: i32, title: &str, detail: &str, selected: bool) {
+fn boot_mode_card(x: i32, y: i32, title: &str, selected: bool) {
     framebuffer::rounded_rect(
         x,
         y,
-        300,
-        160,
-        14,
-        if selected { 0x0028_1C45 } else { 0x000D_1119 },
+        240,
+        80,
+        8,
+        if selected { 0x0024_292F } else { 0x0013_161A },
     );
     framebuffer::outline(
         x,
         y,
-        300,
-        160,
+        240,
+        80,
         if selected {
-            color::PURPLE
+            color::WHITE
         } else {
             color::BORDER
         },
     );
-    framebuffer::text(x + 28, y + 38, title, color::INK, 3);
-    framebuffer::text(x + 28, y + 88, detail, color::MUTED, 1);
-    framebuffer::text(
-        x + 28,
-        y + 116,
-        if selected { "SELECTED" } else { "AVAILABLE" },
-        if selected { color::CYAN } else { color::MUTED },
-        1,
-    );
+    framebuffer::text(x + 30, y + 29, title, color::INK, 2);
 }
 
 fn complete_login(session: Session, graphical: bool) -> Session {
@@ -639,20 +610,20 @@ struct LoginLayout {
 fn login_layout() -> LoginLayout {
     let width = framebuffer::WIDTH as i32;
     let height = framebuffer::HEIGHT as i32;
-    let card_width = if width >= 1_000 { 380 } else { 344 };
-    let card_height = 568;
-    let card_x = width - card_width - 42;
+    let card_width = if width >= 1_000 { 400 } else { 344 };
+    let card_height = 430;
+    let card_x = (width - card_width) / 2;
     let card_y = ((height - card_height) / 2).max(16);
     LoginLayout {
         card_x,
         card_y,
         card_width,
-        field_x: card_x + 42,
-        field_width: card_width - 84,
-        user_y: card_y + 216,
-        password_y: card_y + 286,
-        sign_in_y: card_y + 364,
-        switch_y: card_y + 420,
+        field_x: card_x + 40,
+        field_width: card_width - 80,
+        user_y: card_y + 110,
+        password_y: card_y + 185,
+        sign_in_y: card_y + 270,
+        switch_y: card_y + 326,
     }
 }
 
@@ -666,79 +637,34 @@ fn render_login(
     let width = framebuffer::WIDTH as i32;
     let height = framebuffer::HEIGHT as i32;
     let layout = login_layout();
-    let left_center = layout.card_x / 2;
-    framebuffer::vertical_gradient(0, 0, width, height, 0x0004_060B, 0x0011_0A1D);
-    framebuffer::alpha_rect(42, 42, layout.card_x - 84, height - 84, 0x003E_176E, 72);
-    framebuffer::line(68, height - 96, layout.card_x - 62, 92, 0x0044_2870);
-    framebuffer::line(42, height / 2 + 10, layout.card_x - 42, 170, 0x0029_5E78);
-    framebuffer::rounded_rect(
-        left_center - 69,
-        height / 2 - 160,
-        138,
-        138,
-        28,
-        0x0017_1B26,
-    );
-    framebuffer::rounded_rect(
-        left_center - 35,
-        height / 2 - 126,
-        70,
-        70,
-        18,
-        color::PURPLE,
-    );
-    framebuffer::text(left_center - 16, height / 2 - 103, "EX", color::WHITE, 3);
-    framebuffer::text(
-        left_center - 88,
-        height / 2 + 20,
-        "EXPOS PRISM",
-        color::WHITE,
-        3,
-    );
-    framebuffer::text(
-        left_center - 96,
-        height / 2 + 62,
-        "FORM NATIVE SESSION",
-        color::MUTED,
-        1,
-    );
+    framebuffer::rect(0, 0, width, height, 0x000B_0D10);
     framebuffer::rounded_rect(
         layout.card_x,
         layout.card_y,
         layout.card_width,
-        568,
-        14,
-        0x000C_0F16,
+        430,
+        10,
+        0x0013_161A,
     );
     framebuffer::outline(
         layout.card_x,
         layout.card_y,
         layout.card_width,
-        568,
+        430,
         color::BORDER,
     );
-    let badge_x = layout.card_x + layout.card_width / 2 - 40;
-    framebuffer::rounded_rect(badge_x, layout.card_y + 36, 80, 80, 22, 0x001D_172C);
-    framebuffer::text(badge_x + 28, layout.card_y + 62, "EX", color::PURPLE, 2);
     framebuffer::text(
-        layout.card_x + 82,
-        layout.card_y + 142,
-        "WELCOME TO EXPOS",
+        layout.card_x + 40,
+        layout.card_y + 45,
+        "ExpOS",
         color::INK,
         2,
-    );
-    framebuffer::text(
-        layout.card_x + 94,
-        layout.card_y + 174,
-        "PRISM SESSION LOGIN",
-        color::MUTED,
-        1,
     );
     login_field(
         layout.field_x,
         layout.user_y,
         layout.field_width,
-        "USER",
+        "Username",
         !password_field,
     );
     if let Ok(name) = core::str::from_utf8(&username[..username_len]) {
@@ -748,7 +674,7 @@ fn render_login(
         layout.field_x,
         layout.password_y,
         layout.field_width,
-        "PASSWORD",
+        "Password",
         password_field,
     );
     for index in 0..password_len.min(20) {
@@ -766,12 +692,12 @@ fn render_login(
         layout.field_width,
         42,
         8,
-        color::PURPLE,
+        color::GREEN,
     );
     framebuffer::text(
         layout.field_x + layout.field_width / 2 - 36,
         layout.sign_in_y + 15,
-        "SIGN IN",
+        "Sign in",
         color::WHITE,
         2,
     );
@@ -791,33 +717,18 @@ fn render_login(
         color::BORDER,
     );
     framebuffer::text(
-        layout.field_x + layout.field_width / 2 - 72,
+        layout.field_x + layout.field_width / 2 - 52,
         layout.switch_y + 11,
-        "USE CONSOLE LOGIN",
+        "Console login",
         color::INK,
-        1,
-    );
-    framebuffer::text(
-        layout.field_x + 30,
-        layout.card_y + 472,
-        "TAB SWITCHES FIELDS  ESC CHANGES MODE",
-        color::MUTED,
         1,
     );
     if denied {
         framebuffer::text(
-            layout.field_x + 20,
-            layout.card_y + 518,
-            "LOGIN DENIED - TRY AGAIN",
+            layout.field_x,
+            layout.card_y + 390,
+            "Login denied",
             color::RED,
-            1,
-        );
-    } else {
-        framebuffer::text(
-            layout.field_x + 14,
-            layout.card_y + 518,
-            "OPERATOR DEFAULT: expos",
-            color::MUTED,
             1,
         );
     }
@@ -831,7 +742,7 @@ fn login_field(x: i32, y: i32, width: i32, label: &str, active: bool) {
         y + 17,
         width,
         34,
-        if active { color::PURPLE } else { color::BORDER },
+        if active { color::WHITE } else { color::BORDER },
     );
 }
 
@@ -853,6 +764,12 @@ fn render_welcome(session: Session) {
     framebuffer::clear(color::BACKGROUND);
     let center_x = framebuffer::WIDTH as i32 / 2;
     let center_y = framebuffer::HEIGHT as i32 / 2;
-    framebuffer::text(center_x - 116, center_y - 48, "WELCOME", color::WHITE, 3);
-    framebuffer::text(center_x - 42, center_y + 4, session.name(), 0x00B9_DCFF, 2);
+    let name_width = session.name().len() as i32 * framebuffer::text_advance(2);
+    framebuffer::text(
+        center_x - name_width / 2,
+        center_y - 20,
+        session.name(),
+        color::WHITE,
+        2,
+    );
 }
