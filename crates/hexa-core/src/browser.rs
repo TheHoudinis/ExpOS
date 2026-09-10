@@ -76,6 +76,7 @@ impl Document {
         if !url.starts_with("hexa://")
             && !url.starts_with("data:text/html,")
             && !url.starts_with("http://")
+            && !url.starts_with("https://")
         {
             return Err(BrowserError::InvalidUrl);
         }
@@ -199,16 +200,18 @@ mod tests {
     }
 
     #[test]
-    fn accepts_http_documents_but_not_unimplemented_https() {
-        let document = Document::parse(
+    fn accepts_http_and_https_documents() {
+        let http = Document::parse(
             "http://example.com/",
             "<title>Example</title><h1>Example Domain</h1><p>Network document.</p>",
         )
         .unwrap();
-        assert_eq!(document.url(), "http://example.com/");
-        assert_eq!(
-            Document::parse("https://example.com", "<p>Nope</p>").err(),
-            Some(BrowserError::InvalidUrl)
-        );
+        assert_eq!(http.url(), "http://example.com/");
+        let https = Document::parse(
+            "https://example.com/",
+            "<title>Secure</title><p>Verified transport document.</p>",
+        )
+        .unwrap();
+        assert_eq!(https.url(), "https://example.com/");
     }
 }

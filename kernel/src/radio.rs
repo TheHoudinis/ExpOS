@@ -363,6 +363,46 @@ pub fn initialize(ethernet_ready: bool, ethernet_connected: bool) {
     );
 }
 
+/// Restore trusted local policy after the state journal has been verified.
+///
+/// This is deliberately separate from the user-facing setters: interactive
+/// changes still require a requester-bound Configure Handle, while early boot
+/// is restoring policy that was already authorized and committed. Requested
+/// radios are only restored when their discovered adapter and driver are
+/// actually usable, so persisted UI state can never manufacture connectivity.
+pub(crate) fn restore_persisted_policy(
+    network_enabled: bool,
+    wifi_requested: bool,
+    bluetooth_requested: bool,
+) {
+    let mut connectivity = CONNECTIVITY.lock();
+    connectivity.set_network(network_enabled);
+
+    let wifi_result = connectivity.set_radio(RadioKind::Wifi, network_enabled && wifi_requested);
+    let bluetooth_result = connectivity.set_radio(RadioKind::Bluetooth, bluetooth_requested);
+    let snapshot = connectivity.snapshot();
+    drop(connectivity);
+
+    slog!(
+        "HEXA_RADIO_POLICY_RESTORED network={} wifi={} bluetooth={}\r\n",
+        snapshot.network_enabled,
+        snapshot.wifi_requested,
+        snapshot.bluetooth_requested
+    );
+    if wifi_requested && wifi_result.is_err() {
+        slog!(
+            "HEXA_RADIO_POLICY_SKIPPED kind=wifi reason={:?}\r\n",
+            wifi_result.err()
+        );
+    }
+    if bluetooth_requested && bluetooth_result.is_err() {
+        slog!(
+            "HEXA_RADIO_POLICY_SKIPPED kind=bluetooth reason={:?}\r\n",
+            bluetooth_result.err()
+        );
+    }
+}
+
 pub fn snapshot() -> ConnectivitySnapshot {
     let ethernet_connected = crate::network::link_up();
     let mut connectivity = CONNECTIVITY.lock();
@@ -463,5 +503,21 @@ mod tests {
         assert_eq!(state.bluetooth.presence, Presence::Unknown);
         assert_eq!(state.bluetooth.driver, DriverState::BusUnsupported);
         assert_eq!(state.bluetooth.status_text(), "Unavailable - no USB stack");
+    }
+
+    #[test]
+    fn restored_requests_cannot_enable_missing_radios() {
+        let mut state = ConnectivityState::discovered(None, false, false, None, None, false);
+        state.set_network(false);
+        assert_eq!(
+            state.set_radio(RadioKind::Wifi, true),
+            Err(RadioError::NetworkDisabled)
+        );
+        assert_eq!(
+            state.set_radio(RadioKind::Bluetooth, true),
+            Err(RadioError::BusUnsupported)
+        );
+        assert!(!state.snapshot().wifi_requested);
+        assert!(!state.snapshot().bluetooth_requested);
     }
 }

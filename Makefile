@@ -1,19 +1,26 @@
 TARGET     := x86_64-unknown-none
 BUILD      := build
+RUNTIME    := runtime
 ISO        := $(BUILD)/hexaos.iso
 KERNEL_ELF := $(BUILD)/kernel.elf
 RUST_LIB   := target/$(TARGET)/release/libhexa_kernel.a
-QEMU       := qemu-system-x86_64 -machine pc -m 256M -vga std -global VGA.vgamem_mb=16 -netdev user,id=net0 -device rtl8139,netdev=net0
+STATE_IMG  := $(RUNTIME)/expos-state.img
+STATE_SIZE := 4M
+QEMU       := qemu-system-x86_64 -machine pc -cpu max -m 256M -vga std -global VGA.vgamem_mb=16 -netdev user,id=net0 -device rtl8139,netdev=net0
 
-.PHONY: all iso test check display-check session-check network-check internet-check run debug clean legacy-alpha-check run-alpha ayo go-sdk kernel-build
+.PHONY: all iso test check display-check session-check network-check internet-check https-check persistence-check run debug clean legacy-alpha-check run-alpha ayo go-sdk kernel-build
 
-all: test check display-check session-check network-check ayo go-sdk
+all: test check display-check session-check network-check persistence-check ayo go-sdk
 
 test:
 	cargo test -p hexa-core
 
 $(BUILD):
 	mkdir -p $(BUILD)
+
+$(STATE_IMG):
+	mkdir -p $(RUNTIME)
+	truncate -s $(STATE_SIZE) $@
 
 $(BUILD)/boot.o: boot/boot.asm | $(BUILD)
 	nasm -f elf64 $< -o $@
@@ -32,7 +39,9 @@ iso: $(ISO)
 
 check: $(ISO)
 	rm -f $(BUILD)/serial.log
-	timeout 20 $(QEMU) -device isa-debug-exit,iobase=0xf4,iosize=0x04 -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-smoke-input.txt > $(BUILD)/serial.log 2>&1 || true
+	rm -f $(BUILD)/check-state.img
+	truncate -s $(STATE_SIZE) $(BUILD)/check-state.img
+	timeout 30 $(QEMU) -drive file=$(BUILD)/check-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-smoke-input.txt > $(BUILD)/serial.log 2>&1 || true
 	grep -q "HEXA_BOOT_OK" $(BUILD)/serial.log
 	grep -q "HEXA_BOOT_MODE console" $(BUILD)/serial.log
 	grep -q "HEXA_LOGIN_OK user=operator" $(BUILD)/serial.log
@@ -60,11 +69,15 @@ check: $(ISO)
 	grep -q "Created Dimension 'Development'" $(BUILD)/serial.log
 	grep -q "Notes is now recoverable" $(BUILD)/serial.log
 	grep -q "Notes is now active" $(BUILD)/serial.log
+	! grep -q "nightowl" $(BUILD)/serial.log
+	! grep -q "starlight" $(BUILD)/serial.log
 	@echo ">>> EXPOS SMOKE TEST PASSED <<<"
 
 display-check: $(ISO)
 	rm -f $(BUILD)/display-serial.log
-	timeout 20 $(QEMU) -device isa-debug-exit,iobase=0xf4,iosize=0x04 -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-display-input.txt > $(BUILD)/display-serial.log 2>&1 || true
+	rm -f $(BUILD)/display-state.img
+	truncate -s $(STATE_SIZE) $(BUILD)/display-state.img
+	timeout 30 $(QEMU) -drive file=$(BUILD)/display-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-display-input.txt > $(BUILD)/display-serial.log 2>&1 || true
 	grep -q "framebuffer: 1920x1080 XRGB8888 scanout available=true" $(BUILD)/display-serial.log
 	grep -q "HEXA_BOOT_MODE graphical" $(BUILD)/display-serial.log
 	grep -q "HEXA_DISPLAY_MODE width=1920 height=1080 bpp=32 stride=7680 bytes=8294400" $(BUILD)/display-serial.log
@@ -72,12 +85,20 @@ display-check: $(ISO)
 	grep -q "HEXA_DESKTOP_EMPTY open_apps=0 pinned_apps=0" $(BUILD)/display-serial.log
 	grep -q "HEXA_MOUSE_READY enabled=true" $(BUILD)/display-serial.log
 	grep -q "HEXA_APP_OPENED SETTINGS" $(BUILD)/display-serial.log
-	grep -q "HEXA_SETTING_CHANGED key=accent value=Ocean" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=theme value=Graphite" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=resolution value=480p" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=resolution value=720p" $(BUILD)/display-serial.log
+	grep -q "HEXA_DISPLAY_MODE width=1280 height=720 bpp=32 stride=5120 bytes=3686400 preset=720p" $(BUILD)/display-serial.log
 	grep -q "HEXA_SETTING_CHANGED key=taskbar value=off" $(BUILD)/display-serial.log
 	grep -q "HEXA_SETTING_CHANGED key=network value=off" $(BUILD)/display-serial.log
 	grep -q "HEXA_SETTING_CHANGED key=network value=on" $(BUILD)/display-serial.log
 	grep -q "HEXA_SETTING_DENIED key=bluetooth error=BusUnsupported" $(BUILD)/display-serial.log
 	grep -q "HEXA_APP_OPENED TERMINAL" $(BUILD)/display-serial.log
+	grep -q "HEXA_TERMINAL_COMMAND name=help" $(BUILD)/display-serial.log
+	grep -q "HEXA_TERMINAL_COMMAND name=status" $(BUILD)/display-serial.log
+	grep -q "HEXA_TERMINAL_COMMAND name=storage" $(BUILD)/display-serial.log
+	grep -q "HEXA_TERMINAL_COMMAND name=theme" $(BUILD)/display-serial.log
+	grep -q "HEXA_TERMINAL_COMMAND name=ps" $(BUILD)/display-serial.log
 	grep -q "HEXA_APP_CLOSED TERMINAL" $(BUILD)/display-serial.log
 	grep -q "HEXA_APP_REOPENED TERMINAL" $(BUILD)/display-serial.log
 	grep -q "HEXA_DISPLAY_CLOSED" $(BUILD)/display-serial.log
@@ -87,7 +108,9 @@ display-check: $(ISO)
 
 session-check: $(ISO)
 	rm -f $(BUILD)/guest-serial.log
-	timeout 20 $(QEMU) -device isa-debug-exit,iobase=0xf4,iosize=0x04 -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-guest-input.txt > $(BUILD)/guest-serial.log 2>&1 || true
+	rm -f $(BUILD)/guest-state.img
+	truncate -s $(STATE_SIZE) $(BUILD)/guest-state.img
+	timeout 30 $(QEMU) -drive file=$(BUILD)/guest-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-guest-input.txt > $(BUILD)/guest-serial.log 2>&1 || true
 	grep -q "HEXA_LOGIN_OK user=guest" $(BUILD)/guest-serial.log
 	grep -q "guest (Guest authority)" $(BUILD)/guest-serial.log
 	grep -q "DIESE denied 'mkform' for Guest authority" $(BUILD)/guest-serial.log
@@ -96,9 +119,11 @@ session-check: $(ISO)
 
 network-check: $(ISO)
 	rm -f $(BUILD)/network-serial.log
+	rm -f $(BUILD)/network-state.img
+	truncate -s $(STATE_SIZE) $(BUILD)/network-state.img
 	python3 -m http.server 18080 --bind 127.0.0.1 --directory tests > $(BUILD)/http-fixture.log 2>&1 & fixture_pid=$$!; \
 	trap 'kill $$fixture_pid 2>/dev/null || true' EXIT; \
-	timeout 30 $(QEMU) -device isa-debug-exit,iobase=0xf4,iosize=0x04 -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-network-input.txt > $(BUILD)/network-serial.log 2>&1 || true
+	timeout 35 $(QEMU) -drive file=$(BUILD)/network-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-network-input.txt > $(BUILD)/network-serial.log 2>&1 || true
 	grep -q "HEXA_NET_READY driver=rtl8139" $(BUILD)/network-serial.log
 	grep -q "ether0  up" $(BUILD)/network-serial.log
 	grep -q "HEXA_HTTP_OK status=200 bytes=38 peer=10.0.2.2" $(BUILD)/network-serial.log
@@ -113,18 +138,48 @@ network-check: $(ISO)
 
 internet-check: $(ISO)
 	rm -f $(BUILD)/internet-serial.log
-	timeout 30 $(QEMU) -device isa-debug-exit,iobase=0xf4,iosize=0x04 -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-internet-input.txt > $(BUILD)/internet-serial.log 2>&1 || true
+	rm -f $(BUILD)/internet-state.img
+	truncate -s $(STATE_SIZE) $(BUILD)/internet-state.img
+	timeout 35 $(QEMU) -drive file=$(BUILD)/internet-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-internet-input.txt > $(BUILD)/internet-serial.log 2>&1 || true
 	grep -q "HEXA_DNS_OK host=example.com address=" $(BUILD)/internet-serial.log
 	grep -q "HEXA_HTTP_OK status=" $(BUILD)/internet-serial.log
 	! grep -q "HEXA_DNS_ERROR" $(BUILD)/internet-serial.log
 	! grep -q "HEXA_HTTP_ERROR" $(BUILD)/internet-serial.log
 	@echo ">>> EXPOS LIVE INTERNET TEST PASSED <<<"
 
-run: $(ISO)
-	$(QEMU) -cdrom $(ISO) -serial stdio -no-reboot
+https-check: $(ISO)
+	rm -f $(BUILD)/https-serial.log
+	rm -f $(BUILD)/https-state.img
+	truncate -s $(STATE_SIZE) $(BUILD)/https-state.img
+	timeout 60 $(QEMU) -drive file=$(BUILD)/https-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-https-input.txt > $(BUILD)/https-serial.log 2>&1 || true
+	grep -q "HEXA_TLS_VERIFIED host=www.youtube.com version=1.3" $(BUILD)/https-serial.log
+	grep -q "HEXA_HTTP_OK status=" $(BUILD)/https-serial.log
+	grep -q "HEXA_BROWSER_HTTP_OK status=200" $(BUILD)/https-serial.log
+	! grep -q "HEXA_HTTP_ERROR" $(BUILD)/https-serial.log
+	! grep -q "HEXA_BROWSER_HTTP_ERROR" $(BUILD)/https-serial.log
+	@echo ">>> EXPOS VERIFIED HTTPS TEST PASSED <<<"
 
-debug: $(ISO)
-	$(QEMU) -cdrom $(ISO) -display none -serial stdio -no-reboot -s -S
+persistence-check: $(ISO)
+	rm -f $(BUILD)/persistence-state.img $(BUILD)/persistence-write.log $(BUILD)/persistence-read.log
+	truncate -s $(STATE_SIZE) $(BUILD)/persistence-state.img
+	timeout 40 $(QEMU) -drive file=$(BUILD)/persistence-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-persistence-write-input.txt > $(BUILD)/persistence-write.log 2>&1 || true
+	timeout 40 $(QEMU) -drive file=$(BUILD)/persistence-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-persistence-read-input.txt > $(BUILD)/persistence-read.log 2>&1 || true
+	grep -q "HEXA_USER_CREATED keeper" $(BUILD)/persistence-write.log
+	grep -q "HEXA_SETTING_CHANGED key=theme value=Graphite" $(BUILD)/persistence-write.log
+	grep -q "HEXA_SETTING_CHANGED key=resolution value=480p" $(BUILD)/persistence-write.log
+	grep -q "HEXA_STATE_COMMIT generation=" $(BUILD)/persistence-write.log
+	! grep -q "violetmemory" $(BUILD)/persistence-write.log
+	grep -q "HEXA_STATE_READY generation=.*loaded=true" $(BUILD)/persistence-read.log
+	grep -q "HEXA_ACCOUNTS_READY source=disk persisted=true" $(BUILD)/persistence-read.log
+	grep -q "keeper (Power authority)" $(BUILD)/persistence-read.log
+	grep -q "HEXA_DISPLAY_MODE width=640 height=480 bpp=32 stride=2560 bytes=1228800 preset=480p" $(BUILD)/persistence-read.log
+	@echo ">>> EXPOS PERSISTENCE TEST PASSED <<<"
+
+run: $(ISO) $(STATE_IMG)
+	$(QEMU) -drive file=$(STATE_IMG),format=raw,if=ide,index=0 -boot once=d -cdrom $(ISO) -serial stdio -no-reboot
+
+debug: $(ISO) $(STATE_IMG)
+	$(QEMU) -drive file=$(STATE_IMG),format=raw,if=ide,index=0 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot -s -S
 
 ayo:
 	$(MAKE) -C ayo test build

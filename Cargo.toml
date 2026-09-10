@@ -2,6 +2,13 @@
 members = ["crates/hexa-core", "kernel"]
 resolver = "2"
 
+[patch.crates-io]
+# embedded-tls 0.19 stores only the first three DNS SANs. Large production
+# certificates (including Google's) place the requested hostname later, so the
+# verifier rejects a valid chain. Keep the audited source local and raise only
+# that fixed-capacity bound; certificate/signature verification stays intact.
+embedded-tls = { path = "vendor/embedded-tls" }
+
 [profile.release]
 opt-level = 2
 lto = true
@@ -9,4 +16,3 @@ codegen-units = 1
 panic = "abort"
 debug = true
 overflow-checks = true
-

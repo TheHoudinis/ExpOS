@@ -111,15 +111,15 @@ pub fn print_kernel_features() {
         yes_no(cr4 & (1 << 7) != 0),
         yes_no(efer & (1 << 11) != 0)
     );
-    println!("kernel: 64-bit paging, PCI scan, RTC, COM1, PS/2 mouse/keys, framebuffer, RTL8139");
-    println!("services: Forms, FIN resolution, HexaFS journal, PIMP/DIESE, Handles");
+    println!("kernel: 64-bit paging, PCI scan, RTC, COM1, PS/2 input, VBE, RTL8139, ATA PIO");
+    println!("services: Forms, FIN resolution, persistent state journal, PIMP/DIESE, Handles");
     println!(
         "desktop: empty-start taskbar shell, window controls, pointer hit-testing, routed input"
     );
-    println!("network: Ethernet, ARP, IPv4, ICMP, UDP, DNS, TCP and HTTP (polling)");
+    println!("network: Ethernet, ARP, IPv4, ICMP, UDP, DNS, TCP, HTTP and verified TLS 1.3");
     println!("radio: capability policy plus PCI Wi-Fi/Bluetooth class discovery");
     println!(
-        "pending: interrupts, native storage/audio, DHCP, IPv6, TLS, Wi-Fi drivers and USB/Bluetooth"
+        "pending: interrupts, general filesystem/audio, DHCP, IPv6, Wi-Fi drivers and USB/Bluetooth"
     );
 }
 

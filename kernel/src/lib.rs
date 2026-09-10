@@ -6,7 +6,11 @@
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(not(test), no_main)]
 
+extern crate alloc;
+
+mod allocator;
 mod compat;
+mod crypto;
 mod desktop;
 mod framebuffer;
 mod games;
@@ -18,7 +22,10 @@ mod radio;
 mod serial;
 mod session;
 mod shell;
+pub(crate) mod state;
+mod storage;
 mod sync;
+mod tls;
 mod vga;
 mod volatile;
 
@@ -108,6 +115,7 @@ fn panic(info: &PanicInfo) -> ! {
 #[no_mangle]
 pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
     serial::COM1.lock().init();
+    allocator::initialize();
 
     slog!("[ExpOS] kernel entered; serial online\r\n");
     vga::WRITER.lock().clear();
@@ -153,6 +161,17 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
     };
     let ethernet_ready = network::initialize();
     radio::initialize(ethernet_ready, network::link_up());
+    state::initialize();
+    let preferences = state::preferences();
+    if let Some(mode) = framebuffer::DisplayMode::from_persisted(preferences.display_mode) {
+        let _ = framebuffer::request_mode(mode);
+    }
+    radio::restore_persisted_policy(
+        preferences.flags & state::PREF_NETWORK_ENABLED != 0,
+        preferences.flags & state::PREF_WIFI_ENABLED != 0,
+        preferences.flags & state::PREF_BLUETOOTH_ENABLED != 0,
+    );
+    session::initialize();
     println!();
     println!("Core architecture online. Starting session manager.");
     let mut input = input::Input::new();

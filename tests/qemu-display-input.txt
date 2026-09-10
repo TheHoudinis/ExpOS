@@ -11,9 +11,20 @@ s2
 3
 3
 4
+5
+
 t
+help
+status
+storage
+theme
+ps
+echo terminal works
 close
 t
 exit
+desktop
+q
+displayinfo
 goabi
 shutdown

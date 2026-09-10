@@ -41,6 +41,7 @@ pub fn run(report: BootReport, mut input: Input, session: Session) -> ! {
                 if let Ok(command) = core::str::from_utf8(&line[..length]) {
                     shell.execute(command.trim(), &mut input);
                 }
+                crate::crypto::wipe(&mut line[..length]);
                 length = 0;
                 history_cursor = None;
                 prompt(shell.session);
@@ -48,6 +49,7 @@ pub fn run(report: BootReport, mut input: Input, session: Session) -> ! {
             0x08 => {
                 if length > 0 {
                     length -= 1;
+                    line[length] = 0;
                     print!("\x08 \x08");
                 }
             }
@@ -74,9 +76,10 @@ pub fn run(report: BootReport, mut input: Input, session: Session) -> ! {
             }
             printable @ 0x20..=0x7E if length < MAX_LINE - 1 => {
                 history_cursor = None;
+                let mask = should_mask_shell_input(&line[..length], printable);
                 line[length] = printable;
                 length += 1;
-                print!("{}", printable as char);
+                print!("{}", if mask { '*' } else { printable as char });
             }
             _ => {}
         }
@@ -238,7 +241,7 @@ impl Shell {
         );
         seed_content(
             &mut content[5],
-            b"Network Driver Form: RTL8139, Ethernet, ARP, IPv4, ICMP, UDP, DNS, TCP and HTTP",
+            b"Network Driver Form: RTL8139, Ethernet, ARP, IPv4, ICMP, UDP, DNS, TCP, HTTP and verified TLS 1.3 HTTPS",
         );
         Self {
             report,
@@ -335,9 +338,19 @@ impl Shell {
             }
             "journal" => {
                 println!(
-                    "HexaFS in-memory journal sequence #{}",
+                    "Form metadata journal sequence #{} (current boot)",
                     self.journal_sequence
                 );
+                match crate::state::loaded_generation() {
+                    Some(generation) => println!(
+                        "persistent account/settings journal generation #{}",
+                        generation
+                    ),
+                    None if crate::state::persistent_available() => {
+                        println!("persistent account/settings disk is blank")
+                    }
+                    None => println!("persistent account/settings disk is unavailable"),
+                }
                 true
             }
             "history" => {
@@ -396,15 +409,21 @@ impl Shell {
             }
             "mode" => {
                 println!("active: VGA text 80x25, mirrored COM1 serial");
-                println!("legacy VBE framebuffer modes: make run-alpha");
+                let requested = crate::framebuffer::requested_mode();
+                println!(
+                    "HexaDisplay preset: {} ({}x{}), applied on graphical entry",
+                    requested.label(),
+                    requested.width(),
+                    requested.height()
+                );
                 true
             }
             "displayinfo" => {
                 println!("HexaDisplay protocol v1: surfaces attach damage commit focus hit-test");
                 println!(
                     "framebuffer: {}x{} XRGB8888 scanout available={}",
-                    crate::framebuffer::WIDTH,
-                    crate::framebuffer::HEIGHT,
+                    crate::framebuffer::width(),
+                    crate::framebuffer::height(),
                     crate::framebuffer::available()
                 );
                 println!("buffer protocols: XRGB8888 ARGB8888 RGB565 TextCells");
@@ -705,7 +724,7 @@ impl Shell {
             "  date clock cpuinfo features kernelcaps lspci neofetch sysinfo mem free env uptime ps"
         );
         println!("  kstat dmesg bootlog ifconfig netstat ping <IPv4-address> [count]");
-        println!("  dns <host>  fetch <http://host[:port]/path>  mode");
+        println!("  dns <host>  fetch <http[s]://host[:port]/path>  mode");
         println!("  calc len hex reverse tolower toupper factor rand sleep true false");
     }
 
@@ -731,6 +750,11 @@ impl Shell {
         println!("active Forms: {}  active Handles: {}", active, handle_count);
         println!("typed relationships: {}", self.relationships.count());
         println!("journal sequence: {}", self.journal_sequence);
+        match crate::state::loaded_generation() {
+            Some(generation) => println!("saved state generation: {}", generation),
+            None if crate::state::persistent_available() => println!("saved state: blank disk"),
+            None => println!("saved state: unavailable"),
+        }
     }
 
     fn ping(&self, arguments: &str) {
@@ -834,11 +858,11 @@ impl Shell {
     fn fetch(&self, arguments: &str) {
         let mut words = arguments.split_ascii_whitespace();
         let Some(url) = words.next() else {
-            println!("usage: fetch <http://host[:port]/path>");
+            println!("usage: fetch <http[s]://host[:port]/path>");
             return;
         };
         if words.next().is_some() {
-            println!("usage: fetch <http://host[:port]/path>");
+            println!("usage: fetch <http[s]://host[:port]/path>");
             return;
         }
         let Some(handle_id) = self.network_handle("fetch") else {
@@ -1840,6 +1864,46 @@ fn is_operator_command(name: &str) -> bool {
 
 fn is_sensitive_command(name: &str) -> bool {
     matches!(name, "useradd" | "passwd")
+}
+
+fn should_mask_shell_input(line: &[u8], next: u8) -> bool {
+    if next.is_ascii_whitespace() {
+        return false;
+    }
+    let Ok(line) = core::str::from_utf8(line) else {
+        return false;
+    };
+    let mut words = line.split_ascii_whitespace();
+    let Some(command) = words.next() else {
+        return false;
+    };
+    let required_words = match command {
+        "useradd" => 3,
+        "passwd" => 2,
+        _ => return false,
+    };
+    let word_count = 1 + words.count();
+    word_count > required_words
+        || (word_count == required_words
+            && line
+                .as_bytes()
+                .last()
+                .is_some_and(|byte| byte.is_ascii_whitespace()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_mask_shell_input;
+
+    #[test]
+    fn masks_account_password_arguments_only() {
+        assert!(!should_mask_shell_input(b"useradd artist power", b'x'));
+        assert!(should_mask_shell_input(b"useradd artist power ", b'x'));
+        assert!(should_mask_shell_input(b"useradd artist power x", b'y'));
+        assert!(!should_mask_shell_input(b"passwd artist", b'x'));
+        assert!(should_mask_shell_input(b"passwd artist ", b'x'));
+        assert!(!should_mask_shell_input(b"echo public ", b'x'));
+    }
 }
 
 const fn authority_name(authority: Authority) -> &'static str {

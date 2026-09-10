@@ -2,8 +2,9 @@
 //!
 //! The stack is deliberately small and allocation-free: a polling RTL8139
 //! driver, Ethernet/ARP, static IPv4, ICMP echo, checksum-correct UDP, DNS A
-//! queries, a single synchronous TCP client, and bounded HTTP/1.0 GET.  TLS,
-//! DHCP, IPv6, TCP servers, and concurrent sockets are not implemented.
+//! queries, a single synchronous TCP client, and bounded HTTP/1.0 GET. TLS 1.3
+//! is layered over the streaming TCP interface in `crate::tls`; DHCP, IPv6,
+//! TCP servers, and concurrent sockets are not implemented.
 
 use crate::{port, println, slog};
 use core::sync::atomic::{compiler_fence, Ordering};
@@ -58,6 +59,8 @@ const DNS_PACKET_CAPACITY: usize = 512;
 const HTTP_REQUEST_CAPACITY: usize = 768;
 const HTTP_WIRE_CAPACITY: usize = 8 * 1024;
 pub const HTTP_BODY_CAPACITY: usize = 4096;
+const TCP_PAYLOAD_CAPACITY: usize = 1500 - 20 - TCP_HEADER_SIZE;
+const TCP_RECEIVE_WINDOW: u16 = 32 * 1024;
 
 const TCP_FIN: u8 = 0x01;
 const TCP_SYN: u8 = 0x02;
@@ -84,6 +87,10 @@ pub enum NetworkError {
     MalformedDns,
     TcpTimeout,
     TcpReset,
+    EntropyUnavailable,
+    TlsHandshake,
+    TlsCertificate,
+    TlsProtocol,
     MalformedHttp,
 }
 
@@ -95,9 +102,7 @@ impl NetworkError {
             Self::BadAddress => "invalid IPv4 address",
             Self::BadHostname => "invalid DNS hostname",
             Self::BadUrl => "invalid HTTP URL",
-            Self::UnsupportedScheme => {
-                "only plain http:// URLs are supported; HTTPS/TLS is not implemented"
-            }
+            Self::UnsupportedScheme => "URL scheme must be http:// or https://",
             Self::NoDevice => "RTL8139 network device is unavailable",
             Self::LinkDown => "RTL8139 link is down",
             Self::ArpTimeout => "ARP neighbor resolution timed out",
@@ -109,10 +114,22 @@ impl NetworkError {
             Self::MalformedDns => "malformed DNS response",
             Self::TcpTimeout => "TCP peer timed out",
             Self::TcpReset => "TCP peer reset the connection",
+            Self::EntropyUnavailable => "secure hardware entropy is unavailable",
+            Self::TlsHandshake => "TLS 1.3 handshake failed",
+            Self::TlsCertificate => "TLS certificate or hostname verification failed",
+            Self::TlsProtocol => "TLS peer returned an unsupported or malformed record",
             Self::MalformedHttp => "malformed or incomplete HTTP response",
         }
     }
 }
+
+impl core::fmt::Display for NetworkError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(self.message())
+    }
+}
+
+impl core::error::Error for NetworkError {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UdpReply {
@@ -138,9 +155,29 @@ impl HttpResponse {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HttpUrl<'a> {
+    pub scheme: HttpScheme,
     pub host: &'a str,
     pub port: u16,
     pub path: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HttpScheme {
+    Http,
+    Https,
+}
+
+impl HttpScheme {
+    pub const fn default_port(self) -> u16 {
+        match self {
+            Self::Http => 80,
+            Self::Https => 443,
+        }
+    }
+
+    pub const fn is_secure(self) -> bool {
+        matches!(self, Self::Https)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -692,7 +729,7 @@ impl NetworkStack {
         segment[8..12].copy_from_slice(&acknowledgement.to_be_bytes());
         segment[12] = ((header_length / 4) as u8) << 4;
         segment[13] = flags;
-        segment[14..16].copy_from_slice(&(HTTP_WIRE_CAPACITY as u16).to_be_bytes());
+        segment[14..16].copy_from_slice(&TCP_RECEIVE_WINDOW.to_be_bytes());
         segment[16..20].fill(0);
         if syn {
             // MSS 1460.  Avoiding window scaling and timestamps keeps this
@@ -703,6 +740,92 @@ impl NetworkStack {
         let checksum = transport_checksum(LOCAL_IP, destination, 6, &segment[..length]);
         segment[16..18].copy_from_slice(&checksum.to_be_bytes());
         self.send_ipv4(destination_mac, destination, 6, &segment[..length])
+    }
+
+    fn tcp_connect(
+        &mut self,
+        destination: [u8; 4],
+        destination_port: u16,
+    ) -> Result<TcpConnection<'_>, NetworkError> {
+        self.prepare_transport()?;
+        if destination_port == 0 {
+            return Err(NetworkError::BadAddress);
+        }
+        let destination_mac = self
+            .resolve_neighbor(destination)
+            .map_err(NetworkError::from)?;
+        let source_port = self.allocate_ephemeral_port();
+        let initial_sequence = (crate::hardware::timestamp() as u32)
+            .wrapping_add((source_port as u32) << 16)
+            .max(1);
+        let mut frame = [0_u8; MAX_FRAME_SIZE];
+        let mut remote_next = None;
+
+        for _ in 0..TRANSPORT_RETRIES {
+            self.send_tcp_segment(
+                destination_mac,
+                destination,
+                source_port,
+                destination_port,
+                initial_sequence,
+                0,
+                TCP_SYN,
+                &[],
+            )?;
+            for _ in 0..RECEIVE_WAIT_LIMIT {
+                if let Some(length) = self.receive_frame(&mut frame) {
+                    self.answer_local_requests(&frame[..length]);
+                    let Some(packet) = parse_tcp_packet(
+                        &frame[..length],
+                        destination,
+                        destination_port,
+                        source_port,
+                    ) else {
+                        continue;
+                    };
+                    if packet.flags & TCP_RST != 0 {
+                        return Err(NetworkError::TcpReset);
+                    }
+                    if packet.flags & (TCP_SYN | TCP_ACK) == (TCP_SYN | TCP_ACK)
+                        && packet.acknowledgement == initial_sequence.wrapping_add(1)
+                    {
+                        remote_next = Some(packet.sequence.wrapping_add(1));
+                        break;
+                    }
+                }
+                core::hint::spin_loop();
+            }
+            if remote_next.is_some() {
+                break;
+            }
+        }
+
+        let remote_next = remote_next.ok_or(NetworkError::TcpTimeout)?;
+        let local_next = initial_sequence.wrapping_add(1);
+        self.send_tcp_segment(
+            destination_mac,
+            destination,
+            source_port,
+            destination_port,
+            local_next,
+            remote_next,
+            TCP_ACK,
+            &[],
+        )?;
+        Ok(TcpConnection {
+            stack: self,
+            destination_mac,
+            destination,
+            source_port,
+            destination_port,
+            local_next,
+            remote_next,
+            pending: [0; TCP_PAYLOAD_CAPACITY],
+            pending_offset: 0,
+            pending_length: 0,
+            remote_closed: false,
+            local_closed: false,
+        })
     }
 
     fn tcp_exchange(
@@ -932,6 +1055,240 @@ impl NetworkStack {
     }
 }
 
+/// One established, in-order TCP stream backed by the polling RTL8139 stack.
+///
+/// ExpOS currently serializes network clients behind `NETWORK`, so the stream
+/// borrows the stack exclusively for its lifetime. That is enough for TLS and
+/// HTTP while making the transport a real byte stream instead of a single
+/// request/response shortcut.
+struct TcpConnection<'a> {
+    stack: &'a mut NetworkStack,
+    destination_mac: [u8; 6],
+    destination: [u8; 4],
+    source_port: u16,
+    destination_port: u16,
+    local_next: u32,
+    remote_next: u32,
+    pending: [u8; TCP_PAYLOAD_CAPACITY],
+    pending_offset: usize,
+    pending_length: usize,
+    remote_closed: bool,
+    local_closed: bool,
+}
+
+impl TcpConnection<'_> {
+    fn send_segment(
+        &mut self,
+        sequence: u32,
+        flags: u8,
+        payload: &[u8],
+    ) -> Result<(), NetworkError> {
+        self.stack.send_tcp_segment(
+            self.destination_mac,
+            self.destination,
+            self.source_port,
+            self.destination_port,
+            sequence,
+            self.remote_next,
+            flags,
+            payload,
+        )
+    }
+
+    fn send_ack(&mut self) -> Result<(), NetworkError> {
+        self.send_segment(self.local_next, TCP_ACK, &[])
+    }
+
+    fn drain_pending(&mut self, output: &mut [u8]) -> usize {
+        let available = self.pending_length.saturating_sub(self.pending_offset);
+        let copied = available.min(output.len());
+        if copied != 0 {
+            output[..copied]
+                .copy_from_slice(&self.pending[self.pending_offset..self.pending_offset + copied]);
+            self.pending_offset += copied;
+        }
+        if self.pending_offset == self.pending_length {
+            self.pending_offset = 0;
+            self.pending_length = 0;
+        }
+        copied
+    }
+
+    fn receive_into_pending(&mut self, frame: &[u8]) -> Result<(bool, bool), NetworkError> {
+        let Some(packet) = parse_tcp_packet(
+            frame,
+            self.destination,
+            self.destination_port,
+            self.source_port,
+        ) else {
+            return Ok((false, false));
+        };
+        if packet.flags & TCP_RST != 0 {
+            return Err(NetworkError::TcpReset);
+        }
+
+        let acknowledges_local =
+            packet.flags & TCP_ACK != 0 && packet.acknowledgement == self.local_next;
+        let mut accepted_data = false;
+        if packet.sequence == self.remote_next {
+            if !packet.payload.is_empty() && self.pending_length == 0 {
+                let copied = packet.payload.len().min(self.pending.len());
+                self.pending[..copied].copy_from_slice(&packet.payload[..copied]);
+                self.pending_offset = 0;
+                self.pending_length = copied;
+                if copied != packet.payload.len() {
+                    return Err(NetworkError::TlsProtocol);
+                }
+                self.remote_next = self.remote_next.wrapping_add(packet.payload.len() as u32);
+                accepted_data = true;
+            }
+            if packet.flags & TCP_FIN != 0 {
+                self.remote_next = self.remote_next.wrapping_add(1);
+                self.remote_closed = true;
+                accepted_data = true;
+            }
+        }
+        if accepted_data || (!packet.payload.is_empty() && packet.sequence != self.remote_next) {
+            self.send_ack()?;
+        }
+        Ok((true, acknowledges_local))
+    }
+
+    fn write_stream(&mut self, input: &[u8]) -> Result<usize, NetworkError> {
+        if self.local_closed || self.remote_closed {
+            return Err(NetworkError::TcpReset);
+        }
+        if input.is_empty() {
+            return Ok(0);
+        }
+        let written = input.len().min(TCP_PAYLOAD_CAPACITY);
+        let payload = &input[..written];
+        let sequence = self.local_next;
+        let expected_ack = sequence.wrapping_add(written as u32);
+        let mut frame = [0_u8; MAX_FRAME_SIZE];
+
+        for _ in 0..TRANSPORT_RETRIES {
+            self.send_segment(sequence, TCP_ACK | TCP_PSH, payload)?;
+            for _ in 0..RECEIVE_WAIT_LIMIT {
+                let Some(length) = self.stack.receive_frame(&mut frame) else {
+                    core::hint::spin_loop();
+                    continue;
+                };
+                self.stack.answer_local_requests(&frame[..length]);
+                let acknowledgement = parse_tcp_packet(
+                    &frame[..length],
+                    self.destination,
+                    self.destination_port,
+                    self.source_port,
+                )
+                .filter(|packet| packet.flags & TCP_ACK != 0)
+                .map(|packet| packet.acknowledgement);
+
+                // Install the sequence before processing a data-bearing ACK,
+                // because an immediate response must be acknowledged with the
+                // next local sequence number.
+                if acknowledgement == Some(expected_ack) {
+                    self.local_next = expected_ack;
+                }
+                let (_, acknowledged) = self.receive_into_pending(&frame[..length])?;
+                if acknowledged || acknowledgement == Some(expected_ack) {
+                    self.local_next = expected_ack;
+                    return Ok(written);
+                }
+            }
+        }
+        Err(NetworkError::TcpTimeout)
+    }
+
+    fn read_stream(&mut self, output: &mut [u8]) -> Result<usize, NetworkError> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        let copied = self.drain_pending(output);
+        if copied != 0 {
+            return Ok(copied);
+        }
+        if self.remote_closed {
+            return Ok(0);
+        }
+
+        let mut frame = [0_u8; MAX_FRAME_SIZE];
+        for retry in 0..TRANSPORT_RETRIES {
+            for _ in 0..RECEIVE_WAIT_LIMIT {
+                let Some(length) = self.stack.receive_frame(&mut frame) else {
+                    core::hint::spin_loop();
+                    continue;
+                };
+                self.stack.answer_local_requests(&frame[..length]);
+                self.receive_into_pending(&frame[..length])?;
+                let copied = self.drain_pending(output);
+                if copied != 0 {
+                    return Ok(copied);
+                }
+                if self.remote_closed {
+                    return Ok(0);
+                }
+            }
+            if retry + 1 < TRANSPORT_RETRIES {
+                // A duplicate ACK prompts a peer with missing data to
+                // retransmit without fabricating any application bytes.
+                self.send_ack()?;
+            }
+        }
+        Err(NetworkError::TcpTimeout)
+    }
+
+    fn close_stream(&mut self) {
+        if self.local_closed {
+            return;
+        }
+        let _ = self.send_segment(self.local_next, TCP_FIN | TCP_ACK, &[]);
+        self.local_next = self.local_next.wrapping_add(1);
+        self.local_closed = true;
+    }
+}
+
+impl Drop for TcpConnection<'_> {
+    fn drop(&mut self) {
+        self.close_stream();
+    }
+}
+
+impl embedded_io::Error for NetworkError {
+    fn kind(&self) -> embedded_io::ErrorKind {
+        match self {
+            Self::TcpTimeout | Self::ReplyTimeout | Self::DnsTimeout => {
+                embedded_io::ErrorKind::TimedOut
+            }
+            Self::TcpReset => embedded_io::ErrorKind::ConnectionReset,
+            Self::BadAddress | Self::BadHostname | Self::BadUrl | Self::UnsupportedScheme => {
+                embedded_io::ErrorKind::InvalidInput
+            }
+            _ => embedded_io::ErrorKind::Other,
+        }
+    }
+}
+
+impl embedded_io::ErrorType for TcpConnection<'_> {
+    type Error = NetworkError;
+}
+
+impl embedded_io::Read for TcpConnection<'_> {
+    fn read(&mut self, output: &mut [u8]) -> Result<usize, Self::Error> {
+        self.read_stream(output)
+    }
+}
+
+impl embedded_io::Write for TcpConnection<'_> {
+    fn write(&mut self, input: &[u8]) -> Result<usize, Self::Error> {
+        self.write_stream(input)
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
 static NETWORK: crate::sync::SpinMutex<NetworkStack> =
     crate::sync::SpinMutex::new(NetworkStack::new());
 
@@ -1014,8 +1371,9 @@ pub fn print_statistics() {
         network.received_packets,
         network.dropped_packets
     );
-    println!("transport: Ethernet + ARP + static IPv4 + ICMP + UDP/DNS + TCP/HTTP");
-    println!("tls/https/dhcp/ipv6: not implemented");
+    println!("transport: Ethernet + ARP + static IPv4 + ICMP + UDP/DNS + TCP");
+    println!("application: HTTP/1.0 + verified TLS 1.3 HTTPS");
+    println!("dhcp/ipv6: not implemented");
 }
 
 pub fn ping_text(
@@ -1164,13 +1522,14 @@ pub fn dns_lookup(
 }
 
 /// Parse the intentionally narrow URL syntax accepted by the native client.
-/// `http://host[:port]/path` is supported.  HTTPS is rejected because this
-/// kernel has no TLS implementation.
+/// Both `http://host[:port]/path` and `https://host[:port]/path` are accepted;
+/// certificate validation still requires a DNS hostname for secure URLs.
 pub fn parse_http_url(url: &str) -> Result<HttpUrl<'_>, NetworkError> {
-    if url.starts_with("https://") {
-        return Err(NetworkError::UnsupportedScheme);
-    }
-    let Some(rest) = url.strip_prefix("http://") else {
+    let (scheme, rest) = if let Some(rest) = url.strip_prefix("https://") {
+        (HttpScheme::Https, rest)
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        (HttpScheme::Http, rest)
+    } else {
         return Err(NetworkError::UnsupportedScheme);
     };
     let without_fragment = rest.split_once('#').map_or(rest, |(before, _)| before);
@@ -1195,8 +1554,11 @@ pub fn parse_http_url(url: &str) -> Result<HttpUrl<'_>, NetworkError> {
         }
         (host, port)
     } else {
-        (authority, 80)
+        (authority, scheme.default_port())
     };
+    if scheme.is_secure() && parse_ipv4(host).is_some() {
+        return Err(NetworkError::BadHostname);
+    }
     if parse_ipv4(host).is_none() {
         validate_hostname(host)?;
     }
@@ -1206,7 +1568,12 @@ pub fn parse_http_url(url: &str) -> Result<HttpUrl<'_>, NetworkError> {
     {
         return Err(NetworkError::BadUrl);
     }
-    Ok(HttpUrl { host, port, path })
+    Ok(HttpUrl {
+        scheme,
+        host,
+        port,
+        path,
+    })
 }
 
 /// Perform a bounded HTTP/1.0 GET.  Capability authorization happens before
@@ -1226,7 +1593,7 @@ pub fn http_get(
     append_bytes(&mut request, &mut request_length, parsed.path.as_bytes())?;
     append_bytes(&mut request, &mut request_length, b" HTTP/1.0\r\nHost: ")?;
     append_bytes(&mut request, &mut request_length, parsed.host.as_bytes())?;
-    if parsed.port != 80 {
+    if parsed.port != parsed.scheme.default_port() {
         append_bytes(&mut request, &mut request_length, b":")?;
         append_decimal_u16(&mut request, &mut request_length, parsed.port)?;
     }
@@ -1239,8 +1606,12 @@ pub fn http_get(
     let mut network = NETWORK.lock();
     let peer = network.dns_lookup(parsed.host)?;
     let mut wire = [0_u8; HTTP_WIRE_CAPACITY];
-    let (wire_length, wire_truncated) =
-        network.tcp_exchange(peer, parsed.port, &request[..request_length], &mut wire)?;
+    let (wire_length, wire_truncated) = if parsed.scheme.is_secure() {
+        let stream = network.tcp_connect(peer, parsed.port)?;
+        crate::tls::https_exchange(stream, parsed.host, &request[..request_length], &mut wire)?
+    } else {
+        network.tcp_exchange(peer, parsed.port, &request[..request_length], &mut wire)?
+    };
     parse_http_response(peer, &wire[..wire_length], wire_truncated)
 }
 

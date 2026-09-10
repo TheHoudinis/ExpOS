@@ -6,19 +6,24 @@ ExpOS is the Form-native HexaOS rebuild described by
 - an x86_64 Multiboot2 kernel with VGA, serial, PS/2 keyboard and mouse input;
 - FIN identity, Dimensions, PIMP/DIESE policy, capability-scoped Form Handles,
   typed relationships and transactional HexaFS metadata;
-- HexaDisplay, a 1920x1080 software compositor with Form-owned surfaces;
+- HexaDisplay, a runtime-selectable 640x480, 1280x720 or 1920x1080 software
+  compositor with Form-owned surfaces;
 - a flat dark desktop with an application menu and taskbar, no default or
   pinned applications, and movable, closable, minimizable and maximizable
   windows;
 - an interactive Settings control center for appearance, display, input,
-  network, Wi-Fi, Bluetooth, privacy and system behavior;
+  network, Wi-Fi, Bluetooth, privacy and system behavior, including four
+  themes, five procedural wallpapers and four cursor themes;
 - readable case-sensitive 8x8 framebuffer text and an expanded 8x16 VGA
   console font;
 - Ayo v3 package installation, verification, ownership, rollback and recovery;
 - a capability-gated RTL8139 network path with Ethernet, ARP, static IPv4,
-  ICMP, UDP, DNS A lookup, one bounded TCP client and HTTP/1.0 GET;
-- a graphical Browser that fetches and renders bounded `http://` documents;
-- graphical and console login for Operator, Power and Guest authority.
+  ICMP, UDP, DNS A lookup, one bounded TCP client and HTTP/1.0 GET over plain
+  TCP or authenticated TLS 1.3;
+- a graphical Browser that fetches and renders bounded `http://` and
+  `https://` documents;
+- graphical and console login for Operator, Power and Guest authority;
+- dedicated ATA PIO persistent state for accounts and desktop preferences.
 
 The 32-bit Diamond II source remains isolated under `legacy/alpha32/` as a
 buildable migration reference.
@@ -35,6 +40,8 @@ make check          # boot and exercise the command environment
 make display-check  # verify desktop and window lifecycle
 make network-check  # verify ICMP, TCP, HTTP and Browser against a local fixture
 make internet-check # verify live DNS and public HTTP (requires Internet access)
+make https-check    # verify TLS and fetch youtube.com HTML (requires Internet)
+make persistence-check # verify accounts/settings across two boots
 make ayo            # test and build Ayo v3
 make all            # run the complete native test suite
 ```
@@ -45,6 +52,11 @@ Run the image with:
 make run
 ```
 
+`make run` creates `runtime/expos-state.img` once and attaches it as the
+primary ATA disk. Account and customization changes are journaled there. The
+image is intentionally preserved by `make clean`; copy it to back up the
+current local state.
+
 Choose `1` for the graphical environment or `2` for the console. The built-in
 development accounts are:
 
@@ -54,8 +66,12 @@ development accounts are:
 | `developer` | `prism` | Power |
 | `guest` | `guest` | Guest |
 
-These accounts are for development only. Runtime account changes are not
-persistent.
+These accounts and their short passwords are retained for development
+compatibility. Newly set passwords must contain 8-23 printable characters.
+Accounts and password changes persist when the state image is available.
+Passwords are never stored as plaintext or reversible ciphertext: ExpOS stores
+a per-account salt and a PBKDF2-HMAC-SHA256 verifier with 25,000 rounds.
+Password arguments are masked while typed and omitted from shell history.
 
 ## Desktop
 
@@ -76,14 +92,18 @@ Super+Q         Close
 Esc             Return to the console
 ```
 
-The graphical Terminal supports bounded command history with Up and Down. In
-Browser, click the address field or press `/`, type a plain `http://` URL, and
-press Enter.
+The graphical Terminal has 40 lines of scrollback, 24 history entries with Up
+and Down recall, and commands for identity, status, display, networking,
+applications, users and basic shell-style operations. Run `help` inside it for
+the exact list. In Browser, click the address field or press `/`, type an
+`http://` or `https://` URL, and press Enter.
 
 Settings controls are clickable and keyboard-accessible. Appearance, taskbar,
-status-area, border, contrast and pointer-speed changes take effect immediately
-and remain active for the current boot. The Network switch is enforced by the
-native packet path through a requester-bound Configure Handle; it is not a
+status-area, border, contrast, pointer-speed, theme, wallpaper and cursor
+changes take effect immediately and persist. Resolution can be selected as
+480p (640x480), 720p (1280x720) or 1080p (1920x1080); it is saved immediately
+and applied when the desktop is reopened. The Network switch is enforced by
+the native packet path through a requester-bound Configure Handle; it is not a
 painted UI flag.
 
 ## Network and Browser
@@ -98,20 +118,28 @@ The native stack supports:
 - static IPv4 and ICMP echo;
 - checksum-validated UDP and DNS A records;
 - one synchronous, bounded outbound TCP connection;
-- bounded HTTP/1.0 GET requests and Browser rendering for `http://` URLs.
+- bounded HTTP/1.0 GET requests and Browser rendering for `http://` URLs;
+- authenticated TLS 1.3 and `https://` GET with hardware RDRAND entropy, SNI
+  and hostname checks, RTC certificate-validity checks, and certificate-chain
+  and signature verification.
 
 Use `ifconfig`, `ping`, `dns`, `fetch` and `netstat` in the console to inspect
-and exercise the network. Type an `http://` URL in Browser to fetch it through
-the same native stack.
+and exercise the network. Type an `http://` or `https://` URL in Browser to
+fetch it through the same native stack. `make https-check` performs a verified
+fetch of the HTML returned by `https://www.youtube.com/`.
 
 Settings reports Ethernet carrier state and separately reports Wi-Fi and
 Bluetooth hardware presence, driver state and requested power state. ExpOS
 does not claim a connection when an adapter or driver is unavailable.
 
-This is not a modern standards-complete browser. HTTPS/TLS, DHCP, IPv6,
-physical Wi-Fi drivers, a USB host/Bluetooth data path, concurrent sockets, TCP
-servers, CSS, JavaScript, cookies, downloads and media decoding are not
-implemented. HTTP response and document sizes are fixed and bounded.
+This is not a modern standards-complete browser. Fetching YouTube's HTML does
+**not** mean YouTube playback works: CSS, JavaScript, media containers/codecs,
+audio and video output are not implemented. DHCP, IPv6, physical Wi-Fi drivers,
+a USB host/Bluetooth data path, concurrent sockets, TCP servers, cookies and
+downloads are also absent. HTTP, TLS record and certificate-chain buffers are
+fixed and bounded. The embedded Web PKI store currently contains only the
+GlobalSign Root R1 trust anchor, so HTTPS sites chaining to other roots are not
+accepted.
 
 ## Ayo v3
 
@@ -132,8 +160,9 @@ The command environment includes Form, Dimension, relationship, capability,
 account, display, package, hardware and network commands. Run `help` for the
 current list. Password-bearing commands are excluded from history.
 
-Form state, accounts and PIMP changes remain in memory until native HexaFS block
-persistence is connected.
+Accounts and Settings preferences are persisted through the dedicated state
+disk. General Form contents and PIMP changes remain in memory until native
+HexaFS block persistence is connected.
 
 ## Preserved implementation
 

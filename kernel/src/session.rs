@@ -1,7 +1,7 @@
 use crate::{
-    framebuffer,
+    crypto, framebuffer,
     input::{Input, InputEvent},
-    print, println, slog,
+    print, println, slog, state,
 };
 use framebuffer::color;
 use hexa_core::Authority;
@@ -110,7 +110,9 @@ impl Session {
 #[derive(Clone, Copy)]
 struct Account {
     name: Field,
-    password: Field,
+    password_salt: [u8; crypto::PASSWORD_SALT_LEN],
+    password_hash: [u8; crypto::PASSWORD_HASH_LEN],
+    kdf_rounds: u32,
     authority: Authority,
     occupied: bool,
 }
@@ -118,15 +120,28 @@ struct Account {
 impl Account {
     const EMPTY: Self = Self {
         name: Field::EMPTY,
-        password: Field::EMPTY,
+        password_salt: [0; crypto::PASSWORD_SALT_LEN],
+        password_hash: [0; crypto::PASSWORD_HASH_LEN],
+        kdf_rounds: 0,
         authority: Authority::Guest,
         occupied: false,
     };
 
-    const fn builtin(name: &[u8], password: &[u8], authority: Authority) -> Self {
+    fn with_password(name: Field, password: &[u8], authority: Authority) -> Self {
+        let (password_salt, entropy) = crypto::password_salt(name.as_bytes());
+        if entropy == crypto::SaltEntropy::Degraded {
+            slog!(
+                "HEXA_PASSWORD_SALT_ENTROPY degraded user={}\r\n",
+                name.as_str()
+            );
+        }
+        let password_hash =
+            crypto::password_hash(password, &password_salt, crypto::PASSWORD_KDF_ROUNDS);
         Self {
-            name: Field::from_static(name),
-            password: Field::from_static(password),
+            name,
+            password_salt,
+            password_hash,
+            kdf_rounds: crypto::PASSWORD_KDF_ROUNDS,
             authority,
             occupied: true,
         }
@@ -138,24 +153,136 @@ impl Account {
             authority: self.authority,
         }
     }
+
+    fn verify_password(self, password: &[u8]) -> bool {
+        if !self.occupied || self.kdf_rounds == 0 {
+            return false;
+        }
+        let mut candidate = crypto::password_hash(password, &self.password_salt, self.kdf_rounds);
+        let matches = crypto::constant_time_eq(&candidate, &self.password_hash);
+        crypto::wipe(&mut candidate);
+        matches
+    }
+
+    fn stored(self) -> state::StoredAccount {
+        let mut stored = state::StoredAccount::EMPTY;
+        stored.name = self.name.bytes;
+        stored.name_len = self.name.len;
+        stored.password_salt = self.password_salt;
+        stored.password_hash = self.password_hash;
+        stored.kdf_rounds = self.kdf_rounds;
+        stored.authority = authority_to_wire(self.authority);
+        stored.occupied = self.occupied;
+        stored
+    }
+
+    fn from_stored(stored: state::StoredAccount) -> Option<Self> {
+        if !stored.occupied {
+            return Some(Self::EMPTY);
+        }
+        let name = Field {
+            bytes: stored.name,
+            len: stored.name_len,
+        };
+        if !valid_name(name.as_bytes()) || stored.kdf_rounds < 1_000 || stored.kdf_rounds > 250_000
+        {
+            return None;
+        }
+        Some(Self {
+            name,
+            password_salt: stored.password_salt,
+            password_hash: stored.password_hash,
+            kdf_rounds: stored.kdf_rounds,
+            authority: authority_from_wire(stored.authority)?,
+            occupied: true,
+        })
+    }
 }
 
+#[derive(Clone, Copy)]
 struct AccountStore {
     accounts: [Account; MAX_ACCOUNTS],
 }
 
 impl AccountStore {
     const fn new() -> Self {
-        let mut accounts = [Account::EMPTY; MAX_ACCOUNTS];
-        accounts[0] = Account::builtin(b"operator", b"expos", Authority::Operator);
-        accounts[1] = Account::builtin(b"developer", b"prism", Authority::Power);
-        accounts[2] = Account::builtin(b"guest", b"guest", Authority::Guest);
-        Self { accounts }
+        Self {
+            accounts: [Account::EMPTY; MAX_ACCOUNTS],
+        }
+    }
+
+    fn builtins() -> Self {
+        let mut store = Self::new();
+        store.accounts[0] = Account::with_password(
+            Field::from_static(b"operator"),
+            b"expos",
+            Authority::Operator,
+        );
+        store.accounts[1] =
+            Account::with_password(Field::from_static(b"developer"), b"prism", Authority::Power);
+        store.accounts[2] =
+            Account::with_password(Field::from_static(b"guest"), b"guest", Authority::Guest);
+        store
+    }
+
+    fn from_persistent(stored: [state::StoredAccount; MAX_ACCOUNTS]) -> Option<Self> {
+        let mut store = Self::new();
+        for (index, stored_account) in stored.into_iter().enumerate() {
+            store.accounts[index] = Account::from_stored(stored_account)?;
+        }
+        for left in 0..MAX_ACCOUNTS {
+            if !store.accounts[left].occupied {
+                continue;
+            }
+            for right in left + 1..MAX_ACCOUNTS {
+                if store.accounts[right].occupied
+                    && store.accounts[left].name.as_bytes() == store.accounts[right].name.as_bytes()
+                {
+                    return None;
+                }
+            }
+        }
+        let protected_operator = store.accounts.iter().any(|account| {
+            account.occupied
+                && account.name.as_bytes() == b"operator"
+                && account.authority == Authority::Operator
+        });
+        protected_operator.then_some(store)
+    }
+
+    fn persistent(self) -> [state::StoredAccount; MAX_ACCOUNTS] {
+        let mut stored = [state::StoredAccount::EMPTY; MAX_ACCOUNTS];
+        for (output, account) in stored.iter_mut().zip(self.accounts) {
+            *output = account.stored();
+        }
+        stored
     }
 }
 
 static ACCOUNTS: crate::sync::SpinMutex<AccountStore> =
     crate::sync::SpinMutex::new(AccountStore::new());
+
+/// Load hashed accounts from the state journal, or create and journal the
+/// protected defaults on a blank/corrupt/unavailable store.
+pub fn initialize() {
+    let loaded = state::load_accounts().and_then(AccountStore::from_persistent);
+    let (accounts, source) = match loaded {
+        Some(accounts) => (accounts, "disk"),
+        None => (AccountStore::builtins(), "defaults"),
+    };
+    *ACCOUNTS.lock() = accounts;
+    if source == "defaults" {
+        match state::save_accounts(accounts.persistent()) {
+            Ok(()) => slog!("HEXA_ACCOUNTS_READY source=defaults persisted=true\r\n"),
+            Err(error) => slog!(
+                "HEXA_ACCOUNTS_READY source=defaults persisted=false error={:?}\r\n",
+                error
+            ),
+        }
+    } else {
+        slog!("HEXA_ACCOUNTS_READY source=disk persisted=true\r\n");
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccountError {
@@ -166,18 +293,20 @@ pub enum AccountError {
     Missing,
     Protected,
     Active,
+    Persistence,
 }
 
 impl AccountError {
     pub const fn message(self) -> &'static str {
         match self {
             Self::InvalidName => "name must be 2-16 lowercase letters, digits, - or _",
-            Self::InvalidPassword => "password must contain 4-23 printable characters",
+            Self::InvalidPassword => "password must contain 8-23 printable characters",
             Self::Duplicate => "that user already exists",
-            Self::Full => "the alpha account registry is full",
+            Self::Full => "the account registry is full",
             Self::Missing => "user not found",
             Self::Protected => "the built-in operator account is protected",
             Self::Active => "cannot delete the active user",
+            Self::Persistence => "persistent state commit failed; account was not changed",
         }
     }
 }
@@ -214,15 +343,17 @@ pub fn add_account(name: &str, password: &str, authority: Authority) -> Result<(
     {
         return Err(AccountError::Duplicate);
     }
-    let Some(slot) = store.accounts.iter_mut().find(|account| !account.occupied) else {
+    let mut candidate = *store;
+    let Some(slot) = candidate
+        .accounts
+        .iter_mut()
+        .find(|account| !account.occupied)
+    else {
         return Err(AccountError::Full);
     };
-    *slot = Account {
-        name: normalized,
-        password: Field::from_input(password.as_bytes(), false),
-        authority,
-        occupied: true,
-    };
+    *slot = Account::with_password(normalized, password.as_bytes(), authority);
+    state::save_accounts(candidate.persistent()).map_err(|_| AccountError::Persistence)?;
+    *store = candidate;
     Ok(())
 }
 
@@ -235,7 +366,8 @@ pub fn remove_account(name: &str, active_name: &str) -> Result<(), AccountError>
         return Err(AccountError::Active);
     }
     let mut store = ACCOUNTS.lock();
-    let Some(account) = store
+    let mut candidate = *store;
+    let Some(account) = candidate
         .accounts
         .iter_mut()
         .find(|account| account.occupied && account.name.as_bytes() == normalized.as_bytes())
@@ -243,6 +375,8 @@ pub fn remove_account(name: &str, active_name: &str) -> Result<(), AccountError>
         return Err(AccountError::Missing);
     };
     *account = Account::EMPTY;
+    state::save_accounts(candidate.persistent()).map_err(|_| AccountError::Persistence)?;
+    *store = candidate;
     Ok(())
 }
 
@@ -252,15 +386,35 @@ pub fn change_password(name: &str, password: &str) -> Result<(), AccountError> {
     }
     let normalized = Field::from_input(name.as_bytes(), true);
     let mut store = ACCOUNTS.lock();
-    let Some(account) = store
+    let mut candidate = *store;
+    let Some(account) = candidate
         .accounts
         .iter_mut()
         .find(|account| account.occupied && account.name.as_bytes() == normalized.as_bytes())
     else {
         return Err(AccountError::Missing);
     };
-    account.password = Field::from_input(password.as_bytes(), false);
+    *account = Account::with_password(account.name, password.as_bytes(), account.authority);
+    state::save_accounts(candidate.persistent()).map_err(|_| AccountError::Persistence)?;
+    *store = candidate;
     Ok(())
+}
+
+const fn authority_to_wire(authority: Authority) -> u8 {
+    match authority {
+        Authority::Operator => 0,
+        Authority::Power => 1,
+        Authority::Guest => 2,
+    }
+}
+
+const fn authority_from_wire(value: u8) -> Option<Authority> {
+    match value {
+        0 => Some(Authority::Operator),
+        1 => Some(Authority::Power),
+        2 => Some(Authority::Guest),
+        _ => None,
+    }
 }
 
 fn valid_name(name: &[u8]) -> bool {
@@ -271,7 +425,7 @@ fn valid_name(name: &[u8]) -> bool {
 }
 
 fn valid_password(password: &[u8]) -> bool {
-    (4..FIELD_CAPACITY).contains(&password.len())
+    (8..FIELD_CAPACITY).contains(&password.len())
         && password.iter().all(|byte| byte.is_ascii_graphic())
 }
 
@@ -282,8 +436,8 @@ pub fn choose_boot_mode(input: &mut Input) -> BootMode {
         return BootMode::Console;
     }
     let mut selected = BootMode::Graphical;
-    let mut pointer_x = (framebuffer::WIDTH / 2) as i16;
-    let mut pointer_y = (framebuffer::HEIGHT / 2) as i16;
+    let mut pointer_x = (framebuffer::width() / 2) as i16;
+    let mut pointer_y = (framebuffer::height() / 2) as i16;
     render_boot_mode(selected);
     draw_login_cursor(pointer_x, pointer_y);
     slog!("HEXA_BOOT_MODE_READY\r\n");
@@ -304,12 +458,12 @@ pub fn choose_boot_mode(input: &mut Input) -> BootMode {
             InputEvent::Pointer(pointer) => {
                 pointer_x = pointer_x
                     .saturating_add(pointer.dx)
-                    .clamp(0, framebuffer::WIDTH as i16 - 1);
+                    .clamp(0, framebuffer::width() as i16 - 1);
                 pointer_y = pointer_y
                     .saturating_add(pointer.dy)
-                    .clamp(0, framebuffer::HEIGHT as i16 - 1);
-                let center_x = framebuffer::WIDTH as i16 / 2;
-                let center_y = framebuffer::HEIGHT as i16 / 2;
+                    .clamp(0, framebuffer::height() as i16 - 1);
+                let center_x = framebuffer::width() as i16 / 2;
+                let center_y = framebuffer::height() as i16 / 2;
                 if pointer.pressed & 1 != 0 {
                     if (center_x - 250..center_x - 10).contains(&pointer_x)
                         && (center_y - 35..center_y + 45).contains(&pointer_y)
@@ -367,8 +521,8 @@ fn login_once(input: &mut Input, mode: BootMode) -> LoginAttempt {
     let mut password_len = 0;
     let mut password_field = false;
     let mut denied = false;
-    let mut pointer_x = (framebuffer::WIDTH / 2) as i16;
-    let mut pointer_y = (framebuffer::HEIGHT / 2) as i16;
+    let mut pointer_x = (framebuffer::width() / 2) as i16;
+    let mut pointer_y = (framebuffer::height() / 2) as i16;
     slog!("HEXA_LOGIN_READY\r\n");
     if graphical {
         render_login(
@@ -395,10 +549,10 @@ fn login_once(input: &mut Input, mode: BootMode) -> LoginAttempt {
             InputEvent::Pointer(pointer) if graphical => {
                 pointer_x = pointer_x
                     .saturating_add(pointer.dx)
-                    .clamp(0, framebuffer::WIDTH as i16 - 1);
+                    .clamp(0, framebuffer::width() as i16 - 1);
                 pointer_y = pointer_y
                     .saturating_add(pointer.dy)
-                    .clamp(0, framebuffer::HEIGHT as i16 - 1);
+                    .clamp(0, framebuffer::height() as i16 - 1);
                 if pointer.pressed & 1 != 0 {
                     let layout = login_layout();
                     if (layout.field_x..layout.field_x + layout.field_width)
@@ -415,9 +569,10 @@ fn login_once(input: &mut Input, mode: BootMode) -> LoginAttempt {
                         .contains(&(pointer_x as i32))
                         && (layout.sign_in_y..layout.sign_in_y + 42).contains(&(pointer_y as i32))
                     {
-                        if let Some(session) =
-                            authenticate(&username[..username_len], &password[..password_len])
-                        {
+                        let authenticated =
+                            authenticate(&username[..username_len], &password[..password_len]);
+                        crypto::wipe(&mut password);
+                        if let Some(session) = authenticated {
                             return LoginAttempt::Authenticated(complete_login(session, true));
                         }
                         denied = true;
@@ -428,6 +583,7 @@ fn login_once(input: &mut Input, mode: BootMode) -> LoginAttempt {
                         .contains(&(pointer_x as i32))
                         && (layout.switch_y..layout.switch_y + 34).contains(&(pointer_y as i32))
                     {
+                        crypto::wipe(&mut password);
                         framebuffer::exit();
                         crate::clear_console();
                         return LoginAttempt::SwitchEnvironment;
@@ -452,6 +608,7 @@ fn login_once(input: &mut Input, mode: BootMode) -> LoginAttempt {
         };
         match key {
             0x1B => {
+                crypto::wipe(&mut password);
                 if graphical {
                     framebuffer::exit();
                 }
@@ -461,7 +618,10 @@ fn login_once(input: &mut Input, mode: BootMode) -> LoginAttempt {
             b'\t' => password_field = !password_field,
             0x08 => {
                 if password_field {
-                    password_len = password_len.saturating_sub(1);
+                    if password_len != 0 {
+                        password_len -= 1;
+                        password[password_len] = 0;
+                    }
                 } else {
                     username_len = username_len.saturating_sub(1);
                 }
@@ -474,9 +634,10 @@ fn login_once(input: &mut Input, mode: BootMode) -> LoginAttempt {
                 }
             }
             b'\n' => {
-                if let Some(session) =
-                    authenticate(&username[..username_len], &password[..password_len])
-                {
+                let authenticated =
+                    authenticate(&username[..username_len], &password[..password_len]);
+                crypto::wipe(&mut password);
+                if let Some(session) = authenticated {
                     return LoginAttempt::Authenticated(complete_login(session, graphical));
                 }
                 denied = true;
@@ -520,8 +681,8 @@ fn login_once(input: &mut Input, mode: BootMode) -> LoginAttempt {
 }
 
 fn render_boot_mode(selected: BootMode) {
-    let width = framebuffer::WIDTH as i32;
-    let height = framebuffer::HEIGHT as i32;
+    let width = framebuffer::width() as i32;
+    let height = framebuffer::height() as i32;
     let center_x = width / 2;
     let center_y = height / 2;
     framebuffer::clear(0x000B_0D10);
@@ -581,17 +742,15 @@ fn complete_login(session: Session, graphical: bool) -> Session {
 
 fn authenticate(username: &[u8], password: &[u8]) -> Option<Session> {
     let normalized = Field::from_input(username, true);
-    ACCOUNTS
+    let account = ACCOUNTS
         .lock()
         .accounts
         .iter()
-        .find(|account| {
-            account.occupied
-                && account.name.as_bytes() == normalized.as_bytes()
-                && account.password.as_bytes() == password
-        })
-        .copied()
-        .map(Account::session)
+        .find(|account| account.occupied && account.name.as_bytes() == normalized.as_bytes())
+        .copied()?;
+    account
+        .verify_password(password)
+        .then_some(account.session())
 }
 
 #[derive(Clone, Copy)]
@@ -608,8 +767,8 @@ struct LoginLayout {
 }
 
 fn login_layout() -> LoginLayout {
-    let width = framebuffer::WIDTH as i32;
-    let height = framebuffer::HEIGHT as i32;
+    let width = framebuffer::width() as i32;
+    let height = framebuffer::height() as i32;
     let card_width = if width >= 1_000 { 400 } else { 344 };
     let card_height = 430;
     let card_x = (width - card_width) / 2;
@@ -634,8 +793,8 @@ fn render_login(
     password_field: bool,
     denied: bool,
 ) {
-    let width = framebuffer::WIDTH as i32;
-    let height = framebuffer::HEIGHT as i32;
+    let width = framebuffer::width() as i32;
+    let height = framebuffer::height() as i32;
     let layout = login_layout();
     framebuffer::rect(0, 0, width, height, 0x000B_0D10);
     framebuffer::rounded_rect(
@@ -762,8 +921,8 @@ fn draw_login_cursor(x: i16, y: i16) {
 
 fn render_welcome(session: Session) {
     framebuffer::clear(color::BACKGROUND);
-    let center_x = framebuffer::WIDTH as i32 / 2;
-    let center_y = framebuffer::HEIGHT as i32 / 2;
+    let center_x = framebuffer::width() as i32 / 2;
+    let center_y = framebuffer::height() as i32 / 2;
     let name_width = session.name().len() as i32 * framebuffer::text_advance(2);
     framebuffer::text(
         center_x - name_width / 2,

@@ -63,6 +63,7 @@ impl SerialPort {
         }
     }
 
+    #[cfg(not(test))]
     pub fn write_fmt_args(&mut self, args: fmt::Arguments<'_>) {
         let _ = fmt::write(self, args);
     }

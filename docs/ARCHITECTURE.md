@@ -42,6 +42,9 @@ firmware / GRUB (temporary)
    subsystem is ported. Commands can
    create and inspect Forms, change lifecycle state, grant or revoke Handles,
    validate PIMP specifications, inspect system state, reboot, and shut down.
+9. A bounded primary-master ATA PIO driver loads a dedicated ExpOS state image.
+   Accounts and desktop preferences are recovered from the newest valid of two
+   CRC-protected journal slots and mutations alternate slots by generation.
 
 ## Trust boundaries
 
@@ -64,16 +67,21 @@ firmware / GRUB (temporary)
   Unix socket/file-descriptor ABI: clients own surfaces and Buffer Handles,
   mutate pending state, report damage, and publish atomically with `commit`.
   Focus, configure, frame-complete, key and pointer events are routed back to the owning
-  FIN. The software renderer targets a 1920x1080x32 XRGB scanout in QEMU
-  standard VGA's 16 MiB linear framebuffer BAR. The bootstrap maps the entire
-  fourth-GiB PCI window, and HexaDisplay checks the adapter's active geometry,
-  stride and required byte count before the first framebuffer write.
+  FIN. The software renderer can program 640x480, 1280x720 or 1920x1080 XRGB
+  scanout in QEMU standard VGA's 16 MiB linear framebuffer BAR. The bootstrap
+  maps the entire fourth-GiB PCI window, and HexaDisplay checks the selected
+  geometry, stride and required byte count against the aperture before the
+  first framebuffer write.
 - The desktop creates separate Browser, Terminal, Forms, Packages,
   Settings, System, Games and Notes surfaces, plus Root, taskbar and launcher
   surfaces. Its flat dark shell provides a compact application menu and bottom
   taskbar without copied third-party assets, promotional copy or instruction
   footers. It starts with no open or pinned apps and supports focus, dragging,
-  minimize, maximize, close and reopen. Each application receives a child Handle containing
+  minimize, maximize, close and reopen. Settings offers four renderer-defined
+  themes, five procedural wallpapers, four cursor themes and the three display
+  presets. The graphical Terminal keeps bounded scrollback and command history
+  and exposes identity, system, display, network and application commands.
+  Each application receives a child Handle containing
   only Display and Input rights; the compositor checks it before visibility,
   geometry, commit or key routing. Leaving graphics restores the VGA mode 3
   register set before the kernel redraws its text console.
@@ -84,18 +92,35 @@ firmware / GRUB (temporary)
   ARGB8888 and RGB565 clients. Solid fills use clipped row writes; gradients,
   alpha blending, rounded rectangles and Bresenham lines are native primitives;
   cursor movement repaints only the cursor bounds; games repaint only the active window.
-- Session identity is intentionally separate from a Unix UID. The current
-  built-in accounts and twelve-slot runtime registry select a DIESE authority
-  input and gate shell mutations. Operators can create/delete accounts and
-  change passwords; password-bearing commands are omitted from shell history.
-  Persistent account Forms, salted password hashes and lockout policy remain
-  future storage/security work.
+- Session identity is intentionally separate from a Unix UID. The built-in
+  accounts and twelve-slot registry select a DIESE authority input and gate
+  shell mutations. Operators can create/delete accounts and change passwords;
+  password arguments are masked while typed and password-bearing commands are
+  omitted from shell history. Account records persist to the dedicated state
+  image. Passwords are represented only by a
+  per-account salt, PBKDF2-HMAC-SHA256 verifier and round count (25,000 rounds
+  for new records); candidate hashes are compared in constant time and
+  plaintext input is wiped after use. This is not yet a claim of lockout,
+  hardware-backed keys or a complete modern account-security policy.
+- The state disk is a compact versioned store, not HexaFS. Two 2 KiB slots at
+  fixed LBAs hold accounts and desktop preferences. Each commit writes the
+  inactive slot with a monotonically advancing generation, format/version
+  fields and CRC-32 over its header and payload; boot selects the newest valid
+  slot, preserving the previous generation across an interrupted or corrupt
+  write. Settings persist display mode, theme, wallpaper, cursor, accent,
+  backdrop, pointer speed and desktop/connectivity flags. Form records, notes
+  and PIMP revisions are outside this store and remain volatile.
 - Network is a Driver Form protected by requester-bound Network Handles and
   PIMP policy. Its current polling RTL8139 path implements Ethernet, ARP,
   static QEMU-user IPv4, ICMP echo, checksum-validated UDP, DNS A lookup, one
-  bounded synchronous TCP client and HTTP/1.0 GET. DHCP, IPv6, TLS, physical
-  Wi-Fi, concurrent sockets, TCP servers and interrupt-driven I/O are explicitly
-  future work.
+  bounded synchronous TCP client and HTTP/1.0 GET over plain TCP or
+  authenticated TLS 1.3. The TLS client requires hardware RDRAND entropy,
+  sends SNI, verifies the requested hostname, certificate time validity from
+  the RTC, the chain and signatures, and accepts a fixed AES-128-GCM-SHA256
+  suite. TLS record and chain storage are fixed-size. Its Web PKI trust store
+  currently contains only GlobalSign Root R1, not a general operating-system
+  CA bundle. DHCP, IPv6, physical Wi-Fi, concurrent sockets, TCP servers and
+  interrupt-driven I/O are explicitly future work.
 - Connectivity settings target a distinct Radio FIN through a requester-bound
   Configure Handle. The manager keeps software policy, PCI/USB presence, driver
   readiness and connection state separate. Disabling Network is checked by the
@@ -103,10 +128,11 @@ firmware / GRUB (temporary)
   while missing 802.11 drivers and the absent USB host stack remain visibly
   unavailable instead of being reported as connected.
 - The Browser is an Interface Form above HexaDisplay. Its current document
-  engine accepts local `hexa://`, `data:text/html` and bounded `http://`
-  resources. It receives a requester-bound Network Handle only for non-Guest
-  sessions when PIMP networking is enabled. HTTPS/TLS, CSS and JavaScript are
-  not claimed.
+  engine accepts local `hexa://`, `data:text/html` and bounded `http://` or
+  `https://` resources. It receives a requester-bound Network Handle only for
+  non-Guest sessions when PIMP networking is enabled. A verified fetch of
+  `www.youtube.com` returns HTML, but CSS, JavaScript, media containers/codecs
+  and audio/video output are absent, so YouTube playback is not claimed.
 - Go ABI v1 gives Go clients stable call numbers and request/response layouts
   for Forms, Handles, display surfaces, events, browser navigation and package
   transactions. The Go SDK and emulator are runnable today; native Go binary
@@ -129,13 +155,18 @@ The 32-bit alpha is quarantined under `legacy/alpha32`. Its code may be ported,
 but its paths, owner/group modes, file descriptors, sudo-like ACL behavior and
 process naming must not leak into the new public model.
 
-The command environment is deliberately backed by fixed-capacity, in-memory
-tables at this stage. Its mutations exercise the core semantics but are not
-durable until the HexaFS block driver and recovery path are connected.
+Form contents, relationships and PIMP state are deliberately backed by
+fixed-capacity, in-memory tables at this stage. Account and desktop preference
+mutations are durable through the separate state journal, but that journal is
+not a substitute for the HexaFS block driver, persistent Form graph or FIN
+index.
 
-Alpha.12 includes the 1920x1080 empty-start desktop, normal case-sensitive text,
-Notes, dual graphical and console login selection, Ayo v3 artifact transactions,
-and capability-gated native RTL8139/ARP/IPv4/ICMP/UDP/DNS/TCP/HTTP networking.
+Alpha.12 includes the runtime-selectable 480p/720p/1080p empty-start desktop,
+normal case-sensitive text, Notes, a richer graphical Terminal, four themes,
+five procedural wallpapers, four cursor themes, dual graphical and console
+login selection, durable accounts/preferences, Ayo v3 artifact transactions,
+and capability-gated native RTL8139/ARP/IPv4/ICMP/UDP/DNS/TCP/HTTP/TLS
+networking.
 The Diamond II build is
 also exposed through `make run-alpha`, providing a runnable migration fallback
 for networking, scheduling, ATA persistence and the games not yet redesigned

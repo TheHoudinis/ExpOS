@@ -5,7 +5,7 @@ use crate::{
         KEY_SUPER_CLOSE, KEY_SUPER_CYCLE, KEY_SUPER_DOWN, KEY_SUPER_FULLSCREEN, KEY_SUPER_LAUNCHER,
         KEY_SUPER_LEFT, KEY_SUPER_RIGHT, KEY_SUPER_TERMINAL, KEY_SUPER_UP, KEY_UP,
     },
-    network, radio, slog,
+    network, radio, slog, state,
 };
 use framebuffer::color;
 use hexa_core::{
@@ -24,51 +24,118 @@ pub const GAMES_FIN: Fin = Fin::from_u128(0x4741_4D45_5300_0000_0000_0000_0000_0
 pub const NOTES_FIN: Fin = Fin::from_u128(0x4E4F_5445_5300_0000_0000_0000_0000_0001);
 
 const APP_COUNT: usize = 8;
-const APP_WIDTH: u16 = if framebuffer::WIDTH >= 1600 {
-    1280
-} else {
-    860
-};
-const APP_HEIGHT: u16 = if framebuffer::HEIGHT >= 1000 {
-    800
-} else {
-    610
-};
-const BUFFER_WIDTH: u16 = framebuffer::WIDTH as u16;
-const BUFFER_HEIGHT: u16 = framebuffer::HEIGHT as u16;
-const TERMINAL_HISTORY: usize = 12;
-const TERMINAL_CAPACITY: usize = 48;
+const TERMINAL_HISTORY: usize = 24;
+const TERMINAL_CAPACITY: usize = 96;
+const TERMINAL_SCROLLBACK: usize = 40;
+const TERMINAL_OUTPUT_CAPACITY: usize = 112;
 const NOTES_CAPACITY: usize = 2048;
 const CURSOR_WIDTH: usize = 14;
 const CURSOR_HEIGHT: usize = 20;
 const TASKBAR_HEIGHT: i16 = 48;
-const TASKBAR_Y: i16 = framebuffer::HEIGHT as i16 - TASKBAR_HEIGHT;
 const START_X: i16 = 8;
 const TASK_ICON_X: i16 = 48;
 const TASK_ICON_STEP: i16 = 36;
 const LAUNCHER_X: i16 = 8;
-const LAUNCHER_Y: i16 = TASKBAR_Y - LAUNCHER_HEIGHT as i16 - 8;
 const LAUNCHER_WIDTH: u16 = 250;
 const LAUNCHER_HEIGHT: u16 = 318;
-const SETTINGS_SIDEBAR_WIDTH: i16 = 206;
-const SETTINGS_CATEGORY_TOP: i16 = 92;
-const SETTINGS_CATEGORY_STEP: i16 = 42;
-const SETTINGS_ROW_TOP: i16 = 112;
-const SETTINGS_ROW_HEIGHT: i16 = 54;
-const SETTINGS_ROW_STEP: i16 = 62;
-const DISPLAY_MODE_LABEL: &str = if framebuffer::WIDTH == 1920 && framebuffer::HEIGHT == 1080 {
-    "1920 x 1080"
-} else {
-    "Current framebuffer"
-};
 const STABLE_FIN: Fin = Fin::from_u128(0x4449_4D00_0000_0000_0000_0000_0000_0001);
+
+fn taskbar_y() -> i16 {
+    framebuffer::height() as i16 - TASKBAR_HEIGHT
+}
+
+fn launcher_y() -> i16 {
+    (taskbar_y() - LAUNCHER_HEIGHT as i16 - 8).max(4)
+}
+
+fn app_dimensions() -> (u16, u16) {
+    let screen_width = framebuffer::width() as u16;
+    let work_height = taskbar_y().max(80) as u16;
+    let width = if screen_width <= 640 {
+        screen_width.saturating_sub(16)
+    } else if screen_width <= 1280 {
+        screen_width.saturating_sub(96).min(1040)
+    } else {
+        1280
+    };
+    let height = if work_height <= 440 {
+        work_height.saturating_sub(12)
+    } else if work_height <= 680 {
+        work_height.saturating_sub(40).min(610)
+    } else {
+        800
+    };
+    (width.max(480), height.max(360))
+}
+
+fn settings_compact(rect: Rect) -> bool {
+    rect.height < 560 || rect.width < 800
+}
+
+fn settings_sidebar_width(rect: Rect) -> i16 {
+    if settings_compact(rect) {
+        158
+    } else {
+        206
+    }
+}
+
+fn settings_category_top(rect: Rect) -> i16 {
+    if settings_compact(rect) {
+        70
+    } else {
+        92
+    }
+}
+
+fn settings_category_step(rect: Rect) -> i16 {
+    if settings_compact(rect) {
+        38
+    } else {
+        42
+    }
+}
+
+fn settings_row_top(rect: Rect) -> i16 {
+    if settings_compact(rect) {
+        88
+    } else {
+        112
+    }
+}
+
+fn settings_row_height(rect: Rect) -> i16 {
+    if settings_compact(rect) {
+        42
+    } else {
+        54
+    }
+}
+
+fn settings_row_step(rect: Rect) -> i16 {
+    if settings_compact(rect) {
+        47
+    } else {
+        62
+    }
+}
+
+fn shift_display_mode(mode: framebuffer::DisplayMode, direction: i8) -> framebuffer::DisplayMode {
+    let index = mode.persisted() as usize;
+    let next = if direction < 0 {
+        (index + framebuffer::DisplayMode::ALL.len() - 1) % framebuffer::DisplayMode::ALL.len()
+    } else {
+        (index + 1) % framebuffer::DisplayMode::ALL.len()
+    };
+    framebuffer::DisplayMode::ALL[next]
+}
 
 const HOME: &str = "<title>Home</title><h1>ExpOS</h1><a href='hexa://about'>About</a><a href='hexa://packages'>Packages</a><a href='hexa://system'>System</a>";
 const ABOUT: &str = "<title>About</title><h1>Browser</h1><p>A small native document browser.</p><a href='hexa://home'>Home</a>";
 const BROWSER_PACKAGES: &str = "<title>Packages</title><h1>Packages</h1><li>Core tools</li><li>Display</li><li>Notes</li><li>Games</li><a href='hexa://home'>Home</a>";
-const BROWSER_SYSTEM: &str = "<title>System</title><h1>System</h1><li>1920 x 1080 display</li><li>Keyboard and mouse</li><li>RTL8139 network</li><a href='hexa://home'>Home</a>";
+const BROWSER_SYSTEM: &str = "<title>System</title><h1>System</h1><li>480p / 720p / 1080p display</li><li>Keyboard and mouse</li><li>RTL8139 network</li><a href='hexa://home'>Home</a>";
 const NETWORK_BLOCKED: &str = "<title>Offline</title><h1>Offline</h1><p>The address could not be loaded.</p><a href='hexa://home'>Home</a>";
-const NETWORK_ERROR: &str = "<title>Load failed</title><h1>Could not load page</h1><p>Check the address and use plain http.</p><a href='hexa://home'>Home</a>";
+const NETWORK_ERROR: &str = "<title>Load failed</title><h1>Could not load page</h1><p>Check the address, connection, and certificate.</p><a href='hexa://home'>Home</a>";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AppKind {
@@ -241,11 +308,11 @@ impl SettingsCategory {
     const fn row_count(self) -> usize {
         match self {
             Self::System => 2,
-            Self::Appearance => 4,
+            Self::Appearance => 6,
             Self::Network => 4,
             Self::Bluetooth => 2,
             Self::Display => 4,
-            Self::Input => 3,
+            Self::Input => 4,
             Self::Privacy => 2,
             Self::About => 4,
         }
@@ -261,6 +328,7 @@ impl SettingsCategory {
     }
 }
 
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AccentChoice {
     Green,
@@ -296,8 +364,18 @@ impl AccentChoice {
             (Self::Amber, false) | (Self::Cyan, true) => Self::Green,
         }
     }
+
+    const fn from_persisted(value: u8) -> Self {
+        match value {
+            1 => Self::Cyan,
+            2 => Self::Purple,
+            3 => Self::Amber,
+            _ => Self::Green,
+        }
+    }
 }
 
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BackdropChoice {
     Graphite,
@@ -329,10 +407,184 @@ impl BackdropChoice {
             (Self::Black, false) | (Self::Midnight, true) => Self::Graphite,
         }
     }
+
+    const fn from_persisted(value: u8) -> Self {
+        match value {
+            1 => Self::Midnight,
+            2 => Self::Black,
+            _ => Self::Graphite,
+        }
+    }
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThemeChoice {
+    Obsidian,
+    Graphite,
+    Nord,
+    Forest,
+}
+
+impl ThemeChoice {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Obsidian => "Obsidian",
+            Self::Graphite => "Graphite",
+            Self::Nord => "Nord",
+            Self::Forest => "Forest",
+        }
+    }
+
+    const fn panel(self) -> u32 {
+        match self {
+            Self::Obsidian => 0x0010_1215,
+            Self::Graphite => 0x0020_2225,
+            Self::Nord => 0x001B_2430,
+            Self::Forest => 0x0014_211C,
+        }
+    }
+
+    const fn chrome(self) -> u32 {
+        match self {
+            Self::Obsidian => 0x000A_0C0F,
+            Self::Graphite => 0x0018_1A1D,
+            Self::Nord => 0x0013_1B26,
+            Self::Forest => 0x000E_1915,
+        }
+    }
+
+    const fn window(self) -> u32 {
+        match self {
+            Self::Obsidian => 0x0004_0506,
+            Self::Graphite => color::WINDOW,
+            Self::Nord => 0x000E_1722,
+            Self::Forest => 0x000B_1612,
+        }
+    }
+
+    const fn card(self) -> u32 {
+        match self {
+            Self::Obsidian => 0x000D_1013,
+            Self::Graphite => 0x0027_292D,
+            Self::Nord => 0x001C_2938,
+            Self::Forest => 0x0017_2921,
+        }
+    }
+
+    const fn terminal(self) -> u32 {
+        match self {
+            Self::Obsidian => 0x0000_0000,
+            Self::Graphite => 0x000C_0D0F,
+            Self::Nord => 0x0008_101B,
+            Self::Forest => 0x0005_100C,
+        }
+    }
+
+    const fn from_persisted(value: u8) -> Self {
+        match value {
+            1 => Self::Graphite,
+            2 => Self::Nord,
+            3 => Self::Forest,
+            _ => Self::Obsidian,
+        }
+    }
+
+    fn shifted(self, direction: i8) -> Self {
+        match (self, direction < 0) {
+            (Self::Obsidian, false) | (Self::Nord, true) => Self::Graphite,
+            (Self::Graphite, false) | (Self::Forest, true) => Self::Nord,
+            (Self::Nord, false) | (Self::Obsidian, true) => Self::Forest,
+            (Self::Forest, false) | (Self::Graphite, true) => Self::Obsidian,
+        }
+    }
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WallpaperChoice {
+    Solid,
+    Gradient,
+    Horizon,
+    Grid,
+    Dusk,
+}
+
+impl WallpaperChoice {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Solid => "Solid",
+            Self::Gradient => "Gradient",
+            Self::Horizon => "Horizon",
+            Self::Grid => "Grid",
+            Self::Dusk => "Dusk",
+        }
+    }
+
+    const fn from_persisted(value: u8) -> Self {
+        match value {
+            1 => Self::Gradient,
+            2 => Self::Horizon,
+            3 => Self::Grid,
+            4 => Self::Dusk,
+            _ => Self::Solid,
+        }
+    }
+
+    fn shifted(self, direction: i8) -> Self {
+        match (self, direction < 0) {
+            (Self::Solid, false) | (Self::Horizon, true) => Self::Gradient,
+            (Self::Gradient, false) | (Self::Grid, true) => Self::Horizon,
+            (Self::Horizon, false) | (Self::Dusk, true) => Self::Grid,
+            (Self::Grid, false) | (Self::Solid, true) => Self::Dusk,
+            (Self::Dusk, false) | (Self::Gradient, true) => Self::Solid,
+        }
+    }
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CursorChoice {
+    Light,
+    Dark,
+    Accent,
+    Crosshair,
+}
+
+impl CursorChoice {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Light => "Light arrow",
+            Self::Dark => "Dark arrow",
+            Self::Accent => "Accent arrow",
+            Self::Crosshair => "Crosshair",
+        }
+    }
+
+    const fn from_persisted(value: u8) -> Self {
+        match value {
+            1 => Self::Dark,
+            2 => Self::Accent,
+            3 => Self::Crosshair,
+            _ => Self::Light,
+        }
+    }
+
+    fn shifted(self, direction: i8) -> Self {
+        match (self, direction < 0) {
+            (Self::Light, false) | (Self::Accent, true) => Self::Dark,
+            (Self::Dark, false) | (Self::Crosshair, true) => Self::Accent,
+            (Self::Accent, false) | (Self::Light, true) => Self::Crosshair,
+            (Self::Crosshair, false) | (Self::Dark, true) => Self::Light,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
 struct DesktopPreferences {
+    theme: ThemeChoice,
+    wallpaper: WallpaperChoice,
+    cursor: CursorChoice,
     accent: AccentChoice,
     backdrop: BackdropChoice,
     pure_black_apps: bool,
@@ -345,26 +597,24 @@ struct DesktopPreferences {
 }
 
 impl DesktopPreferences {
-    const fn new() -> Self {
-        Self {
-            accent: AccentChoice::Green,
-            backdrop: BackdropChoice::Graphite,
-            pure_black_apps: true,
-            rounded_controls: true,
-            taskbar_visible: true,
-            status_visible: true,
-            window_borders: true,
-            high_contrast: false,
-            pointer_speed: 1,
-        }
-    }
-
     const fn window_color(self) -> u32 {
         if self.pure_black_apps {
             0x0000_0000
         } else {
-            color::WINDOW
+            self.theme.window()
         }
+    }
+
+    const fn panel_color(self) -> u32 {
+        self.theme.panel()
+    }
+
+    const fn chrome_color(self) -> u32 {
+        self.theme.chrome()
+    }
+
+    const fn card_color(self) -> u32 {
+        self.theme.card()
     }
 
     const fn border_color(self, focused: bool) -> u32 {
@@ -388,13 +638,77 @@ impl DesktopPreferences {
             _ => "Very fast",
         }
     }
-}
 
-// Preferences are retained for the current boot. HexaFS-backed account
-// settings are still a queued storage integration, so reboot persistence is
-// deliberately not claimed here.
-static DESKTOP_PREFERENCES: crate::sync::SpinMutex<DesktopPreferences> =
-    crate::sync::SpinMutex::new(DesktopPreferences::new());
+    fn from_persistent(value: state::PersistentPreferences) -> Self {
+        let flags = value.flags;
+        Self {
+            theme: ThemeChoice::from_persisted(value.theme),
+            wallpaper: WallpaperChoice::from_persisted(value.wallpaper),
+            cursor: CursorChoice::from_persisted(value.cursor_theme),
+            accent: AccentChoice::from_persisted(value.accent),
+            backdrop: BackdropChoice::from_persisted(value.backdrop),
+            pure_black_apps: flags & state::PREF_PURE_BLACK_APPS != 0,
+            rounded_controls: flags & state::PREF_ROUNDED_CONTROLS != 0,
+            taskbar_visible: flags & state::PREF_TASKBAR_VISIBLE != 0,
+            status_visible: flags & state::PREF_STATUS_VISIBLE != 0,
+            window_borders: flags & state::PREF_WINDOW_BORDERS != 0,
+            high_contrast: flags & state::PREF_HIGH_CONTRAST != 0,
+            pointer_speed: value.pointer_speed.clamp(1, 3),
+        }
+    }
+
+    fn update_persistent(
+        self,
+        mut value: state::PersistentPreferences,
+    ) -> state::PersistentPreferences {
+        value.display_mode = framebuffer::requested_mode().persisted();
+        value.theme = self.theme as u8;
+        value.wallpaper = self.wallpaper as u8;
+        value.cursor_theme = self.cursor as u8;
+        value.accent = self.accent as u8;
+        value.backdrop = self.backdrop as u8;
+        value.pointer_speed = self.pointer_speed;
+        let desktop_flags = state::PREF_PURE_BLACK_APPS
+            | state::PREF_ROUNDED_CONTROLS
+            | state::PREF_TASKBAR_VISIBLE
+            | state::PREF_STATUS_VISIBLE
+            | state::PREF_WINDOW_BORDERS
+            | state::PREF_HIGH_CONTRAST
+            | state::PREF_NETWORK_ENABLED
+            | state::PREF_WIFI_ENABLED
+            | state::PREF_BLUETOOTH_ENABLED;
+        value.flags &= !desktop_flags;
+        if self.pure_black_apps {
+            value.flags |= state::PREF_PURE_BLACK_APPS;
+        }
+        if self.rounded_controls {
+            value.flags |= state::PREF_ROUNDED_CONTROLS;
+        }
+        if self.taskbar_visible {
+            value.flags |= state::PREF_TASKBAR_VISIBLE;
+        }
+        if self.status_visible {
+            value.flags |= state::PREF_STATUS_VISIBLE;
+        }
+        if self.window_borders {
+            value.flags |= state::PREF_WINDOW_BORDERS;
+        }
+        if self.high_contrast {
+            value.flags |= state::PREF_HIGH_CONTRAST;
+        }
+        let connectivity = radio::snapshot();
+        if connectivity.network_enabled {
+            value.flags |= state::PREF_NETWORK_ENABLED;
+        }
+        if connectivity.wifi_requested {
+            value.flags |= state::PREF_WIFI_ENABLED;
+        }
+        if connectivity.bluetooth_requested {
+            value.flags |= state::PREF_BLUETOOTH_ENABLED;
+        }
+        value
+    }
+}
 
 struct DesktopState {
     server: DisplayServer,
@@ -421,8 +735,10 @@ struct DesktopState {
     browser_editing: bool,
     terminal_line: [u8; TERMINAL_CAPACITY],
     terminal_len: usize,
-    terminal_message: [u8; 128],
-    terminal_message_len: usize,
+    terminal_output: [[u8; TERMINAL_OUTPUT_CAPACITY]; TERMINAL_SCROLLBACK],
+    terminal_output_len: [u8; TERMINAL_SCROLLBACK],
+    terminal_output_next: usize,
+    terminal_output_count: usize,
     terminal_history: [[u8; TERMINAL_CAPACITY]; TERMINAL_HISTORY],
     terminal_history_len: [u8; TERMINAL_HISTORY],
     terminal_history_next: usize,
@@ -441,17 +757,27 @@ struct PointerCursor {
     x: i16,
     y: i16,
     under: [u32; CURSOR_WIDTH * CURSOR_HEIGHT],
+    style: CursorChoice,
+    accent: u32,
     drawn: bool,
 }
 
 impl PointerCursor {
-    const fn new() -> Self {
+    fn new(style: CursorChoice, accent: u32) -> Self {
         Self {
-            x: (framebuffer::WIDTH / 2) as i16,
-            y: (framebuffer::HEIGHT / 2) as i16,
+            x: (framebuffer::width() / 2) as i16,
+            y: (framebuffer::height() / 2) as i16,
             under: [0; CURSOR_WIDTH * CURSOR_HEIGHT],
+            style,
+            accent,
             drawn: false,
         }
+    }
+
+    fn set_style(&mut self, style: CursorChoice, accent: u32) {
+        self.restore();
+        self.style = style;
+        self.accent = accent;
     }
 
     fn invalidate(&mut self) {
@@ -463,8 +789,8 @@ impl PointerCursor {
             return;
         }
         self.restore();
-        self.x = (self.x.saturating_add(dx)).clamp(0, framebuffer::WIDTH as i16 - 1);
-        self.y = (self.y.saturating_add(dy)).clamp(0, framebuffer::HEIGHT as i16 - 1);
+        self.x = (self.x.saturating_add(dx)).clamp(0, framebuffer::width() as i16 - 1);
+        self.y = (self.y.saturating_add(dy)).clamp(0, framebuffer::height() as i16 - 1);
         self.draw();
     }
 
@@ -485,6 +811,10 @@ impl PointerCursor {
     }
 
     fn draw(&mut self) {
+        if self.style == CursorChoice::Crosshair {
+            self.draw_crosshair();
+            return;
+        }
         const SHAPE: [u16; CURSOR_HEIGHT] = [
             0x0001, 0x0003, 0x0007, 0x000F, 0x001F, 0x003F, 0x007F, 0x00FF, 0x01FF, 0x03FF, 0x01FF,
             0x019F, 0x030F, 0x0606, 0x0C06, 0x0804, 0x0000, 0x0000, 0x0000, 0x0000,
@@ -515,10 +845,45 @@ impl PointerCursor {
                 framebuffer::pixel(
                     self.x as i32 + column as i32,
                     self.y as i32 + row as i32,
-                    if edge { 0x0012_1822 } else { color::WHITE },
+                    if edge {
+                        match self.style {
+                            CursorChoice::Dark => color::WHITE,
+                            _ => 0x0012_1822,
+                        }
+                    } else {
+                        match self.style {
+                            CursorChoice::Light => color::WHITE,
+                            CursorChoice::Dark => 0x0012_1822,
+                            CursorChoice::Accent => self.accent,
+                            CursorChoice::Crosshair => self.accent,
+                        }
+                    },
                 );
             }
         }
+        self.drawn = true;
+    }
+
+    fn draw_crosshair(&mut self) {
+        for row in 0..CURSOR_HEIGHT {
+            for column in 0..CURSOR_WIDTH {
+                self.under[row * CURSOR_WIDTH + column] = framebuffer::read_pixel(
+                    self.x as i32 + column as i32,
+                    self.y as i32 + row as i32,
+                );
+            }
+        }
+        for offset in 0..CURSOR_WIDTH as i32 {
+            if !(5..=8).contains(&offset) {
+                framebuffer::pixel(self.x as i32 + offset, self.y as i32 + 7, self.accent);
+            }
+        }
+        for offset in 0..CURSOR_HEIGHT as i32 {
+            if !(5..=9).contains(&offset) {
+                framebuffer::pixel(self.x as i32 + 7, self.y as i32 + offset, self.accent);
+            }
+        }
+        framebuffer::outline(self.x as i32 + 5, self.y as i32 + 5, 5, 5, color::WHITE);
         self.drawn = true;
     }
 }
@@ -530,7 +895,7 @@ impl DesktopState {
         allow_network: bool,
     ) -> Self {
         let active = start_app.unwrap_or(AppKind::Terminal);
-        let preferences = *DESKTOP_PREFERENCES.lock();
+        let preferences = DesktopPreferences::from_persistent(state::preferences());
         let mut server = DisplayServer::new();
         let mut broker = CapabilityBroker::new();
         let compositor_handle = broker
@@ -550,7 +915,12 @@ impl DesktopState {
                 DISPLAY_FIN,
                 "Root Canvas",
                 SurfaceRole::Background,
-                Rect::new(0, 0, framebuffer::WIDTH as u16, framebuffer::HEIGHT as u16),
+                Rect::new(
+                    0,
+                    0,
+                    framebuffer::width() as u16,
+                    framebuffer::height() as u16,
+                ),
             )
             .expect("desktop background surface");
         let panel = server
@@ -560,8 +930,8 @@ impl DesktopState {
                 SurfaceRole::Panel,
                 Rect::new(
                     0,
-                    TASKBAR_Y,
-                    framebuffer::WIDTH as u16,
+                    taskbar_y(),
+                    framebuffer::width() as u16,
                     TASKBAR_HEIGHT as u16,
                 ),
             )
@@ -577,7 +947,12 @@ impl DesktopState {
             let _ = server.attach(
                 app.owner(),
                 surface,
-                buffer((index + 3) as u32, app.owner(), BUFFER_WIDTH, BUFFER_HEIGHT),
+                buffer(
+                    (index + 3) as u32,
+                    app.owner(),
+                    framebuffer::width() as u16,
+                    framebuffer::height() as u16,
+                ),
             );
             let _ = server.set_visible(app.owner(), surface, start_app == Some(app));
             app_surfaces[index] = surface;
@@ -624,7 +999,7 @@ impl DesktopState {
                 DISPLAY_FIN,
                 "Applications",
                 SurfaceRole::Popup,
-                Rect::new(LAUNCHER_X, LAUNCHER_Y, LAUNCHER_WIDTH, LAUNCHER_HEIGHT),
+                Rect::new(LAUNCHER_X, launcher_y(), LAUNCHER_WIDTH, LAUNCHER_HEIGHT),
             )
             .expect("desktop launcher surface");
         let _ = server.attach(
@@ -633,8 +1008,8 @@ impl DesktopState {
             buffer(
                 1,
                 DISPLAY_FIN,
-                framebuffer::WIDTH as u16,
-                framebuffer::HEIGHT as u16,
+                framebuffer::width() as u16,
+                framebuffer::height() as u16,
             ),
         );
         let _ = server.attach(
@@ -643,7 +1018,7 @@ impl DesktopState {
             buffer(
                 2,
                 DISPLAY_FIN,
-                framebuffer::WIDTH as u16,
+                framebuffer::width() as u16,
                 TASKBAR_HEIGHT as u16,
             ),
         );
@@ -664,7 +1039,7 @@ impl DesktopState {
         if start_app.is_some() {
             let _ = server.focus(app_surfaces[active.index()]);
         }
-        Self {
+        let mut state = Self {
             server,
             broker,
             app_surfaces,
@@ -682,15 +1057,17 @@ impl DesktopState {
             preferences,
             settings_category: SettingsCategory::System,
             settings_row: 0,
-            settings_notice: "Changes apply immediately for this boot.",
+            settings_notice: "Changes are saved locally.",
             document: Document::parse("hexa://home", HOME).expect("built-in home document"),
             browser_line: [0; 96],
             browser_len: 0,
             browser_editing: false,
             terminal_line: [0; TERMINAL_CAPACITY],
             terminal_len: 0,
-            terminal_message: [0; 128],
-            terminal_message_len: 0,
+            terminal_output: [[0; TERMINAL_OUTPUT_CAPACITY]; TERMINAL_SCROLLBACK],
+            terminal_output_len: [0; TERMINAL_SCROLLBACK],
+            terminal_output_next: 0,
+            terminal_output_count: 0,
             terminal_history: [[0; TERMINAL_CAPACITY]; TERMINAL_HISTORY],
             terminal_history_len: [0; TERMINAL_HISTORY],
             terminal_history_next: 0,
@@ -700,10 +1077,13 @@ impl DesktopState {
             notes_len: 0,
             games: crate::games::GameHub::new(),
             session,
-            cursor: PointerCursor::new(),
+            cursor: PointerCursor::new(preferences.cursor, preferences.accent.color()),
             dragging: None,
             should_exit: false,
-        }
+        };
+        state.terminal_push("ExpOS terminal");
+        state.terminal_push("Type help for commands. Up/Down recalls history.");
+        state
     }
 
     fn active_surface(&self) -> u32 {
@@ -727,15 +1107,19 @@ impl DesktopState {
         radio::snapshot().network_enabled && self.browser_network_handle.is_some()
     }
 
-    fn save_preferences(&self) {
-        *DESKTOP_PREFERENCES.lock() = self.preferences;
+    fn save_preferences(&mut self) {
+        let persistent = self.preferences.update_persistent(state::preferences());
+        if let Err(error) = state::save_preferences(persistent) {
+            self.settings_notice = error.message();
+            slog!("HEXA_SETTING_PERSIST_FAILED error={:?}\r\n", error);
+        }
     }
 
     fn work_area_bottom(&self) -> i16 {
         if self.preferences.taskbar_visible {
-            TASKBAR_Y
+            taskbar_y()
         } else {
-            framebuffer::HEIGHT as i16
+            framebuffer::height() as i16
         }
     }
 
@@ -793,7 +1177,7 @@ impl DesktopState {
     }
 
     fn pointer_press(&mut self, x: i16, y: i16) -> bool {
-        if self.preferences.taskbar_visible && y >= TASKBAR_Y {
+        if self.preferences.taskbar_visible && y >= taskbar_y() {
             if (START_X..START_X + 32).contains(&x) {
                 self.toggle_launcher();
                 return true;
@@ -818,11 +1202,11 @@ impl DesktopState {
         }
         if self.launcher_open {
             if (LAUNCHER_X..LAUNCHER_X + LAUNCHER_WIDTH as i16).contains(&x)
-                && (LAUNCHER_Y..LAUNCHER_Y + LAUNCHER_HEIGHT as i16).contains(&y)
+                && (launcher_y()..launcher_y() + LAUNCHER_HEIGHT as i16).contains(&y)
             {
                 for (index, app) in AppKind::ALL.iter().copied().enumerate() {
                     let left = LAUNCHER_X + 8;
-                    let top = LAUNCHER_Y + 48 + index as i16 * 32;
+                    let top = launcher_y() + 48 + index as i16 * 32;
                     if (left..left + LAUNCHER_WIDTH as i16 - 16).contains(&x)
                         && (top..top + 28).contains(&y)
                     {
@@ -895,7 +1279,7 @@ impl DesktopState {
         let Some(rect) = self.server.surface(id).map(|surface| surface.current.rect) else {
             return;
         };
-        let max_x = (framebuffer::WIDTH as i32 - rect.width as i32).max(0);
+        let max_x = (framebuffer::width() as i32 - rect.width as i32).max(0);
         let max_y = (self.work_area_bottom() as i32 - rect.height as i32).max(0);
         let next_x = (rect.x as i32 + dx as i32).clamp(0, max_x) as i16;
         let next_y = (rect.y as i32 + dy as i32).clamp(0, max_y) as i16;
@@ -1025,7 +1409,7 @@ impl DesktopState {
         self.sync_visibility();
         let bottom = self.work_area_bottom();
         let rect = if self.fullscreen {
-            Rect::new(10, 10, framebuffer::WIDTH as u16 - 20, bottom as u16 - 20)
+            Rect::new(10, 10, framebuffer::width() as u16 - 20, bottom as u16 - 20)
         } else {
             default_rect(self.active)
         };
@@ -1080,7 +1464,7 @@ impl DesktopState {
         let Some(rect) = self.server.surface(id).map(|surface| surface.current.rect) else {
             return;
         };
-        let max_x = (framebuffer::WIDTH as i32 - rect.width as i32 - 8).max(8);
+        let max_x = (framebuffer::width() as i32 - rect.width as i32 - 8).max(8);
         let max_y = (self.work_area_bottom() as i32 - rect.height as i32).max(8);
         let x = (rect.x as i32 + dx as i32).clamp(8, max_x) as i16;
         let y = (rect.y as i32 + dy as i32).clamp(8, max_y) as i16;
@@ -1106,9 +1490,22 @@ impl DesktopState {
     fn set_document(&mut self, document: Document) {
         self.document = document;
         let surface = self.app_surfaces[AppKind::Browser.index()];
-        let _ = self
+        let damage_rect = self
             .server
-            .damage(BROWSER_FIN, surface, Rect::new(0, 0, APP_WIDTH, APP_HEIGHT));
+            .surface(surface)
+            .map(|surface| {
+                Rect::new(
+                    0,
+                    0,
+                    surface.current.rect.width,
+                    surface.current.rect.height,
+                )
+            })
+            .unwrap_or_else(|| {
+                let (width, height) = app_dimensions();
+                Rect::new(0, 0, width, height)
+            });
+        let _ = self.server.damage(BROWSER_FIN, surface, damage_rect);
         let _ = self.server.commit(BROWSER_FIN, surface);
     }
 
@@ -1155,14 +1552,14 @@ impl DesktopState {
                 }
                 let source = core::str::from_utf8(&sanitized[..response.body_len]).unwrap_or("");
                 let document = Document::parse(address, source).or_else(|_| {
-                    let mut wrapped = [0_u8; network::HTTP_BODY_CAPACITY + 7];
-                    wrapped[..3].copy_from_slice(b"<p>");
-                    wrapped[3..3 + response.body_len]
-                        .copy_from_slice(&sanitized[..response.body_len]);
-                    wrapped[3 + response.body_len..7 + response.body_len].copy_from_slice(b"</p>");
-                    let fallback = core::str::from_utf8(&wrapped[..7 + response.body_len])
-                        .unwrap_or("<p>Invalid response body</p>");
-                    Document::parse(address, fallback)
+                    // Script-first sites such as YouTube may not place any of
+                    // our small renderer's supported nodes inside the bounded
+                    // response. The authenticated fetch still succeeded, so
+                    // present that fact without pretending to execute the page.
+                    Document::parse(
+                        address,
+                        "<title>Page loaded</title><h1>Secure response received</h1><p>This site needs CSS, JavaScript, and media features that ExpOS does not implement yet.</p>",
+                    )
                 });
                 match document {
                     Ok(document) => {
@@ -1222,28 +1619,26 @@ impl DesktopState {
     fn settings_click(&mut self, x: i16, y: i16, rect: Rect) -> bool {
         let local_x = x - rect.x;
         let local_y = y - rect.y;
-        if (12..SETTINGS_SIDEBAR_WIDTH).contains(&local_x) && local_y >= SETTINGS_CATEGORY_TOP {
-            let index = ((local_y - SETTINGS_CATEGORY_TOP) / SETTINGS_CATEGORY_STEP) as usize;
+        let sidebar_width = settings_sidebar_width(rect);
+        let category_top = settings_category_top(rect);
+        let category_step = settings_category_step(rect);
+        let row_top = settings_row_top(rect);
+        let row_step = settings_row_step(rect);
+        let row_height = settings_row_height(rect);
+        if (12..sidebar_width).contains(&local_x) && local_y >= category_top {
+            let index = ((local_y - category_top) / category_step) as usize;
             if let Some(category) = SettingsCategory::ALL.get(index).copied() {
-                if local_y
-                    < SETTINGS_CATEGORY_TOP
-                        + index as i16 * SETTINGS_CATEGORY_STEP
-                        + SETTINGS_CATEGORY_STEP
-                        - 4
-                {
+                if local_y < category_top + index as i16 * category_step + category_step - 4 {
                     self.select_settings_category(category);
                     return true;
                 }
             }
         }
 
-        if local_x >= SETTINGS_SIDEBAR_WIDTH + 24
-            && local_x < rect.width as i16 - 20
-            && local_y >= SETTINGS_ROW_TOP
-        {
-            let row = ((local_y - SETTINGS_ROW_TOP) / SETTINGS_ROW_STEP) as usize;
+        if local_x >= sidebar_width + 24 && local_x < rect.width as i16 - 20 && local_y >= row_top {
+            let row = ((local_y - row_top) / row_step) as usize;
             if row < self.settings_category.row_count()
-                && local_y < SETTINGS_ROW_TOP + row as i16 * SETTINGS_ROW_STEP + SETTINGS_ROW_HEIGHT
+                && local_y < row_top + row as i16 * row_step + row_height
             {
                 self.settings_row = row;
                 self.activate_setting(1);
@@ -1355,7 +1750,7 @@ impl DesktopState {
                         Rect::new(
                             10,
                             10,
-                            framebuffer::WIDTH as u16 - 20,
+                            framebuffer::width() as u16 - 20,
                             self.work_area_bottom() as u16 - 20,
                         ),
                     );
@@ -1379,22 +1774,40 @@ impl DesktopState {
                 self.settings_notice = "Status area visibility updated.";
             }
             (SettingsCategory::Appearance, 0) => {
+                self.preferences.theme = self.preferences.theme.shifted(direction);
+                slog!(
+                    "HEXA_SETTING_CHANGED key=theme value={}\r\n",
+                    self.preferences.theme.label()
+                );
+                self.settings_notice = "Desktop theme updated.";
+            }
+            (SettingsCategory::Appearance, 1) => {
+                self.preferences.wallpaper = self.preferences.wallpaper.shifted(direction);
+                slog!(
+                    "HEXA_SETTING_CHANGED key=wallpaper value={}\r\n",
+                    self.preferences.wallpaper.label()
+                );
+                self.settings_notice = "Wallpaper updated.";
+            }
+            (SettingsCategory::Appearance, 2) => {
                 self.preferences.accent = self.preferences.accent.shifted(direction);
+                self.cursor
+                    .set_style(self.preferences.cursor, self.preferences.accent.color());
                 slog!(
                     "HEXA_SETTING_CHANGED key=accent value={}\r\n",
                     self.preferences.accent.label()
                 );
                 self.settings_notice = "Accent color updated.";
             }
-            (SettingsCategory::Appearance, 1) => {
+            (SettingsCategory::Appearance, 3) => {
                 self.preferences.backdrop = self.preferences.backdrop.shifted(direction);
                 slog!(
-                    "HEXA_SETTING_CHANGED key=background value={}\r\n",
+                    "HEXA_SETTING_CHANGED key=background-tone value={}\r\n",
                     self.preferences.backdrop.label()
                 );
-                self.settings_notice = "Desktop background updated.";
+                self.settings_notice = "Wallpaper tone updated.";
             }
-            (SettingsCategory::Appearance, 2) => {
+            (SettingsCategory::Appearance, 4) => {
                 self.preferences.pure_black_apps = !self.preferences.pure_black_apps;
                 slog!(
                     "HEXA_SETTING_CHANGED key=pure-black-apps value={}\r\n",
@@ -1406,7 +1819,7 @@ impl DesktopState {
                 );
                 self.settings_notice = "Application background updated.";
             }
-            (SettingsCategory::Appearance, 3) => {
+            (SettingsCategory::Appearance, 5) => {
                 self.preferences.rounded_controls = !self.preferences.rounded_controls;
                 slog!(
                     "HEXA_SETTING_CHANGED key=rounded-controls value={}\r\n",
@@ -1422,6 +1835,15 @@ impl DesktopState {
             (SettingsCategory::Network, 2) => self.change_radio_policy(radio::RadioKind::Wifi),
             (SettingsCategory::Bluetooth, 0) => {
                 self.change_radio_policy(radio::RadioKind::Bluetooth)
+            }
+            (SettingsCategory::Display, 0) => {
+                let selected = shift_display_mode(framebuffer::requested_mode(), direction);
+                let _ = framebuffer::request_mode(selected);
+                slog!(
+                    "HEXA_SETTING_CHANGED key=resolution value={}\r\n",
+                    selected.label()
+                );
+                self.settings_notice = "Resolution applies when the desktop is reopened.";
             }
             (SettingsCategory::Display, 2) => {
                 self.preferences.window_borders = !self.preferences.window_borders;
@@ -1464,6 +1886,16 @@ impl DesktopState {
                     self.preferences.pointer_speed_label()
                 );
                 self.settings_notice = "Pointer speed updated.";
+            }
+            (SettingsCategory::Input, 1) => {
+                self.preferences.cursor = self.preferences.cursor.shifted(direction);
+                self.cursor
+                    .set_style(self.preferences.cursor, self.preferences.accent.color());
+                slog!(
+                    "HEXA_SETTING_CHANGED key=cursor-theme value={}\r\n",
+                    self.preferences.cursor.label()
+                );
+                self.settings_notice = "Cursor theme updated.";
             }
             (SettingsCategory::Privacy, 0) => {
                 self.browser_line.fill(0);
@@ -1524,11 +1956,280 @@ impl DesktopState {
         true
     }
 
-    fn set_terminal_message(&mut self, value: &str) {
-        let bytes = value.as_bytes();
-        let count = bytes.len().min(self.terminal_message.len());
-        self.terminal_message[..count].copy_from_slice(&bytes[..count]);
-        self.terminal_message_len = count;
+    fn terminal_clear(&mut self) {
+        self.terminal_output_len.fill(0);
+        self.terminal_output_next = 0;
+        self.terminal_output_count = 0;
+    }
+
+    fn terminal_push(&mut self, value: &str) {
+        self.terminal_push_bytes(value.as_bytes());
+    }
+
+    fn terminal_push_bytes(&mut self, value: &[u8]) {
+        if value.is_empty() {
+            self.terminal_store_line(&[]);
+            return;
+        }
+        for source_line in value.split(|byte| *byte == b'\n') {
+            if source_line.is_empty() {
+                self.terminal_store_line(&[]);
+                continue;
+            }
+            for chunk in source_line.chunks(TERMINAL_OUTPUT_CAPACITY) {
+                self.terminal_store_line(chunk);
+            }
+        }
+    }
+
+    fn terminal_store_line(&mut self, value: &[u8]) {
+        let index = self.terminal_output_next;
+        self.terminal_output[index].fill(0);
+        let count = value.len().min(TERMINAL_OUTPUT_CAPACITY);
+        self.terminal_output[index][..count].copy_from_slice(&value[..count]);
+        self.terminal_output_len[index] = count as u8;
+        self.terminal_output_next = (index + 1) % TERMINAL_SCROLLBACK;
+        self.terminal_output_count = (self.terminal_output_count + 1).min(TERMINAL_SCROLLBACK);
+    }
+
+    fn terminal_push_parts(&mut self, parts: &[&str]) {
+        let mut line = [0_u8; TERMINAL_OUTPUT_CAPACITY];
+        let mut length = 0;
+        for part in parts {
+            let bytes = part.as_bytes();
+            let count = bytes.len().min(line.len().saturating_sub(length));
+            line[length..length + count].copy_from_slice(&bytes[..count]);
+            length += count;
+        }
+        self.terminal_push_bytes(&line[..length]);
+    }
+
+    fn terminal_push_number(&mut self, prefix: &str, value: u64, suffix: &str) {
+        let mut line = [0_u8; TERMINAL_OUTPUT_CAPACITY];
+        let mut length = append_bytes(&mut line, 0, prefix.as_bytes());
+        length = append_decimal(&mut line, length, value);
+        length = append_bytes(&mut line, length, suffix.as_bytes());
+        self.terminal_push_bytes(&line[..length]);
+    }
+
+    fn terminal_print_help(&mut self) {
+        self.terminal_push("ExpOS terminal commands:");
+        self.terminal_push("  help clear status version hostname pwd whoami id uname uptime");
+        self.terminal_push("  users display resolution network netstat storage theme history");
+        self.terminal_push("  apps ls ps echo <text>");
+        self.terminal_push("  open <app> close exit shell");
+        self.terminal_push("Use Up/Down for command history.");
+    }
+
+    fn terminal_print_status(&mut self) {
+        self.terminal_push("ExpOS desktop is ready.");
+        let mut user = [0_u8; 24];
+        let user_length = self.session.name().len().min(user.len());
+        user[..user_length].copy_from_slice(&self.session.name().as_bytes()[..user_length]);
+        let user = core::str::from_utf8(&user[..user_length]).unwrap_or("unknown");
+        let authority = self.session.authority_name();
+        self.terminal_push_parts(&["user: ", user, " (", authority, ")"]);
+        let mode = framebuffer::current_mode();
+        self.terminal_push_parts(&["display: ", mode.label()]);
+        let connectivity = radio::snapshot();
+        self.terminal_push_parts(&[
+            "network: ",
+            if connectivity.network_enabled {
+                if connectivity.ethernet.connected() {
+                    "connected"
+                } else {
+                    "enabled, link down"
+                }
+            } else {
+                "disabled"
+            },
+        ]);
+        if let Some(generation) = state::loaded_generation() {
+            self.terminal_push_number("saved state generation: ", generation, "");
+        } else {
+            self.terminal_push("saved state: defaults (first commit pending)");
+        }
+    }
+
+    fn terminal_print_users(&mut self) {
+        self.terminal_push("Local accounts:");
+        crate::session::visit_accounts(|name, authority| {
+            let authority = match authority {
+                Authority::Operator => "Operator",
+                Authority::Power => "Power",
+                Authority::Guest => "Guest",
+            };
+            self.terminal_push_parts(&["  ", name, "  ", authority]);
+        });
+    }
+
+    fn terminal_print_display(&mut self) {
+        let current =
+            framebuffer::DisplayMode::from_dimensions(framebuffer::width(), framebuffer::height())
+                .unwrap_or_else(framebuffer::current_mode);
+        let requested = framebuffer::requested_mode();
+        let (width, height) = current.dimensions();
+        self.terminal_push_parts(&["active preset: ", current.label()]);
+        self.terminal_push_number("width: ", width as u64, " px");
+        self.terminal_push_number("height: ", height as u64, " px");
+        self.terminal_push_number("stride: ", framebuffer::stride_bytes() as u64, " bytes");
+        self.terminal_push_parts(&["next desktop preset: ", requested.label()]);
+    }
+
+    fn terminal_print_network(&mut self) {
+        let connectivity = radio::snapshot();
+        self.terminal_push_parts(&[
+            "packet policy: ",
+            if connectivity.network_enabled {
+                "on"
+            } else {
+                "off"
+            },
+        ]);
+        self.terminal_push_parts(&["ethernet: ", connectivity.ethernet.status_text()]);
+        self.terminal_push_parts(&["wifi: ", connectivity.wifi.status_text()]);
+        self.terminal_push_parts(&["bluetooth: ", connectivity.bluetooth.status_text()]);
+        self.terminal_push_parts(&[
+            "rtl8139: ",
+            if network::available() {
+                if network::link_up() {
+                    "link up"
+                } else {
+                    "link down"
+                }
+            } else {
+                "not detected"
+            },
+        ]);
+    }
+
+    fn terminal_print_history(&mut self) {
+        if self.terminal_history_count == 0 {
+            self.terminal_push("No command history yet.");
+            return;
+        }
+        for oldest_index in (0..self.terminal_history_count).rev() {
+            let Some(command) = self.terminal_history_entry(oldest_index) else {
+                continue;
+            };
+            let mut copy = [0_u8; TERMINAL_CAPACITY];
+            let count = command.len().min(copy.len());
+            copy[..count].copy_from_slice(&command.as_bytes()[..count]);
+            self.terminal_push_bytes(&copy[..count]);
+        }
+    }
+
+    fn terminal_print_running_apps(&mut self) {
+        self.terminal_push("Running applications:");
+        let open = self.app_open;
+        let minimized = self.app_minimized;
+        let mut count = 0;
+        for app in AppKind::ALL {
+            if open[app.index()] {
+                self.terminal_push_parts(&[
+                    "  ",
+                    app.label(),
+                    if minimized[app.index()] {
+                        " (minimized)"
+                    } else {
+                        ""
+                    },
+                ]);
+                count += 1;
+            }
+        }
+        if count == 0 {
+            self.terminal_push("  none");
+        }
+    }
+
+    fn terminal_print_theme(&mut self) {
+        self.terminal_push_parts(&["theme: ", self.preferences.theme.label()]);
+        self.terminal_push_parts(&["wallpaper: ", self.preferences.wallpaper.label()]);
+        self.terminal_push_parts(&["cursor: ", self.preferences.cursor.label()]);
+        self.terminal_push_parts(&["accent: ", self.preferences.accent.label()]);
+    }
+
+    fn terminal_print_storage(&mut self) {
+        if let Some(generation) = state::loaded_generation() {
+            self.terminal_push_number("persistent journal generation: ", generation, "");
+        } else if state::persistent_available() {
+            self.terminal_push("persistent state disk: blank");
+        } else {
+            self.terminal_push("persistent state disk: unavailable");
+        }
+        self.terminal_push("stores: accounts and desktop preferences");
+    }
+
+    fn execute_terminal_command(&mut self, command: &[u8]) {
+        let (name, arguments) = split_command(command);
+        if let Ok(name) = core::str::from_utf8(name) {
+            slog!("HEXA_TERMINAL_COMMAND name={}\r\n", name);
+        }
+        if name.is_empty() || name.eq_ignore_ascii_case(b"help") {
+            self.terminal_print_help();
+        } else if name.eq_ignore_ascii_case(b"clear") {
+            self.terminal_clear();
+        } else if name.eq_ignore_ascii_case(b"status") {
+            self.terminal_print_status();
+        } else if name.eq_ignore_ascii_case(b"version") {
+            self.terminal_push_parts(&["ExpOS ", env!("CARGO_PKG_VERSION")]);
+        } else if name.eq_ignore_ascii_case(b"hostname") {
+            self.terminal_push("expos");
+        } else if name.eq_ignore_ascii_case(b"pwd") {
+            self.terminal_push("Stable:/");
+        } else if name.eq_ignore_ascii_case(b"whoami") {
+            let name = self.session.name();
+            let mut copy = [0_u8; TERMINAL_CAPACITY];
+            let count = name.len().min(copy.len());
+            copy[..count].copy_from_slice(&name.as_bytes()[..count]);
+            self.terminal_push_bytes(&copy[..count]);
+        } else if name.eq_ignore_ascii_case(b"id") {
+            let mut user = [0_u8; 24];
+            let user_length = self.session.name().len().min(user.len());
+            user[..user_length].copy_from_slice(&self.session.name().as_bytes()[..user_length]);
+            let user = core::str::from_utf8(&user[..user_length]).unwrap_or("unknown");
+            let authority = self.session.authority_name();
+            self.terminal_push_parts(&["user=", user, " authority=", authority]);
+        } else if name.eq_ignore_ascii_case(b"uname") {
+            self.terminal_push("ExpOS hexa-kernel x86_64");
+        } else if name.eq_ignore_ascii_case(b"uptime") {
+            self.terminal_push_number("monotonic ticks: ", crate::hardware::timestamp(), "");
+        } else if name.eq_ignore_ascii_case(b"users") {
+            self.terminal_print_users();
+        } else if name.eq_ignore_ascii_case(b"display") || name.eq_ignore_ascii_case(b"resolution")
+        {
+            self.terminal_print_display();
+        } else if name.eq_ignore_ascii_case(b"network") || name.eq_ignore_ascii_case(b"netstat") {
+            self.terminal_print_network();
+        } else if name.eq_ignore_ascii_case(b"storage") {
+            self.terminal_print_storage();
+        } else if name.eq_ignore_ascii_case(b"theme") {
+            self.terminal_print_theme();
+        } else if name.eq_ignore_ascii_case(b"history") {
+            self.terminal_print_history();
+        } else if name.eq_ignore_ascii_case(b"apps") || name.eq_ignore_ascii_case(b"ls") {
+            self.terminal_push("browser terminal forms packages settings system games notes");
+        } else if name.eq_ignore_ascii_case(b"ps") {
+            self.terminal_print_running_apps();
+        } else if name.eq_ignore_ascii_case(b"echo") {
+            self.terminal_push_bytes(arguments);
+        } else if name.eq_ignore_ascii_case(b"open") {
+            if let Some(app) = parse_app(arguments) {
+                self.terminal_push_parts(&["Opening ", app.label(), "."]);
+                self.switch_to(app);
+            } else {
+                self.terminal_push(
+                    "usage: open <browser|forms|packages|settings|system|games|notes>",
+                );
+            }
+        } else if name.eq_ignore_ascii_case(b"close") {
+            self.close_active();
+        } else if name.eq_ignore_ascii_case(b"exit") || name.eq_ignore_ascii_case(b"shell") {
+            self.should_exit = true;
+        } else {
+            self.terminal_push("Unknown command. Type help.");
+        }
     }
 
     fn handle_terminal_key(&mut self, key: u8) {
@@ -1537,15 +2238,18 @@ impl DesktopState {
                 let command = self.terminal_line;
                 let command_len = self.terminal_len;
                 self.record_terminal_history(&command[..command_len]);
-                let action = terminal_action(&command[..command_len]);
                 self.terminal_len = 0;
                 self.terminal_history_cursor = None;
-                match action {
-                    TerminalAction::Message(message) => self.set_terminal_message(message),
-                    TerminalAction::Clear => self.terminal_message_len = 0,
-                    TerminalAction::Close => self.close_active(),
-                    TerminalAction::Exit => self.should_exit = true,
+                let trimmed = trim_ascii(&command[..command_len]);
+                if !trimmed.is_empty() {
+                    let mut echoed = [0_u8; TERMINAL_OUTPUT_CAPACITY];
+                    echoed[0] = b'$';
+                    echoed[1] = b' ';
+                    let count = trimmed.len().min(echoed.len() - 2);
+                    echoed[2..2 + count].copy_from_slice(&trimmed[..count]);
+                    self.terminal_push_bytes(&echoed[..2 + count]);
                 }
+                self.execute_terminal_command(trimmed);
             }
             0x08 => {
                 self.terminal_len = self.terminal_len.saturating_sub(1);
@@ -1610,13 +2314,16 @@ impl DesktopState {
         let count = self.terminal_history_len[index] as usize;
         core::str::from_utf8(&self.terminal_history[index][..count]).ok()
     }
-}
 
-enum TerminalAction {
-    Message(&'static str),
-    Clear,
-    Close,
-    Exit,
+    fn terminal_output_entry(&self, reverse_index: usize) -> Option<&str> {
+        if reverse_index >= self.terminal_output_count {
+            return None;
+        }
+        let index = (self.terminal_output_next + TERMINAL_SCROLLBACK - 1 - reverse_index)
+            % TERMINAL_SCROLLBACK;
+        let count = self.terminal_output_len[index] as usize;
+        core::str::from_utf8(&self.terminal_output[index][..count]).ok()
+    }
 }
 
 pub fn run(input: &mut Input, start_browser: bool, session: crate::session::Session) {
@@ -1652,6 +2359,13 @@ fn run_session(
     allow_network: bool,
 ) {
     let mouse_ready = input.enable_mouse();
+    if state::persistent_available() {
+        if let Some(mode) =
+            framebuffer::DisplayMode::from_persisted(state::preferences().display_mode)
+        {
+            let _ = framebuffer::request_mode(mode);
+        }
+    }
     if !framebuffer::enter() {
         crate::println!("HexaDisplay unavailable: no Bochs/QEMU VBE framebuffer.");
         slog!("HEXA_DISPLAY_UNAVAILABLE\r\n");
@@ -1837,21 +2551,62 @@ fn launcher_shortcut(key: u8) -> Option<AppKind> {
     }
 }
 
-fn terminal_action(command: &[u8]) -> TerminalAction {
-    let trimmed = trim_ascii(command);
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case(b"help") {
-        TerminalAction::Message("Commands: help status clear close exit")
-    } else if trimmed.eq_ignore_ascii_case(b"status") {
-        TerminalAction::Message("ExpOS is ready.")
-    } else if trimmed.eq_ignore_ascii_case(b"clear") {
-        TerminalAction::Clear
-    } else if trimmed.eq_ignore_ascii_case(b"close") {
-        TerminalAction::Close
-    } else if trimmed.eq_ignore_ascii_case(b"exit") || trimmed.eq_ignore_ascii_case(b"shell") {
-        TerminalAction::Exit
+fn split_command(command: &[u8]) -> (&[u8], &[u8]) {
+    let command = trim_ascii(command);
+    let split = command
+        .iter()
+        .position(u8::is_ascii_whitespace)
+        .unwrap_or(command.len());
+    let name = &command[..split];
+    let arguments = if split < command.len() {
+        trim_ascii(&command[split + 1..])
     } else {
-        TerminalAction::Message("Unknown command. Type help.")
+        &[]
+    };
+    (name, arguments)
+}
+
+fn parse_app(value: &[u8]) -> Option<AppKind> {
+    let value = trim_ascii(value);
+    if value.eq_ignore_ascii_case(b"browser") || value.eq_ignore_ascii_case(b"b") {
+        Some(AppKind::Browser)
+    } else if value.eq_ignore_ascii_case(b"terminal") || value.eq_ignore_ascii_case(b"t") {
+        Some(AppKind::Terminal)
+    } else if value.eq_ignore_ascii_case(b"forms") || value.eq_ignore_ascii_case(b"f") {
+        Some(AppKind::Forms)
+    } else if value.eq_ignore_ascii_case(b"packages") || value.eq_ignore_ascii_case(b"p") {
+        Some(AppKind::Packages)
+    } else if value.eq_ignore_ascii_case(b"settings") || value.eq_ignore_ascii_case(b"s") {
+        Some(AppKind::Settings)
+    } else if value.eq_ignore_ascii_case(b"system") || value.eq_ignore_ascii_case(b"i") {
+        Some(AppKind::System)
+    } else if value.eq_ignore_ascii_case(b"games") || value.eq_ignore_ascii_case(b"g") {
+        Some(AppKind::Games)
+    } else if value.eq_ignore_ascii_case(b"notes") || value.eq_ignore_ascii_case(b"n") {
+        Some(AppKind::Notes)
+    } else {
+        None
     }
+}
+
+fn append_bytes(output: &mut [u8], offset: usize, value: &[u8]) -> usize {
+    let count = value.len().min(output.len().saturating_sub(offset));
+    output[offset..offset + count].copy_from_slice(&value[..count]);
+    offset + count
+}
+
+fn append_decimal(output: &mut [u8], offset: usize, mut value: u64) -> usize {
+    let mut digits = [0_u8; 20];
+    let mut start = digits.len();
+    loop {
+        start -= 1;
+        digits[start] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    append_bytes(output, offset, &digits[start..])
 }
 
 fn trim_ascii(mut value: &[u8]) -> &[u8] {
@@ -1876,19 +2631,76 @@ fn buffer(id: u32, owner: Fin, width: u16, height: u16) -> BufferHandle {
 
 fn default_rect(app: AppKind) -> Rect {
     let offset = (app.index() % 4) as i16;
-    let centered_x = ((framebuffer::WIDTH as i32 - APP_WIDTH as i32) / 2).max(8) as i16;
-    let centered_y = ((TASKBAR_Y as i32 - APP_HEIGHT as i32) / 2).max(8) as i16;
+    let (app_width, app_height) = app_dimensions();
+    let centered_x = ((framebuffer::width() as i32 - app_width as i32) / 2).max(4) as i16;
+    let centered_y = ((taskbar_y() as i32 - app_height as i32) / 2).max(4) as i16;
+    let max_x = (framebuffer::width() as i16 - app_width as i16).max(4);
+    let max_y = (taskbar_y() - app_height as i16).max(4);
     Rect::new(
-        centered_x + offset * 18,
-        centered_y + offset * 8,
-        APP_WIDTH,
-        APP_HEIGHT,
+        (centered_x + offset * 18).min(max_x),
+        (centered_y + offset * 8).min(max_y),
+        app_width,
+        app_height,
     )
+}
+
+fn draw_wallpaper(preferences: DesktopPreferences) {
+    let width = framebuffer::width() as i32;
+    let height = framebuffer::height() as i32;
+    let base = preferences.backdrop.color();
+    match preferences.wallpaper {
+        WallpaperChoice::Solid => framebuffer::clear(base),
+        WallpaperChoice::Gradient => {
+            let (top, bottom) = match preferences.backdrop {
+                BackdropChoice::Graphite => (0x0019_1D20, 0x0007_090B),
+                BackdropChoice::Midnight => (0x0009_1828, 0x0002_060B),
+                BackdropChoice::Black => (0x0008_0A0D, 0x0000_0000),
+            };
+            framebuffer::vertical_gradient(0, 0, width, height, top, bottom);
+        }
+        WallpaperChoice::Horizon => {
+            let accent = preferences.accent.color();
+            framebuffer::vertical_gradient(0, 0, width, height, 0x0005_0A12, base);
+            let horizon = height * 3 / 5;
+            framebuffer::alpha_rect(0, horizon - 2, width, 5, accent, 120);
+            framebuffer::alpha_rect(0, horizon + 3, width, height - horizon, accent, 18);
+            let mut line_y = horizon + 36;
+            while line_y < height {
+                framebuffer::alpha_rect(0, line_y, width, 1, accent, 38);
+                line_y += 34;
+            }
+        }
+        WallpaperChoice::Grid => {
+            framebuffer::clear(base);
+            let grid = preferences.theme.card();
+            let mut column = 0;
+            while column < width {
+                framebuffer::alpha_rect(column, 0, 1, height, grid, 100);
+                column += 64;
+            }
+            let mut row = 0;
+            while row < height {
+                framebuffer::alpha_rect(0, row, width, 1, grid, 100);
+                row += 64;
+            }
+        }
+        WallpaperChoice::Dusk => {
+            framebuffer::vertical_gradient(0, 0, width, height, 0x0021_1832, 0x0007_0A11);
+            framebuffer::alpha_rect(
+                0,
+                height * 2 / 3,
+                width,
+                height / 3,
+                preferences.accent.color(),
+                28,
+            );
+        }
+    }
 }
 
 fn render(desktop: &mut DesktopState) {
     desktop.cursor.invalidate();
-    framebuffer::clear(desktop.preferences.backdrop.color());
+    draw_wallpaper(desktop.preferences);
 
     for app in AppKind::ALL {
         if app != desktop.active && desktop.app_is_visible(app) {
@@ -1922,12 +2734,17 @@ fn draw_app(desktop: &DesktopState, app: AppKind, focused: bool) {
         .server
         .surface(desktop.app_surfaces[app.index()])
         .map(|surface| surface.current.rect)
-        .unwrap_or(Rect::new(48, 58, APP_WIDTH, APP_HEIGHT));
+        .unwrap_or_else(|| {
+            let (width, height) = app_dimensions();
+            Rect::new(8, 8, width, height)
+        });
     draw_window(rect, app.label(), focused, desktop.preferences);
-    let responsive_full = matches!(app, AppKind::Browser | AppKind::Terminal)
-        && rect.width >= 480
-        && rect.height >= 430;
-    if responsive_full || (rect.width >= 620 && rect.height >= 430) {
+    let responsive_full = matches!(
+        app,
+        AppKind::Browser | AppKind::Terminal | AppKind::Settings | AppKind::Notes
+    ) && rect.width >= 480
+        && rect.height >= 360;
+    if responsive_full || (rect.width >= 600 && rect.height >= 380) {
         match app {
             AppKind::Browser => draw_browser(rect, desktop),
             AppKind::Terminal => draw_terminal(rect, desktop),
@@ -1953,7 +2770,7 @@ fn draw_window(rect: Rect, title: &str, focused: bool, preferences: DesktopPrefe
     if focused {
         framebuffer::rect(x + 1, y + 1, width - 2, 2, preferences.accent.color());
     }
-    framebuffer::rect(x + 1, y + 3, width - 2, 29, color::PANEL);
+    framebuffer::rect(x + 1, y + 3, width - 2, 29, preferences.chrome_color());
     framebuffer::text(x + 12, y + 13, title, color::INK, 1);
     framebuffer::line(
         x + width - 126,
@@ -1974,11 +2791,29 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
     let y = rect.y as i32;
     let width = rect.width as i32;
     let bottom = y + rect.height as i32;
-    framebuffer::rect(x + 18, y + 50, 40, 36, color::PANEL);
-    framebuffer::outline(x + 18, y + 50, 40, 36, color::BORDER);
+    framebuffer::rect(x + 18, y + 50, 40, 36, desktop.preferences.panel_color());
+    framebuffer::outline(
+        x + 18,
+        y + 50,
+        40,
+        36,
+        desktop.preferences.border_color(false),
+    );
     framebuffer::text(x + 34, y + 64, "<", color::INK, 1);
-    framebuffer::rect(x + 66, y + 50, width - 86, 36, color::PANEL);
-    framebuffer::outline(x + 66, y + 50, width - 86, 36, color::BORDER);
+    framebuffer::rect(
+        x + 66,
+        y + 50,
+        width - 86,
+        36,
+        desktop.preferences.panel_color(),
+    );
+    framebuffer::outline(
+        x + 66,
+        y + 50,
+        width - 86,
+        36,
+        desktop.preferences.border_color(false),
+    );
     framebuffer::rect(
         x + 79,
         y + 65,
@@ -2057,40 +2892,72 @@ fn draw_terminal(rect: Rect, desktop: &DesktopState) {
     let y = rect.y as i32;
     let width = rect.width as i32;
     let height = rect.height as i32;
-    framebuffer::rect(x + 1, y + 32, width - 2, height - 33, 0x0009_0B0B);
-    if desktop.terminal_message_len > 0 {
-        let message =
-            core::str::from_utf8(&desktop.terminal_message[..desktop.terminal_message_len])
-                .unwrap_or("Invalid terminal output");
-        wrapped_text(x + 20, y + 54, width - 40, message, color::INK, 1);
-    }
-    if height >= 360 {
-        for reverse_index in (0..3).rev() {
-            if let Some(command) = desktop.terminal_history_entry(reverse_index) {
-                let row = y + 116 + (2 - reverse_index) as i32 * 20;
-                framebuffer::text(x + 20, row, "$", color::GREEN, 1);
-                framebuffer::text(x + 36, row, command, color::MUTED, 1);
-            }
+    framebuffer::rect(
+        x + 1,
+        y + 32,
+        width - 2,
+        height - 33,
+        desktop.preferences.theme.terminal(),
+    );
+    let prompt_y = y + height - 34;
+    let output_top = y + 48;
+    let line_height = 14;
+    let visible_lines = ((prompt_y - output_top - 8) / line_height).max(0) as usize;
+    let lines = visible_lines.min(desktop.terminal_output_count);
+    for visual_index in 0..lines {
+        let reverse_index = lines - visual_index - 1;
+        if let Some(line) = desktop.terminal_output_entry(reverse_index) {
+            let visible_length = line
+                .len()
+                .min(((width - 40) / framebuffer::text_advance(1)).max(1) as usize);
+            framebuffer::text(
+                x + 20,
+                output_top + visual_index as i32 * line_height,
+                &line[..visible_length],
+                if line.starts_with("$ ") {
+                    desktop.preferences.accent.color()
+                } else {
+                    color::INK
+                },
+                1,
+            );
         }
     }
-    let prompt_y = y + height - 34;
-    let advance = framebuffer::text_advance(2);
-    framebuffer::text(x + 20, prompt_y, desktop.session.name(), color::GREEN, 2);
+    framebuffer::line(
+        x + 14,
+        prompt_y - 10,
+        x + width - 14,
+        prompt_y - 10,
+        desktop.preferences.border_color(false),
+    );
+    let prompt_scale = if width < 800 { 1 } else { 2 };
+    let advance = framebuffer::text_advance(prompt_scale);
+    let accent = desktop.preferences.accent.color();
+    framebuffer::text(
+        x + 20,
+        prompt_y,
+        desktop.session.name(),
+        accent,
+        prompt_scale,
+    );
     framebuffer::text(
         x + 20 + desktop.session.name().len() as i32 * advance,
         prompt_y,
         "@expos $",
-        color::GREEN,
-        2,
+        accent,
+        prompt_scale,
     );
     if let Ok(line) = core::str::from_utf8(&desktop.terminal_line[..desktop.terminal_len]) {
         let input_x = x + 20 + (desktop.session.name().len() as i32 + 8) * advance;
-        framebuffer::text(input_x, prompt_y, line, color::WHITE, 2);
+        let visible_capacity = ((x + width - 20 - input_x) / advance).max(1) as usize;
+        let visible_start = line.len().saturating_sub(visible_capacity);
+        let visible = &line[visible_start..];
+        framebuffer::text(input_x, prompt_y, visible, color::WHITE, prompt_scale);
         framebuffer::rect(
-            input_x + line.len() as i32 * advance,
+            input_x + visible.len() as i32 * advance,
             prompt_y,
-            8,
-            16,
+            if prompt_scale == 1 { 5 } else { 8 },
+            if prompt_scale == 1 { 9 } else { 16 },
             color::MUTED,
         );
     }
@@ -2237,12 +3104,21 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
     let y = rect.y as i32;
     let width = rect.width as i32;
     let height = rect.height as i32;
-    let sidebar_width = SETTINGS_SIDEBAR_WIDTH as i32;
+    let sidebar_width = settings_sidebar_width(rect) as i32;
+    let compact = settings_compact(rect);
+    let category_top = settings_category_top(rect) as i32;
+    let category_step = settings_category_step(rect) as i32;
     let accent = desktop.preferences.accent.color();
     let connectivity = radio::snapshot();
     let can_configure_radios = desktop.settings_radio_handle.is_some();
 
-    framebuffer::rect(x + 1, y + 32, sidebar_width, height - 33, 0x0008_0A0D);
+    framebuffer::rect(
+        x + 1,
+        y + 32,
+        sidebar_width,
+        height - 33,
+        desktop.preferences.chrome_color(),
+    );
     framebuffer::line(
         x + sidebar_width,
         y + 32,
@@ -2250,12 +3126,16 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
         y + height - 1,
         desktop.preferences.border_color(false),
     );
-    framebuffer::text(x + 20, y + 54, "Settings", color::INK, 2);
+    framebuffer::text(
+        x + 20,
+        y + if compact { 44 } else { 54 },
+        "Settings",
+        color::INK,
+        if compact { 1 } else { 2 },
+    );
 
     for category in SettingsCategory::ALL {
-        let row_y = y
-            + SETTINGS_CATEGORY_TOP as i32
-            + category.index() as i32 * SETTINGS_CATEGORY_STEP as i32;
+        let row_y = y + category_top + category.index() as i32 * category_step;
         let selected = category == desktop.settings_category;
         if selected {
             settings_rect(
@@ -2263,7 +3143,7 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 x + 12,
                 row_y,
                 sidebar_width - 24,
-                SETTINGS_CATEGORY_STEP as i32 - 4,
+                category_step - 4,
                 5,
                 0x001B_2225,
             );
@@ -2282,18 +3162,20 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
     let content_width = width - sidebar_width - 50;
     framebuffer::text(
         content_x,
-        y + 55,
+        y + if compact { 45 } else { 55 },
         desktop.settings_category.label(),
         color::INK,
-        2,
+        if compact { 1 } else { 2 },
     );
-    framebuffer::text(
-        content_x,
-        y + 82,
-        desktop.settings_category.description(),
-        color::MUTED,
-        1,
-    );
+    if !compact {
+        framebuffer::text(
+            content_x,
+            y + 82,
+            desktop.settings_category.description(),
+            color::MUTED,
+            1,
+        );
+    }
 
     match desktop.settings_category {
         SettingsCategory::System => {
@@ -2341,6 +3223,28 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 y,
                 content_width,
                 0,
+                "Theme",
+                "Window chrome and panel palette",
+                desktop.preferences.theme.label(),
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                1,
+                "Wallpaper",
+                "Procedural desktop artwork",
+                desktop.preferences.wallpaper.label(),
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                2,
                 "Accent color",
                 "Used for focus, selections, and switches",
                 desktop.preferences.accent.label(),
@@ -2351,9 +3255,9 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 content_x,
                 y,
                 content_width,
-                1,
-                "Desktop background",
-                "Choose a clean solid desktop color",
+                3,
+                "Wallpaper tone",
+                "Base color behind the wallpaper",
                 desktop.preferences.backdrop.label(),
                 SettingControl::Choice,
             );
@@ -2362,7 +3266,7 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 content_x,
                 y,
                 content_width,
-                2,
+                4,
                 "Pure black apps",
                 "Use black instead of charcoal for windows",
                 if desktop.preferences.pure_black_apps {
@@ -2380,7 +3284,7 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 content_x,
                 y,
                 content_width,
-                3,
+                5,
                 "Rounded controls",
                 "Round buttons, selections, and switches",
                 if desktop.preferences.rounded_controls {
@@ -2520,9 +3424,9 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 content_width,
                 0,
                 "Resolution",
-                "Current HexaDisplay framebuffer mode",
-                DISPLAY_MODE_LABEL,
-                SettingControl::Plain,
+                "480p, 720p, or 1080p; applies next desktop session",
+                framebuffer::requested_mode().label(),
+                SettingControl::Choice,
             );
             settings_row(
                 desktop,
@@ -2530,9 +3434,9 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 y,
                 content_width,
                 1,
-                "Renderer",
-                "Direct XRGB8888 software composition",
-                "HexaDisplay",
+                "Active output",
+                "Direct XRGB8888 HexaDisplay composition",
+                framebuffer::current_mode().label(),
                 SettingControl::Status { ready: true },
             );
             settings_row(
@@ -2590,6 +3494,17 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 y,
                 content_width,
                 1,
+                "Cursor theme",
+                "Light, dark, accent, or crosshair pointer",
+                desktop.preferences.cursor.label(),
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                2,
                 "Mouse",
                 "PS/2 pointer with buttons and window dragging",
                 "Ready",
@@ -2600,7 +3515,7 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 content_x,
                 y,
                 content_width,
-                2,
+                3,
                 "Keyboard",
                 "PS/2 and serial input with desktop shortcuts",
                 "Ready",
@@ -2681,14 +3596,14 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
             );
             framebuffer::text(
                 content_x + content_width - 42,
-                y + SETTINGS_ROW_TOP as i32 + 3 * SETTINGS_ROW_STEP as i32 + 31,
+                y + settings_row_top(rect) as i32 + 3 * settings_row_step(rect) as i32 + 31,
                 "#",
                 color::MUTED,
                 1,
             );
             draw_number(
                 content_x + content_width - 28,
-                y + SETTINGS_ROW_TOP as i32 + 3 * SETTINGS_ROW_STEP as i32 + 31,
+                y + settings_row_top(rect) as i32 + 3 * settings_row_step(rect) as i32 + 31,
                 crate::session::account_count() as u64,
                 color::CYAN,
             );
@@ -2719,7 +3634,11 @@ fn settings_row(
     value: &str,
     control: SettingControl,
 ) {
-    let y = window_y + SETTINGS_ROW_TOP as i32 + index as i32 * SETTINGS_ROW_STEP as i32;
+    let compact = width < 600;
+    let row_top = if compact { 88 } else { 112 };
+    let row_step = if compact { 47 } else { 62 };
+    let row_height = if compact { 42 } else { 54 };
+    let y = window_y + row_top + index as i32 * row_step;
     let selected = desktop.settings_row == index;
     let accent = desktop.preferences.accent.color();
     settings_rect(
@@ -2727,15 +3646,27 @@ fn settings_row(
         x,
         y,
         width,
-        SETTINGS_ROW_HEIGHT as i32,
+        row_height,
         6,
-        if selected { 0x0019_2024 } else { 0x000D_1114 },
+        if selected {
+            desktop.preferences.panel_color()
+        } else {
+            desktop.preferences.card_color()
+        },
     );
     if selected {
-        framebuffer::outline(x, y, width, SETTINGS_ROW_HEIGHT as i32, accent);
+        framebuffer::outline(x, y, width, row_height, accent);
     }
-    framebuffer::text(x + 16, y + 12, label, color::INK, 1);
-    framebuffer::text(x + 16, y + 33, detail, color::MUTED, 1);
+    framebuffer::text(
+        x + 16,
+        y + if compact { 17 } else { 12 },
+        label,
+        color::INK,
+        1,
+    );
+    if !compact {
+        framebuffer::text(x + 16, y + 33, detail, color::MUTED, 1);
+    }
 
     match control {
         SettingControl::Toggle { on, available } => {
@@ -2743,7 +3674,7 @@ fn settings_row(
             settings_rect(
                 desktop.preferences,
                 control_x,
-                y + 17,
+                y + if compact { 11 } else { 17 },
                 42,
                 20,
                 10,
@@ -2759,7 +3690,7 @@ fn settings_row(
             settings_rect(
                 desktop.preferences,
                 knob_x,
-                y + 20,
+                y + if compact { 14 } else { 20 },
                 14,
                 14,
                 7,
@@ -2771,7 +3702,7 @@ fn settings_row(
             );
             framebuffer::text(
                 control_x - 88,
-                y + 23,
+                y + if compact { 17 } else { 23 },
                 value,
                 if available { color::INK } else { color::MUTED },
                 1,
@@ -2783,45 +3714,70 @@ fn settings_row(
             settings_rect(
                 desktop.preferences,
                 control_x,
-                y + 12,
+                y + if compact { 6 } else { 12 },
                 control_width,
                 30,
                 5,
                 0x0018_1D21,
             );
-            framebuffer::outline(control_x, y + 12, control_width, 30, color::BORDER);
-            framebuffer::text(control_x + 10, y + 22, "<", color::MUTED, 1);
-            framebuffer::text(control_x + 30, y + 22, value, color::INK, 1);
-            framebuffer::text(control_x + control_width - 18, y + 22, ">", color::MUTED, 1);
+            let control_y = y + if compact { 6 } else { 12 };
+            framebuffer::outline(control_x, control_y, control_width, 30, color::BORDER);
+            framebuffer::text(control_x + 10, control_y + 10, "<", color::MUTED, 1);
+            framebuffer::text(control_x + 30, control_y + 10, value, color::INK, 1);
+            framebuffer::text(
+                control_x + control_width - 18,
+                control_y + 10,
+                ">",
+                color::MUTED,
+                1,
+            );
         }
         SettingControl::Status { ready } => {
             let value_x = x + width - 20 - value.len() as i32 * framebuffer::text_advance(1);
             let marker_x = value_x - 16;
             framebuffer::rect(
                 marker_x,
-                y + 24,
+                y + if compact { 18 } else { 24 },
                 7,
                 7,
                 if ready { accent } else { color::MUTED },
             );
-            framebuffer::text(value_x, y + 23, value, color::MUTED, 1);
+            framebuffer::text(
+                value_x,
+                y + if compact { 17 } else { 23 },
+                value,
+                color::MUTED,
+                1,
+            );
         }
         SettingControl::Action { available } => {
             let button_x = x + width - 104;
             settings_rect(
                 desktop.preferences,
                 button_x,
-                y + 12,
+                y + if compact { 6 } else { 12 },
                 84,
                 30,
                 5,
                 if available { accent } else { color::BORDER },
             );
-            framebuffer::text(button_x + 20, y + 22, value, color::WHITE, 1);
+            framebuffer::text(
+                button_x + 20,
+                y + if compact { 16 } else { 22 },
+                value,
+                color::WHITE,
+                1,
+            );
         }
         SettingControl::Plain => {
             let value_x = x + width - 20 - value.len() as i32 * framebuffer::text_advance(1);
-            framebuffer::text(value_x, y + 23, value, color::MUTED, 1);
+            framebuffer::text(
+                value_x,
+                y + if compact { 17 } else { 23 },
+                value,
+                color::MUTED,
+                1,
+            );
         }
     }
 }
@@ -2861,7 +3817,7 @@ fn draw_system(rect: Rect, desktop: &DesktopState) {
         y + 98,
         metric_width,
         "Framebuffer",
-        DISPLAY_MODE_LABEL,
+        framebuffer::current_mode().label(),
         color::CYAN,
     );
     metric(
@@ -2893,7 +3849,7 @@ fn draw_system(rect: Rect, desktop: &DesktopState) {
         y + 250,
         metric_width,
         "Network",
-        "DNS + TCP + HTTP",
+        "Native IPv4 stack",
         color::GREEN,
     );
     framebuffer::text(x + 34, y + 343, "Commits", color::MUTED, 1);
@@ -2915,17 +3871,23 @@ fn metric(x: i32, y: i32, width: i32, label: &str, value: &str, accent: u32) {
 }
 
 fn draw_dock(desktop: &DesktopState) {
-    let y = TASKBAR_Y as i32;
+    let y = taskbar_y() as i32;
     let accent = desktop.preferences.accent.color();
     framebuffer::alpha_rect(
         0,
         y,
-        framebuffer::WIDTH as i32,
+        framebuffer::width() as i32,
         TASKBAR_HEIGHT as i32,
-        0x0010_141D,
+        desktop.preferences.panel_color(),
         244,
     );
-    framebuffer::rect(0, y, framebuffer::WIDTH as i32, 1, color::BORDER);
+    framebuffer::rect(
+        0,
+        y,
+        framebuffer::width() as i32,
+        1,
+        desktop.preferences.border_color(false),
+    );
     let start_color = if desktop.launcher_open {
         0x0032_2654
     } else {
@@ -2969,7 +3931,7 @@ fn draw_dock(desktop: &DesktopState) {
     if desktop.preferences.status_visible {
         let connectivity = radio::snapshot();
         framebuffer::rect(
-            framebuffer::WIDTH as i32 - 22,
+            framebuffer::width() as i32 - 22,
             y + 21,
             7,
             7,
@@ -2984,11 +3946,11 @@ fn draw_dock(desktop: &DesktopState) {
 
 fn draw_launcher(desktop: &DesktopState) {
     let x = LAUNCHER_X as i32;
-    let y = LAUNCHER_Y as i32;
+    let y = launcher_y() as i32;
     let width = LAUNCHER_WIDTH as i32;
     let height = LAUNCHER_HEIGHT as i32;
-    framebuffer::rounded_rect(x, y, width, height, 9, color::PANEL);
-    framebuffer::outline(x, y, width, height, color::BORDER);
+    framebuffer::rounded_rect(x, y, width, height, 9, desktop.preferences.panel_color());
+    framebuffer::outline(x, y, width, height, desktop.preferences.border_color(false));
     framebuffer::text(x + 16, y + 17, "Applications", color::INK, 1);
     framebuffer::rect(x + 12, y + 39, width - 24, 1, color::BORDER);
     for (index, app) in AppKind::ALL.iter().copied().enumerate() {
@@ -3002,7 +3964,7 @@ fn draw_launcher(desktop: &DesktopState) {
             if app == desktop.active && desktop.app_open[app.index()] {
                 0x0024_292F
             } else {
-                color::PANEL
+                desktop.preferences.panel_color()
             },
         );
         framebuffer::rounded_rect(x + 16, row_y + 6, 16, 16, 4, app.accent());

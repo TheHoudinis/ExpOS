@@ -1,7 +1,15 @@
 use crate::port;
+use core::sync::atomic::{AtomicU8, Ordering};
 
+/// Maximum scanout geometry supported by the mapped Bochs/QEMU framebuffer.
+///
+/// These compatibility constants intentionally describe the largest mode, not
+/// the mode that is currently selected. New code should use [`width`],
+/// [`height`], and [`stride_bytes`] for runtime layout and drawing.
 pub const WIDTH: usize = 1920;
 pub const HEIGHT: usize = 1080;
+pub const MAX_WIDTH: usize = WIDTH;
+pub const MAX_HEIGHT: usize = HEIGHT;
 pub const BITS_PER_PIXEL: usize = 32;
 pub const BYTES_PER_PIXEL: usize = BITS_PER_PIXEL / 8;
 pub const STRIDE_BYTES: usize = WIDTH * BYTES_PER_PIXEL;
@@ -31,6 +39,104 @@ const INDEX_Y_OFFSET: u16 = 9;
 const DISABLED: u16 = 0;
 const ENABLED: u16 = 0x01;
 const LFB_ENABLED: u16 = 0x40;
+const NO_ACTIVE_MODE: u8 = u8::MAX;
+
+/// A user-selectable progressive display mode.
+///
+/// The discriminants are stable because settings persistence may store them.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DisplayMode {
+    P480 = 0,
+    P720 = 1,
+    #[default]
+    P1080 = 2,
+}
+
+impl DisplayMode {
+    pub const ALL: [Self; 3] = [Self::P480, Self::P720, Self::P1080];
+
+    pub const fn width(self) -> usize {
+        match self {
+            Self::P480 => 640,
+            Self::P720 => 1280,
+            Self::P1080 => 1920,
+        }
+    }
+
+    pub const fn height(self) -> usize {
+        match self {
+            Self::P480 => 480,
+            Self::P720 => 720,
+            Self::P1080 => 1080,
+        }
+    }
+
+    pub const fn dimensions(self) -> (usize, usize) {
+        (self.width(), self.height())
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::P480 => "480p",
+            Self::P720 => "720p",
+            Self::P1080 => "1080p",
+        }
+    }
+
+    pub const fn stride_bytes(self) -> usize {
+        self.width() * BYTES_PER_PIXEL
+    }
+
+    pub const fn scanout_bytes(self) -> usize {
+        self.stride_bytes() * self.height()
+    }
+
+    pub const fn fits_aperture(self) -> bool {
+        self.width() <= MAX_WIDTH
+            && self.height() <= MAX_HEIGHT
+            && self.scanout_bytes() <= LFB_APERTURE_BYTES
+    }
+
+    pub const fn hardware_mode(self) -> Mode {
+        Mode {
+            width: self.width() as u16,
+            height: self.height() as u16,
+            bits_per_pixel: BITS_PER_PIXEL as u16,
+            virtual_width: self.width() as u16,
+            virtual_height: self.height() as u16,
+        }
+    }
+
+    pub const fn from_dimensions(width: usize, height: usize) -> Option<Self> {
+        match (width, height) {
+            (640, 480) => Some(Self::P480),
+            (1280, 720) => Some(Self::P720),
+            (1920, 1080) => Some(Self::P1080),
+            _ => None,
+        }
+    }
+
+    pub const fn from_persisted(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::P480),
+            1 => Some(Self::P720),
+            2 => Some(Self::P1080),
+            _ => None,
+        }
+    }
+
+    pub const fn persisted(self) -> u8 {
+        self as u8
+    }
+}
+
+const _: () = assert!(DisplayMode::P480.fits_aperture());
+const _: () = assert!(DisplayMode::P720.fits_aperture());
+const _: () = assert!(DisplayMode::P1080.fits_aperture());
+
+static REQUESTED_MODE: AtomicU8 = AtomicU8::new(DisplayMode::P1080 as u8);
+static ACTIVE_DISPLAY_MODE: AtomicU8 = AtomicU8::new(NO_ACTIVE_MODE);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Mode {
@@ -70,9 +176,56 @@ pub fn available() -> bool {
     (0xB0C0..=0xB0C5).contains(&id)
 }
 
-/// Return the geometry reported by the adapter while graphics are enabled.
-/// Callers can distinguish the requested build-time mode from the active
-/// hardware mode instead of assuming that register programming succeeded.
+/// Select the mode that the next [`enter`] call will program.
+///
+/// Requesting a mode while graphics are active does not silently invalidate
+/// the current scanout. The current mode remains active until the caller exits
+/// or calls [`enter`] again, at which point the requested mode is applied.
+pub fn request_mode(mode: DisplayMode) -> bool {
+    if !mode.fits_aperture() {
+        return false;
+    }
+    REQUESTED_MODE.store(mode.persisted(), Ordering::Release);
+    true
+}
+
+pub fn requested_mode() -> DisplayMode {
+    DisplayMode::from_persisted(REQUESTED_MODE.load(Ordering::Acquire)).unwrap_or_default()
+}
+
+/// Return the mode whose geometry is safe for current framebuffer access.
+pub fn active_display_mode() -> Option<DisplayMode> {
+    DisplayMode::from_persisted(ACTIVE_DISPLAY_MODE.load(Ordering::Acquire))
+}
+
+/// Return the active mode, or the requested mode before graphics are entered.
+///
+/// Layout code can use this before and after [`enter`]. Drawing code normally
+/// calls it while a mode is active, so an un-applied request cannot change its
+/// stride underneath the current scanout.
+pub fn current_mode() -> DisplayMode {
+    active_display_mode().unwrap_or_else(requested_mode)
+}
+
+pub fn width() -> usize {
+    current_mode().width()
+}
+
+pub fn height() -> usize {
+    current_mode().height()
+}
+
+pub fn stride_bytes() -> usize {
+    current_mode().stride_bytes()
+}
+
+pub fn scanout_bytes() -> usize {
+    current_mode().scanout_bytes()
+}
+
+/// Return the raw geometry reported by the adapter while graphics are enabled.
+/// Callers can distinguish the requested mode from the active hardware mode
+/// instead of assuming that register programming succeeded.
 pub fn active_mode() -> Option<Mode> {
     if !available() || read(INDEX_ENABLE) & ENABLED == 0 {
         return None;
@@ -81,37 +234,46 @@ pub fn active_mode() -> Option<Mode> {
 }
 
 pub fn enter() -> bool {
+    program_mode(requested_mode())
+}
+
+fn program_mode(requested: DisplayMode) -> bool {
+    ACTIVE_DISPLAY_MODE.store(NO_ACTIVE_MODE, Ordering::Release);
     if !available() {
         return false;
     }
+    let desired = requested.hardware_mode();
     write(INDEX_ENABLE, DISABLED);
-    write(INDEX_XRES, WIDTH as u16);
-    write(INDEX_YRES, HEIGHT as u16);
-    write(INDEX_BPP, BITS_PER_PIXEL as u16);
-    write(INDEX_VIRT_WIDTH, WIDTH as u16);
-    write(INDEX_VIRT_HEIGHT, HEIGHT as u16);
+    write(INDEX_XRES, desired.width);
+    write(INDEX_YRES, desired.height);
+    write(INDEX_BPP, desired.bits_per_pixel);
+    write(INDEX_VIRT_WIDTH, desired.virtual_width);
+    write(INDEX_VIRT_HEIGHT, desired.virtual_height);
     write(INDEX_X_OFFSET, 0);
     write(INDEX_Y_OFFSET, 0);
     write(INDEX_ENABLE, ENABLED | LFB_ENABLED);
 
-    // Bochs-compatible adapters are allowed to reject an unsupported mode.
-    // Never draw through the larger stride unless the programmed geometry was
-    // accepted exactly; doing so could otherwise walk beyond the active mode.
+    // Bochs-compatible adapters may expose a taller virtual canvas than the
+    // visible mode even after VIRT_HEIGHT is programmed. That is harmless: the
+    // visible height and virtual width determine every address we draw. Reject
+    // any change in visible geometry, pixel format, or stride.
     let active = active_mode();
     let configured = active.is_some_and(|mode| {
-        mode.width == WIDTH as u16
-            && mode.height == HEIGHT as u16
-            && mode.bits_per_pixel == BITS_PER_PIXEL as u16
-            && mode.virtual_width == WIDTH as u16
-            && mode.virtual_height >= HEIGHT as u16
+        mode.width == desired.width
+            && mode.height == desired.height
+            && mode.bits_per_pixel == desired.bits_per_pixel
+            && mode.virtual_width == desired.virtual_width
+            && mode.virtual_height >= desired.height
+            && mode.stride_bytes() == requested.stride_bytes()
+            && mode.scanout_bytes() == requested.scanout_bytes()
             && mode.scanout_bytes() <= LFB_APERTURE_BYTES
     });
     if !configured {
         if let Some(mode) = active {
             crate::slog!(
                 "HEXA_DISPLAY_MODE_REJECTED requested={}x{}x{} actual={}x{}x{} virtual={}x{}\r\n",
-                WIDTH,
-                HEIGHT,
+                desired.width,
+                desired.height,
                 BITS_PER_PIXEL,
                 mode.width,
                 mode.height,
@@ -122,8 +284,8 @@ pub fn enter() -> bool {
         } else {
             crate::slog!(
                 "HEXA_DISPLAY_MODE_REJECTED requested={}x{}x{} actual=disabled\r\n",
-                WIDTH,
-                HEIGHT,
+                desired.width,
+                desired.height,
                 BITS_PER_PIXEL
             );
         }
@@ -133,26 +295,30 @@ pub fn enter() -> bool {
     }
 
     let mode = active.expect("configured mode must be readable");
+    ACTIVE_DISPLAY_MODE.store(requested.persisted(), Ordering::Release);
     crate::slog!(
-        "HEXA_DISPLAY_MODE width={} height={} bpp={} stride={} bytes={}\r\n",
+        "HEXA_DISPLAY_MODE width={} height={} bpp={} stride={} bytes={} preset={}\r\n",
         mode.width,
         mode.height,
         mode.bits_per_pixel,
         mode.stride_bytes(),
-        mode.scanout_bytes()
+        mode.scanout_bytes(),
+        requested.label()
     );
     clear(color::BACKGROUND);
     true
 }
 
 pub fn exit() {
+    ACTIVE_DISPLAY_MODE.store(NO_ACTIVE_MODE, Ordering::Release);
     write(INDEX_ENABLE, DISABLED);
     restore_vga_text_mode();
 }
 
 pub fn clear(value: u32) {
     let pointer = LFB as *mut u32;
-    for offset in 0..WIDTH * HEIGHT {
+    let pixels = scanout_bytes() / BYTES_PER_PIXEL;
+    for offset in 0..pixels {
         // SAFETY: the bootstrap maps the QEMU/Bochs LFB MMIO range and this
         // module is the only graphical writer while display mode is active.
         unsafe { core::ptr::write_volatile(pointer.add(offset), value) };
@@ -160,29 +326,37 @@ pub fn clear(value: u32) {
 }
 
 pub fn pixel(x: i32, y: i32, value: u32) {
-    if x < 0 || y < 0 || x >= WIDTH as i32 || y >= HEIGHT as i32 {
+    let mode = current_mode();
+    if x < 0 || y < 0 || x >= mode.width() as i32 || y >= mode.height() as i32 {
         return;
     }
-    let offset = y as usize * WIDTH + x as usize;
+    let stride_pixels = mode.stride_bytes() / BYTES_PER_PIXEL;
+    let offset = y as usize * stride_pixels + x as usize;
     unsafe { core::ptr::write_volatile((LFB as *mut u32).add(offset), value) };
 }
 
 pub fn read_pixel(x: i32, y: i32) -> u32 {
-    if x < 0 || y < 0 || x >= WIDTH as i32 || y >= HEIGHT as i32 {
+    let mode = current_mode();
+    if x < 0 || y < 0 || x >= mode.width() as i32 || y >= mode.height() as i32 {
         return 0;
     }
-    let offset = y as usize * WIDTH + x as usize;
+    let stride_pixels = mode.stride_bytes() / BYTES_PER_PIXEL;
+    let offset = y as usize * stride_pixels + x as usize;
     unsafe { core::ptr::read_volatile((LFB as *const u32).add(offset)) }
 }
 
 pub fn rect(x: i32, y: i32, width: i32, height: i32, value: u32) {
-    let left = x.max(0).min(WIDTH as i32);
-    let top = y.max(0).min(HEIGHT as i32);
-    let right = x.saturating_add(width).max(0).min(WIDTH as i32);
-    let bottom = y.saturating_add(height).max(0).min(HEIGHT as i32);
+    let mode = current_mode();
+    let mode_width = mode.width() as i32;
+    let mode_height = mode.height() as i32;
+    let left = x.max(0).min(mode_width);
+    let top = y.max(0).min(mode_height);
+    let right = x.saturating_add(width).max(0).min(mode_width);
+    let bottom = y.saturating_add(height).max(0).min(mode_height);
+    let stride_pixels = mode.stride_bytes() / BYTES_PER_PIXEL;
     let pointer = LFB as *mut u32;
     for row in top..bottom {
-        let offset = row as usize * WIDTH;
+        let offset = row as usize * stride_pixels;
         for column in left..right {
             unsafe { core::ptr::write_volatile(pointer.add(offset + column as usize), value) };
         }
@@ -237,10 +411,13 @@ pub fn rounded_rect(x: i32, y: i32, width: i32, height: i32, radius: i32, value:
 }
 
 pub fn alpha_rect(x: i32, y: i32, width: i32, height: i32, value: u32, alpha: u8) {
-    let left = x.max(0).min(WIDTH as i32);
-    let top = y.max(0).min(HEIGHT as i32);
-    let right = x.saturating_add(width).max(0).min(WIDTH as i32);
-    let bottom = y.saturating_add(height).max(0).min(HEIGHT as i32);
+    let mode = current_mode();
+    let mode_width = mode.width() as i32;
+    let mode_height = mode.height() as i32;
+    let left = x.max(0).min(mode_width);
+    let top = y.max(0).min(mode_height);
+    let right = x.saturating_add(width).max(0).min(mode_width);
+    let bottom = y.saturating_add(height).max(0).min(mode_height);
     for row in top..bottom {
         for column in left..right {
             pixel(column, row, blend(read_pixel(column, row), value, alpha));
@@ -570,5 +747,57 @@ fn glyph_rows(byte: u8) -> [u8; 8] {
         FONT8X8_BASIC[(byte - b' ') as usize]
     } else {
         FONT8X8_BASIC[(b'?' - b' ') as usize]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progressive_modes_have_expected_geometry() {
+        assert_eq!(DisplayMode::P480.dimensions(), (640, 480));
+        assert_eq!(DisplayMode::P720.dimensions(), (1280, 720));
+        assert_eq!(DisplayMode::P1080.dimensions(), (1920, 1080));
+        assert_eq!(DisplayMode::ALL.len(), 3);
+    }
+
+    #[test]
+    fn every_selectable_mode_fits_the_mapped_aperture() {
+        for mode in DisplayMode::ALL {
+            assert!(mode.fits_aperture());
+            assert_eq!(mode.stride_bytes(), mode.width() * BYTES_PER_PIXEL);
+            assert_eq!(
+                mode.scanout_bytes(),
+                mode.width() * mode.height() * BYTES_PER_PIXEL
+            );
+            assert!(mode.scanout_bytes() <= LFB_APERTURE_BYTES);
+        }
+    }
+
+    #[test]
+    fn persisted_mode_values_are_stable_and_validated() {
+        for mode in DisplayMode::ALL {
+            assert_eq!(DisplayMode::from_persisted(mode.persisted()), Some(mode));
+            assert_eq!(
+                DisplayMode::from_dimensions(mode.width(), mode.height()),
+                Some(mode)
+            );
+        }
+        assert_eq!(DisplayMode::from_persisted(3), None);
+        assert_eq!(DisplayMode::from_persisted(u8::MAX), None);
+        assert_eq!(DisplayMode::from_dimensions(800, 600), None);
+    }
+
+    #[test]
+    fn requested_mode_round_trips_without_changing_active_scanout() {
+        ACTIVE_DISPLAY_MODE.store(NO_ACTIVE_MODE, Ordering::Release);
+        assert!(request_mode(DisplayMode::P480));
+        assert_eq!(requested_mode(), DisplayMode::P480);
+        assert_eq!(current_mode(), DisplayMode::P480);
+        assert_eq!(width(), 640);
+        assert_eq!(height(), 480);
+        assert_eq!(active_display_mode(), None);
+        assert!(request_mode(DisplayMode::P1080));
     }
 }
