@@ -1,5 +1,5 @@
 use crate::port;
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, Ordering};
 
 /// Maximum scanout geometry supported by the mapped Bochs/QEMU framebuffer.
 ///
@@ -40,6 +40,9 @@ const DISABLED: u16 = 0;
 const ENABLED: u16 = 0x01;
 const LFB_ENABLED: u16 = 0x40;
 const NO_ACTIVE_MODE: u8 = u8::MAX;
+const VGA_INPUT_STATUS: u16 = 0x03DA;
+const VGA_VERTICAL_RETRACE: u8 = 1 << 3;
+const VBLANK_POLL_LIMIT: usize = 250_000;
 
 /// A user-selectable progressive display mode.
 ///
@@ -92,6 +95,10 @@ impl DisplayMode {
         self.stride_bytes() * self.height()
     }
 
+    pub const fn double_buffer_bytes(self) -> usize {
+        self.scanout_bytes() * 2
+    }
+
     pub const fn fits_aperture(self) -> bool {
         self.width() <= MAX_WIDTH
             && self.height() <= MAX_HEIGHT
@@ -104,7 +111,7 @@ impl DisplayMode {
             height: self.height() as u16,
             bits_per_pixel: BITS_PER_PIXEL as u16,
             virtual_width: self.width() as u16,
-            virtual_height: self.height() as u16,
+            virtual_height: (self.height() * 2) as u16,
         }
     }
 
@@ -134,9 +141,17 @@ impl DisplayMode {
 const _: () = assert!(DisplayMode::P480.fits_aperture());
 const _: () = assert!(DisplayMode::P720.fits_aperture());
 const _: () = assert!(DisplayMode::P1080.fits_aperture());
+const _: () = assert!(DisplayMode::P480.double_buffer_bytes() <= LFB_APERTURE_BYTES);
+const _: () = assert!(DisplayMode::P720.double_buffer_bytes() <= LFB_APERTURE_BYTES);
+const _: () = assert!(DisplayMode::P1080.double_buffer_bytes() <= LFB_APERTURE_BYTES);
 
 static REQUESTED_MODE: AtomicU8 = AtomicU8::new(DisplayMode::P1080 as u8);
 static ACTIVE_DISPLAY_MODE: AtomicU8 = AtomicU8::new(NO_ACTIVE_MODE);
+static PAGE_FLIP_AVAILABLE: AtomicBool = AtomicBool::new(false);
+static DRAW_Y: AtomicU16 = AtomicU16::new(0);
+static FRONT_Y: AtomicU16 = AtomicU16::new(0);
+static PRESENTED_FRAMES: AtomicU64 = AtomicU64::new(0);
+static VBLANK_TIMEOUTS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Mode {
@@ -155,6 +170,102 @@ impl Mode {
     pub const fn scanout_bytes(self) -> usize {
         self.stride_bytes() * self.height as usize
     }
+
+    pub const fn aperture_bytes(self) -> usize {
+        self.stride_bytes() * self.virtual_height as usize
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PresentationStats {
+    pub frames: u64,
+    pub vblank_timeouts: u64,
+    pub page_flip_available: bool,
+}
+
+/// A clipped scanout area that must be copied to the newly hidden page after
+/// a flip. Keeping the two pages coherent only where pixels changed avoids a
+/// full 16 MiB read/write round trip for cursor and terminal updates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DamageRegion {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl DamageRegion {
+    pub const fn new(x: i32, y: i32, width: i32, height: i32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    pub const fn union(self, other: Self) -> Self {
+        let left = if self.x < other.x { self.x } else { other.x };
+        let top = if self.y < other.y { self.y } else { other.y };
+        let self_right = self.x.saturating_add(self.width);
+        let other_right = other.x.saturating_add(other.width);
+        let right = if self_right > other_right {
+            self_right
+        } else {
+            other_right
+        };
+        let self_bottom = self.y.saturating_add(self.height);
+        let other_bottom = other.y.saturating_add(other.height);
+        let bottom = if self_bottom > other_bottom {
+            self_bottom
+        } else {
+            other_bottom
+        };
+        Self::new(
+            left,
+            top,
+            right.saturating_sub(left),
+            bottom.saturating_sub(top),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ClippedRegion {
+    left: usize,
+    top: usize,
+    right: usize,
+    bottom: usize,
+}
+
+impl ClippedRegion {
+    const fn width(self) -> usize {
+        self.right - self.left
+    }
+
+    const fn height(self) -> usize {
+        self.bottom - self.top
+    }
+}
+
+fn clip_region(region: DamageRegion, mode_width: i32, mode_height: i32) -> Option<ClippedRegion> {
+    let left = region.x.max(0).min(mode_width);
+    let top = region.y.max(0).min(mode_height);
+    let right = region.x.saturating_add(region.width).max(0).min(mode_width);
+    let bottom = region
+        .y
+        .saturating_add(region.height)
+        .max(0)
+        .min(mode_height);
+    if right <= left || bottom <= top {
+        return None;
+    }
+    Some(ClippedRegion {
+        left: left as usize,
+        top: top as usize,
+        right: right as usize,
+        bottom: bottom as usize,
+    })
 }
 
 pub mod color {
@@ -223,6 +334,14 @@ pub fn scanout_bytes() -> usize {
     current_mode().scanout_bytes()
 }
 
+pub fn presentation_stats() -> PresentationStats {
+    PresentationStats {
+        frames: PRESENTED_FRAMES.load(Ordering::Acquire),
+        vblank_timeouts: VBLANK_TIMEOUTS.load(Ordering::Acquire),
+        page_flip_available: PAGE_FLIP_AVAILABLE.load(Ordering::Acquire),
+    }
+}
+
 /// Return the raw geometry reported by the adapter while graphics are enabled.
 /// Callers can distinguish the requested mode from the active hardware mode
 /// instead of assuming that register programming succeeded.
@@ -239,6 +358,11 @@ pub fn enter() -> bool {
 
 fn program_mode(requested: DisplayMode) -> bool {
     ACTIVE_DISPLAY_MODE.store(NO_ACTIVE_MODE, Ordering::Release);
+    PAGE_FLIP_AVAILABLE.store(false, Ordering::Release);
+    DRAW_Y.store(0, Ordering::Release);
+    FRONT_Y.store(0, Ordering::Release);
+    PRESENTED_FRAMES.store(0, Ordering::Release);
+    VBLANK_TIMEOUTS.store(0, Ordering::Release);
     if !available() {
         return false;
     }
@@ -267,6 +391,7 @@ fn program_mode(requested: DisplayMode) -> bool {
             && mode.stride_bytes() == requested.stride_bytes()
             && mode.scanout_bytes() == requested.scanout_bytes()
             && mode.scanout_bytes() <= LFB_APERTURE_BYTES
+            && mode.aperture_bytes() <= LFB_APERTURE_BYTES
     });
     if !configured {
         if let Some(mode) = active {
@@ -295,15 +420,22 @@ fn program_mode(requested: DisplayMode) -> bool {
     }
 
     let mode = active.expect("configured mode must be readable");
+    let page_flip = mode.virtual_height as usize >= requested.height() * 2;
     ACTIVE_DISPLAY_MODE.store(requested.persisted(), Ordering::Release);
+    PAGE_FLIP_AVAILABLE.store(page_flip, Ordering::Release);
+    DRAW_Y.store(if page_flip { mode.height } else { 0 }, Ordering::Release);
+    FRONT_Y.store(0, Ordering::Release);
+    write(INDEX_Y_OFFSET, 0);
     crate::slog!(
-        "HEXA_DISPLAY_MODE width={} height={} bpp={} stride={} bytes={} preset={}\r\n",
+        "HEXA_DISPLAY_MODE width={} height={} bpp={} stride={} bytes={} preset={} pageflip={} virtual_height={}\r\n",
         mode.width,
         mode.height,
         mode.bits_per_pixel,
         mode.stride_bytes(),
         mode.scanout_bytes(),
-        requested.label()
+        requested.label(),
+        page_flip,
+        mode.virtual_height
     );
     clear(color::BACKGROUND);
     true
@@ -311,18 +443,60 @@ fn program_mode(requested: DisplayMode) -> bool {
 
 pub fn exit() {
     ACTIVE_DISPLAY_MODE.store(NO_ACTIVE_MODE, Ordering::Release);
+    write(INDEX_Y_OFFSET, 0);
     write(INDEX_ENABLE, DISABLED);
+    PAGE_FLIP_AVAILABLE.store(false, Ordering::Release);
+    DRAW_Y.store(0, Ordering::Release);
+    FRONT_Y.store(0, Ordering::Release);
     restore_vga_text_mode();
+}
+
+/// Present the page currently being composed.
+///
+/// Bochs/QEMU exposes enough virtual VRAM for two complete pages at every
+/// supported resolution. When available, drawing happens on the hidden page
+/// and this function switches `Y_OFFSET` atomically. The old front page is
+/// then refreshed from the new one so partial window redraws remain correct.
+/// A bounded VGA retrace wait is used when requested; failure never hangs the
+/// kernel and is visible through [`presentation_stats`].
+pub fn present(vsync: bool) {
+    let damage = DamageRegion::new(0, 0, width() as i32, height() as i32);
+    present_damage(vsync, &[damage]);
+}
+
+/// Present the composed page and synchronize only the damaged rectangles to
+/// the next back page. Callers must include every modified area, including
+/// software-cursor pixels, or use [`present`] after a full-screen redraw.
+pub fn present_damage(vsync: bool, damage: &[DamageRegion]) {
+    if active_display_mode().is_none() {
+        return;
+    }
+    let page_flip = PAGE_FLIP_AVAILABLE.load(Ordering::Acquire);
+    if vsync && page_flip && !wait_for_vertical_retrace() {
+        VBLANK_TIMEOUTS.fetch_add(1, Ordering::AcqRel);
+    }
+    if page_flip {
+        let height = current_mode().height() as u16;
+        let next_front = DRAW_Y.load(Ordering::Acquire);
+        write(INDEX_Y_OFFSET, next_front);
+        FRONT_Y.store(next_front, Ordering::Release);
+        let next_draw = if next_front == 0 { height } else { 0 };
+        DRAW_Y.store(next_draw, Ordering::Release);
+        for region in damage {
+            copy_region(next_front, next_draw, *region);
+        }
+    }
+    PRESENTED_FRAMES.fetch_add(1, Ordering::AcqRel);
 }
 
 pub fn clear(value: u32) {
     let pointer = LFB as *mut u32;
     let pixels = scanout_bytes() / BYTES_PER_PIXEL;
-    for offset in 0..pixels {
-        // SAFETY: the bootstrap maps the QEMU/Bochs LFB MMIO range and this
-        // module is the only graphical writer while display mode is active.
-        unsafe { core::ptr::write_volatile(pointer.add(offset), value) };
-    }
+    let page = draw_page_offset_pixels();
+    // SAFETY: the validated scanout geometry keeps this complete draw page
+    // inside the mapped LFB aperture. The framebuffer is exclusively owned by
+    // this module while graphics mode is active.
+    unsafe { fill_dwords(pointer.add(page), value, pixels) };
 }
 
 pub fn pixel(x: i32, y: i32, value: u32) {
@@ -331,7 +505,7 @@ pub fn pixel(x: i32, y: i32, value: u32) {
         return;
     }
     let stride_pixels = mode.stride_bytes() / BYTES_PER_PIXEL;
-    let offset = y as usize * stride_pixels + x as usize;
+    let offset = draw_page_offset_pixels() + y as usize * stride_pixels + x as usize;
     unsafe { core::ptr::write_volatile((LFB as *mut u32).add(offset), value) };
 }
 
@@ -341,7 +515,7 @@ pub fn read_pixel(x: i32, y: i32) -> u32 {
         return 0;
     }
     let stride_pixels = mode.stride_bytes() / BYTES_PER_PIXEL;
-    let offset = y as usize * stride_pixels + x as usize;
+    let offset = draw_page_offset_pixels() + y as usize * stride_pixels + x as usize;
     unsafe { core::ptr::read_volatile((LFB as *const u32).add(offset)) }
 }
 
@@ -349,18 +523,144 @@ pub fn rect(x: i32, y: i32, width: i32, height: i32, value: u32) {
     let mode = current_mode();
     let mode_width = mode.width() as i32;
     let mode_height = mode.height() as i32;
-    let left = x.max(0).min(mode_width);
-    let top = y.max(0).min(mode_height);
-    let right = x.saturating_add(width).max(0).min(mode_width);
-    let bottom = y.saturating_add(height).max(0).min(mode_height);
+    let Some(clipped) = clip_region(
+        DamageRegion::new(x, y, width, height),
+        mode_width,
+        mode_height,
+    ) else {
+        return;
+    };
     let stride_pixels = mode.stride_bytes() / BYTES_PER_PIXEL;
     let pointer = LFB as *mut u32;
-    for row in top..bottom {
-        let offset = row as usize * stride_pixels;
-        for column in left..right {
-            unsafe { core::ptr::write_volatile(pointer.add(offset + column as usize), value) };
+    let page = draw_page_offset_pixels();
+
+    // A full-width rectangle is contiguous and can be emitted as one string
+    // operation. Narrow rectangles retain their original row/stride geometry.
+    if clipped.left == 0 && clipped.right == stride_pixels {
+        let offset = page + clipped.top * stride_pixels;
+        // SAFETY: clipping bounds every row to the selected draw page.
+        unsafe { fill_dwords(pointer.add(offset), value, clipped.height() * stride_pixels) };
+    } else {
+        for row in clipped.top..clipped.bottom {
+            let offset = page + row * stride_pixels + clipped.left;
+            // SAFETY: clipping bounds the start and width to this scanline.
+            unsafe { fill_dwords(pointer.add(offset), value, clipped.width()) };
         }
     }
+}
+
+fn draw_page_offset_pixels() -> usize {
+    DRAW_Y.load(Ordering::Acquire) as usize * (stride_bytes() / BYTES_PER_PIXEL)
+}
+
+/// Fill exactly `count` dwords using an architecturally visible x86 string
+/// operation. Inline assembly has an implicit memory clobber here, preventing
+/// the compiler from removing or moving framebuffer writes across the call.
+///
+/// # Safety
+///
+/// `destination..destination.add(count)` must be writable and mapped.
+#[inline(always)]
+unsafe fn fill_dwords(destination: *mut u32, value: u32, count: usize) {
+    if count == 0 {
+        return;
+    }
+    unsafe {
+        core::arch::asm!(
+            "cld",
+            "rep stosd",
+            inout("rdi") destination => _,
+            inout("rcx") count => _,
+            in("eax") value,
+            options(nostack)
+        );
+    }
+}
+
+/// Copy exactly `count` non-overlapping dwords using an x86 string operation.
+/// Unlike an ordinary Rust slice copy, the inline assembly is an explicit
+/// memory side effect suitable for the mapped framebuffer aperture.
+///
+/// # Safety
+///
+/// Both ranges must be mapped for `count` dwords and must not overlap.
+#[inline(always)]
+unsafe fn copy_dwords(source: *const u32, destination: *mut u32, count: usize) {
+    if count == 0 {
+        return;
+    }
+    unsafe {
+        core::arch::asm!(
+            "cld",
+            "rep movsd",
+            inout("rsi") source => _,
+            inout("rdi") destination => _,
+            inout("rcx") count => _,
+            options(nostack)
+        );
+    }
+}
+
+fn copy_region(source_y: u16, target_y: u16, region: DamageRegion) {
+    let mode_width = width() as i32;
+    let mode_height = height() as i32;
+    let Some(clipped) = clip_region(region, mode_width, mode_height) else {
+        return;
+    };
+    let stride_pixels = stride_bytes() / BYTES_PER_PIXEL;
+    let source = source_y as usize * stride_pixels;
+    let target = target_y as usize * stride_pixels;
+    let pointer = LFB as *mut u32;
+
+    debug_assert_ne!(source_y, target_y);
+    if clipped.left == 0 && clipped.right == stride_pixels {
+        let row_offset = clipped.top * stride_pixels;
+        // SAFETY: page flipping selects disjoint source and target pages, and
+        // clipping keeps this contiguous copy within their visible rows.
+        unsafe {
+            copy_dwords(
+                pointer.add(source + row_offset),
+                pointer.add(target + row_offset),
+                clipped.height() * stride_pixels,
+            )
+        };
+    } else {
+        for row in clipped.top..clipped.bottom {
+            let row_offset = row * stride_pixels + clipped.left;
+            // SAFETY: source and target pages are disjoint; clipping bounds
+            // this row to the visible scanout width.
+            unsafe {
+                copy_dwords(
+                    pointer.add(source + row_offset),
+                    pointer.add(target + row_offset),
+                    clipped.width(),
+                )
+            };
+        }
+    }
+}
+
+fn wait_for_vertical_retrace() -> bool {
+    let mut left_retrace = false;
+    for _ in 0..VBLANK_POLL_LIMIT {
+        let status = unsafe { port::inb(VGA_INPUT_STATUS) };
+        if status & VGA_VERTICAL_RETRACE == 0 {
+            left_retrace = true;
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    if !left_retrace {
+        return false;
+    }
+    for _ in 0..VBLANK_POLL_LIMIT {
+        let status = unsafe { port::inb(VGA_INPUT_STATUS) };
+        if status & VGA_VERTICAL_RETRACE != 0 {
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+    false
 }
 
 pub fn outline(x: i32, y: i32, width: i32, height: i32, value: u32) {
@@ -772,6 +1072,7 @@ mod tests {
                 mode.width() * mode.height() * BYTES_PER_PIXEL
             );
             assert!(mode.scanout_bytes() <= LFB_APERTURE_BYTES);
+            assert!(mode.double_buffer_bytes() <= LFB_APERTURE_BYTES);
         }
     }
 
@@ -799,5 +1100,84 @@ mod tests {
         assert_eq!(height(), 480);
         assert_eq!(active_display_mode(), None);
         assert!(request_mode(DisplayMode::P1080));
+    }
+
+    #[test]
+    fn damage_clipping_preserves_visible_rectangle_geometry() {
+        assert_eq!(
+            clip_region(DamageRegion::new(10, 20, 30, 40), 640, 480),
+            Some(ClippedRegion {
+                left: 10,
+                top: 20,
+                right: 40,
+                bottom: 60,
+            })
+        );
+        assert_eq!(
+            clip_region(DamageRegion::new(-8, -6, 20, 18), 640, 480),
+            Some(ClippedRegion {
+                left: 0,
+                top: 0,
+                right: 12,
+                bottom: 12,
+            })
+        );
+        assert_eq!(
+            clip_region(DamageRegion::new(630, 470, 40, 30), 640, 480),
+            Some(ClippedRegion {
+                left: 630,
+                top: 470,
+                right: 640,
+                bottom: 480,
+            })
+        );
+    }
+
+    #[test]
+    fn damage_clipping_rejects_empty_or_offscreen_rectangles() {
+        assert_eq!(
+            clip_region(DamageRegion::new(20, 20, 0, 10), 640, 480),
+            None
+        );
+        assert_eq!(
+            clip_region(DamageRegion::new(20, 20, 10, -1), 640, 480),
+            None
+        );
+        assert_eq!(
+            clip_region(DamageRegion::new(700, 20, 10, 10), 640, 480),
+            None
+        );
+        assert_eq!(
+            clip_region(
+                DamageRegion::new(i32::MAX, i32::MAX, i32::MAX, i32::MAX),
+                640,
+                480
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn string_fill_writes_exactly_the_requested_dwords() {
+        let mut pixels = [0x1111_1111_u32; 12];
+        // SAFETY: indices 2..10 are a writable range inside `pixels`.
+        unsafe { fill_dwords(pixels.as_mut_ptr().add(2), 0xA5A5_5A5A, 8) };
+        assert_eq!(pixels[..2], [0x1111_1111; 2]);
+        assert_eq!(pixels[2..10], [0xA5A5_5A5A; 8]);
+        assert_eq!(pixels[10..], [0x1111_1111; 2]);
+    }
+
+    #[test]
+    fn string_copy_writes_exactly_the_requested_dwords() {
+        let source = [
+            0x10_u32, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xA0,
+        ];
+        let mut destination = [0xDEAD_BEEF_u32; 12];
+        // SAFETY: both five-dword ranges are valid and the arrays do not
+        // overlap.
+        unsafe { copy_dwords(source.as_ptr().add(2), destination.as_mut_ptr().add(4), 5) };
+        assert_eq!(destination[..4], [0xDEAD_BEEF; 4]);
+        assert_eq!(destination[4..9], source[2..7]);
+        assert_eq!(destination[9..], [0xDEAD_BEEF; 3]);
     }
 }

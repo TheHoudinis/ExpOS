@@ -51,7 +51,10 @@ stack_bottom:
         ; The graphical Form session uses fixed-capacity, allocation-free
         ; document and surface state. Give those values room without letting
         ; the downward-growing stack collide with the page tables.
-        resb 524288
+        ; TLS certificate verification plus a 16 KiB response and two bounded
+        ; browser documents can coexist during a search projection. Keep the
+        ; early single-core stack explicit until per-Form stacks land.
+        resb 1048576
 stack_top:
 
 ; ---------------------------------------------------------------------------

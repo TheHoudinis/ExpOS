@@ -7,13 +7,14 @@ ExpOS is the Form-native HexaOS rebuild described by
 - FIN identity, Dimensions, PIMP/DIESE policy, capability-scoped Form Handles,
   typed relationships and transactional HexaFS metadata;
 - HexaDisplay, a runtime-selectable 640x480, 1280x720 or 1920x1080 software
-  compositor with Form-owned surfaces;
+  compositor with Form-owned surfaces, double-buffered Bochs/QEMU scanout and
+  selectable 60, 75, 120 or 144 Hz presentation pacing;
 - a flat dark desktop with an application menu and taskbar, no default or
   pinned applications, and movable, closable, minimizable and maximizable
   windows;
 - an interactive Settings control center for appearance, display, input,
-  network, Wi-Fi, Bluetooth, privacy and system behavior, including four
-  themes, five procedural wallpapers and four cursor themes;
+  network, Wi-Fi, Bluetooth, privacy and system behavior, including six
+  themes, seven procedural wallpapers and four cursor themes;
 - readable case-sensitive 8x8 framebuffer text and an expanded 8x16 VGA
   console font;
 - Ayo v3 package installation, verification, ownership, rollback and recovery;
@@ -21,7 +22,9 @@ ExpOS is the Form-native HexaOS rebuild described by
   ICMP, UDP, DNS A lookup, one bounded TCP client and HTTP/1.0 GET over plain
   TCP or authenticated TLS 1.3;
 - a graphical Browser that fetches and renders bounded `http://` and
-  `https://` documents;
+  `https://` documents, applies a small native CSS subset, runs a deterministic
+  DOM-mutation/click-handler JavaScript subset, and searches DuckDuckGo's
+  non-JavaScript HTML endpoint from the address bar;
 - graphical and console login for Operator, Power and Guest authority;
 - dedicated ATA PIO persistent state for accounts and desktop preferences.
 
@@ -41,6 +44,7 @@ make display-check  # verify desktop and window lifecycle
 make network-check  # verify ICMP, TCP, HTTP and Browser against a local fixture
 make internet-check # verify live DNS and public HTTP (requires Internet access)
 make https-check    # verify TLS and fetch youtube.com HTML (requires Internet)
+make search-check   # verify DuckDuckGo HTML address-bar search (requires Internet)
 make persistence-check # verify accounts/settings across two boots
 make ayo            # test and build Ayo v3
 make all            # run the complete native test suite
@@ -95,16 +99,26 @@ Esc             Return to the console
 The graphical Terminal has 40 lines of scrollback, 24 history entries with Up
 and Down recall, and commands for identity, status, display, networking,
 applications, users and basic shell-style operations. Run `help` inside it for
-the exact list. In Browser, click the address field or press `/`, type an
-`http://` or `https://` URL, and press Enter.
+the exact list. `displayinfo` reports the selected presentation target,
+VSync/page-flip state, completed frames and bounded vertical-retrace timeouts;
+`timers` reports the TSC clock source used by the frame pacer. In Browser, click
+the address field or press `/`, type an `http://` or `https://` URL, and press
+Enter. Text without a scheme is treated as a search query and sent to
+DuckDuckGo's non-JavaScript HTML search; prefix a query with `?` for the same
+behavior.
 
 Settings controls are clickable and keyboard-accessible. Appearance, taskbar,
 status-area, border, contrast, pointer-speed, theme, wallpaper and cursor
 changes take effect immediately and persist. Resolution can be selected as
 480p (640x480), 720p (1280x720) or 1080p (1920x1080); it is saved immediately
-and applied when the desktop is reopened. The Network switch is enforced by
-the native packet path through a requester-bound Configure Handle; it is not a
-painted UI flag.
+and applied when the desktop is reopened. Presentation pacing can be selected
+as 60, 75, 120 or 144 Hz and VSync can be enabled or disabled; both settings
+also persist. These rates are compositor frame targets, not physical monitor
+modes or a claim that QEMU changed the host display's refresh rate. With VSync
+enabled, HexaDisplay performs a bounded VGA vertical-retrace wait before its
+Bochs framebuffer page flip; a timeout is recorded instead of hanging the
+kernel. The Network switch is enforced by the native packet path through a
+requester-bound Configure Handle; it is not a painted UI flag.
 
 ## Network and Browser
 
@@ -121,7 +135,13 @@ The native stack supports:
 - bounded HTTP/1.0 GET requests and Browser rendering for `http://` URLs;
 - authenticated TLS 1.3 and `https://` GET with hardware RDRAND entropy, SNI
   and hostname checks, RTC certificate-validity checks, and certificate-chain
-  and signature verification.
+  and signature verification;
+- a fixed-capacity HTML document model, CSS tag/class/id and inline rules, and
+  deterministic title/text/style/click-handler JavaScript operations;
+- address-bar search through the canonical
+  `https://duckduckgo.com/html/?q=...` endpoint, with at most three redirects,
+  rejection of HTTPS-to-HTTP downgrades, and projection of up to eight result
+  titles and links into the bounded document model.
 
 Use `ifconfig`, `ping`, `dns`, `fetch` and `netstat` in the console to inspect
 and exercise the network. Type an `http://` or `https://` URL in Browser to
@@ -132,14 +152,25 @@ Settings reports Ethernet carrier state and separately reports Wi-Fi and
 Bluetooth hardware presence, driver state and requested power state. ExpOS
 does not claim a connection when an adapter or driver is unavailable.
 
-This is not a modern standards-complete browser. Fetching YouTube's HTML does
-**not** mean YouTube playback works: CSS, JavaScript, media containers/codecs,
-audio and video output are not implemented. DHCP, IPv6, physical Wi-Fi drivers,
-a USB host/Bluetooth data path, concurrent sockets, TCP servers, cookies and
-downloads are also absent. HTTP, TLS record and certificate-chain buffers are
-fixed and bounded. The embedded Web PKI store currently contains only the
-GlobalSign Root R1 trust anchor, so HTTPS sites chaining to other roots are not
-accepted.
+The browser engine is deliberately bounded: the parser accepts at most 16 KiB
+per document, while native HTTP/HTTPS fetches retain at most the first 14 KiB of
+the response body. A document contains at most 48 parsed nodes, 32 CSS rules,
+16 scripts and 12 click handlers. Its CSS subset covers colors, background,
+border, font size/weight, display, visibility, margin, padding and text
+alignment with tag/class/id specificity and inline styles. JavaScript is not
+arbitrary ECMAScript; only deterministic document title, node text, supported
+style, visibility and click-handler mutations run. External
+stylesheet/script/image loading, general Web APIs, `fetch`, cookies,
+local/session storage, media containers/codecs, audio/video output and GPU
+acceleration are absent. Consequently, fetching YouTube HTML does **not** make
+YouTube playback work.
+
+DHCP, IPv6, physical Wi-Fi drivers, a USB host/Bluetooth data path, concurrent
+sockets, TCP servers and downloads are also absent. HTTP, TLS record and
+certificate-chain buffers are fixed and bounded. The embedded Web PKI store is
+not a general CA bundle: GlobalSign Root R1 is the default anchor, while
+DigiCert Global Root G2 is selected only for `duckduckgo.com` and its
+subdomains. Sites chaining to another root are not accepted.
 
 ## Ayo v3
 

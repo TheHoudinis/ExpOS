@@ -57,8 +57,9 @@ const TCP_HEADER_SIZE: usize = 20;
 const TCP_SYN_HEADER_SIZE: usize = 24;
 const DNS_PACKET_CAPACITY: usize = 512;
 const HTTP_REQUEST_CAPACITY: usize = 768;
-const HTTP_WIRE_CAPACITY: usize = 8 * 1024;
-pub const HTTP_BODY_CAPACITY: usize = 4096;
+const HTTP_WIRE_CAPACITY: usize = 16 * 1024;
+pub const HTTP_BODY_CAPACITY: usize = 14 * 1024;
+const HTTP_LOCATION_CAPACITY: usize = 512;
 const TCP_PAYLOAD_CAPACITY: usize = 1500 - 20 - TCP_HEADER_SIZE;
 const TCP_RECEIVE_WINDOW: u16 = 32 * 1024;
 
@@ -145,11 +146,20 @@ pub struct HttpResponse {
     pub body_len: usize,
     pub truncated: bool,
     pub peer: [u8; 4],
+    location: [u8; HTTP_LOCATION_CAPACITY],
+    location_len: usize,
 }
 
 impl HttpResponse {
     pub fn body(&self) -> &[u8] {
         &self.body[..self.body_len]
+    }
+
+    pub fn location(&self) -> Option<&str> {
+        (self.location_len != 0).then(|| {
+            // Header parsing accepts visible ASCII only.
+            unsafe { core::str::from_utf8_unchecked(&self.location[..self.location_len]) }
+        })
     }
 }
 
@@ -2059,6 +2069,8 @@ fn parse_http_response(
 
     let mut content_length = None;
     let mut chunked = false;
+    let mut location = [0_u8; HTTP_LOCATION_CAPACITY];
+    let mut location_len = 0;
     let mut cursor = first_line_end.saturating_add(2);
     while cursor < header_end {
         let line_length =
@@ -2069,6 +2081,16 @@ fn parse_http_response(
             let value = &line[colon + 1..];
             if name.eq_ignore_ascii_case(b"content-length") {
                 content_length = Some(parse_ascii_usize(value).ok_or(NetworkError::MalformedHttp)?);
+            } else if name.eq_ignore_ascii_case(b"location") {
+                let value = value.trim_ascii();
+                if value.is_empty()
+                    || value.len() > location.len()
+                    || !value.iter().all(|byte| (0x21..=0x7E).contains(byte))
+                {
+                    return Err(NetworkError::MalformedHttp);
+                }
+                location[..value.len()].copy_from_slice(value);
+                location_len = value.len();
             } else if name.eq_ignore_ascii_case(b"transfer-encoding")
                 && value
                     .windows(7)
@@ -2087,6 +2109,8 @@ fn parse_http_response(
         body_len: 0,
         truncated: false,
         peer,
+        location,
+        location_len,
     };
     if chunked {
         let (length, truncated) = decode_chunked(encoded_body, &mut response.body)?;
@@ -2286,5 +2310,14 @@ mod tests {
             0x00, 0x01, 0xC0, 0xA8, 0x00, 0xC7,
         ];
         assert_eq!(internet_checksum(&header), 0xB890);
+    }
+
+    #[test]
+    fn parses_bounded_redirect_location() {
+        let wire = b"HTTP/1.1 302 Found\r\nLocation: /next?q=1\r\nContent-Length: 0\r\n\r\n";
+        let response = parse_http_response([10, 0, 2, 2], wire, false).unwrap();
+        assert_eq!(response.status, 302);
+        assert_eq!(response.location(), Some("/next?q=1"));
+        assert!(response.body().is_empty());
     }
 }

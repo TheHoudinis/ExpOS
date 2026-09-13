@@ -1,0 +1,18 @@
+<!doctype html>
+<style>
+  body { color: #d9ddd9; background: #080a0b; }
+  h1 { color: #74bcc7; font-size: 24px; }
+  .card { background: #151c20; border: 1px solid #35433f; padding: 8px; }
+  #status { color: #b78f6e; }
+  button { color: #f0f2f0; background: #365c62; padding: 6px; }
+</style>
+<title>ExpOS Browser Fixture</title>
+<h1>ExpOS Browser Engine</h1>
+<p id="status" class="card">Waiting for JavaScript</p>
+<button id="action">Activate</button>
+<script>
+  document.title = "ExpOS Fixture Ready";
+  document.getElementById("status").textContent = "CSS and JavaScript are active";
+  document.getElementById("status").style.color = "#6fb873";
+  document.getElementById("action").onclick = function() { document.getElementById("status").textContent = "Clicked in ExpOS"; };
+</script>

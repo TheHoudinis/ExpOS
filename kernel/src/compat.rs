@@ -3,6 +3,7 @@ use crate::{hardware, print, println};
 pub fn execute(command: &str, args: &str) -> bool {
     match command {
         "date" | "clock" => hardware::print_date(),
+        "timers" => hardware::print_clock_info(),
         "cpuinfo" => hardware::print_cpu_info(),
         "features" | "kernelcaps" => hardware::print_kernel_features(),
         "lspci" => hardware::print_pci(),
@@ -45,6 +46,7 @@ pub fn is_command(name: &str) -> bool {
         name,
         "date"
             | "clock"
+            | "timers"
             | "cpuinfo"
             | "features"
             | "kernelcaps"

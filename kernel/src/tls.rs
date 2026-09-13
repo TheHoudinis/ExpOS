@@ -22,11 +22,53 @@ const TLS_RECORD_CAPACITY: usize = 16_640;
 const TLS_WRITE_CAPACITY: usize = 4_096;
 const TLS_CERTIFICATE_CAPACITY: usize = 12 * 1024;
 
-// GlobalSign Root R1 is the trust anchor for the cross-signed GTS R4 chain
-// currently served by Google/YouTube. The source PEM is checked into
-// `kernel/trust` and comes from GlobalSign's public certificate repository.
+// The deliberately small trust set only contains anchors needed by the native
+// browser's supported HTTPS services. Keeping selection host-scoped avoids
+// silently treating either certificate as a general-purpose root store.
 const GLOBAL_SIGN_ROOT_R1: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/global_sign_root_r1.der"));
+const DIGICERT_GLOBAL_ROOT_G2: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/digicert_global_root_g2.der"));
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrustAnchor {
+    GlobalSignRootR1,
+    DigiCertGlobalRootG2,
+}
+
+impl TrustAnchor {
+    const fn certificate(self) -> &'static [u8] {
+        match self {
+            Self::GlobalSignRootR1 => GLOBAL_SIGN_ROOT_R1,
+            Self::DigiCertGlobalRootG2 => DIGICERT_GLOBAL_ROOT_G2,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::GlobalSignRootR1 => "GlobalSign_R1",
+            Self::DigiCertGlobalRootG2 => "DigiCert_Global_Root_G2",
+        }
+    }
+}
+
+fn trust_anchor_for(hostname: &str) -> TrustAnchor {
+    const DUCKDUCKGO: &[u8] = b"duckduckgo.com";
+
+    let mut host = hostname.as_bytes();
+    if host.last() == Some(&b'.') {
+        host = &host[..host.len() - 1];
+    }
+    let is_duckduckgo = host.eq_ignore_ascii_case(DUCKDUCKGO)
+        || (host.len() > DUCKDUCKGO.len()
+            && host[host.len() - DUCKDUCKGO.len() - 1] == b'.'
+            && host[host.len() - DUCKDUCKGO.len()..].eq_ignore_ascii_case(DUCKDUCKGO));
+    if is_duckduckgo {
+        TrustAnchor::DigiCertGlobalRootG2
+    } else {
+        TrustAnchor::GlobalSignRootR1
+    }
+}
 
 struct RtcClock;
 
@@ -133,9 +175,10 @@ where
     let config = TlsConfig::new()
         .with_server_name(hostname)
         .enable_rsa_signatures();
+    let trust_anchor = trust_anchor_for(hostname);
     let provider = VerifiedProvider {
         rng: HardwareRng,
-        verifier: CertVerifier::new(Certificate::X509(GLOBAL_SIGN_ROOT_R1)),
+        verifier: CertVerifier::new(Certificate::X509(trust_anchor.certificate())),
     };
     let mut connection =
         TlsConnection::<_, Aes128GcmSha256>::new(socket, &mut read_records, &mut write_records);
@@ -143,8 +186,9 @@ where
         .open(TlsContext::new(&config, provider))
         .map_err(map_tls_error)?;
     slog!(
-        "HEXA_TLS_VERIFIED host={} version=1.3 suite=AES_128_GCM_SHA256 trust=GlobalSign_R1\r\n",
-        hostname
+        "HEXA_TLS_VERIFIED host={} version=1.3 suite=AES_128_GCM_SHA256 trust={}\r\n",
+        hostname,
+        trust_anchor.label()
     );
 
     connection.write_all(request).map_err(map_tls_error)?;
@@ -339,5 +383,39 @@ mod tests {
             }),
             None
         );
+    }
+
+    #[test]
+    fn selects_duckduckgo_trust_anchor_for_the_domain_and_subdomains() {
+        for hostname in [
+            "duckduckgo.com",
+            "www.duckduckgo.com",
+            "html.duckduckgo.com",
+            "LITE.DUCKDUCKGO.COM",
+            "duckduckgo.com.",
+        ] {
+            assert_eq!(
+                trust_anchor_for(hostname),
+                TrustAnchor::DigiCertGlobalRootG2,
+                "unexpected trust anchor for {hostname}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_the_default_anchor_for_unrelated_or_deceptive_hostnames() {
+        for hostname in [
+            "google.com",
+            "youtube.com",
+            "notduckduckgo.com",
+            "duckduckgo.com.example.net",
+            "duckduckgo.invalid",
+        ] {
+            assert_eq!(
+                trust_anchor_for(hostname),
+                TrustAnchor::GlobalSignRootR1,
+                "unexpected trust anchor for {hostname}"
+            );
+        }
     }
 }

@@ -18,7 +18,13 @@ mod relationship;
 mod text;
 
 pub use abi::{AbiCall, AbiRequest, AbiResponse, AbiStatus, GO_ABI_VERSION};
-pub use browser::{BrowserError, BrowserText, Document, DocumentNode, NodeKind};
+pub use browser::{
+    BorderStyle, BoxEdges, BrowserError, BrowserText, ComputedStyle, CssColor, CssVisibility,
+    DisplayMode, Document, DocumentNode, DomEvent, NodeKind, ScriptRejection, ScriptReport,
+    SearchResultsDocument, StyledNode, TextAlign, BROWSER_TEXT_CAPACITY,
+    MAX_BROWSER_DOCUMENT_BYTES, MAX_BROWSER_NODES, MAX_BROWSER_SCRIPTS, MAX_CLICK_HANDLERS,
+    MAX_SCRIPT_BYTES, MAX_SCRIPT_STATEMENTS, MAX_SEARCH_RESULTS, MAX_STYLE_RULES,
+};
 pub use capability::{Authority, CapabilityBroker, FormHandle, Operations};
 pub use diese::{Diagnostic, Diese, Resolution};
 pub use display::{

@@ -5,5 +5,9 @@ useradd keeper power violetmemory
 desktop
 s2
 5
+j
+
+
+j
 q
 shutdown

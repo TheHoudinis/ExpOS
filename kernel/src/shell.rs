@@ -428,6 +428,16 @@ impl Shell {
                 );
                 println!("buffer protocols: XRGB8888 ARGB8888 RGB565 TextCells");
                 println!("primitives: clipped fill gradient alpha rounded line text");
+                let preferences = crate::state::preferences();
+                let presentation = crate::framebuffer::presentation_stats();
+                println!(
+                    "presentation: target={}Hz vsync={} pageflip={} frames={} vblank-timeouts={}",
+                    preferences.refresh_rate.hz(),
+                    if preferences.vsync { "on" } else { "off" },
+                    presentation.page_flip_available,
+                    presentation.frames,
+                    presentation.vblank_timeouts
+                );
                 println!("Display FIN={}", crate::desktop::DISPLAY_FIN);
                 true
             }
@@ -721,7 +731,7 @@ impl Shell {
         println!("  desktop browser displayinfo goabi");
         println!("  ayo games arcade legacy reboot shutdown");
         println!(
-            "  date clock cpuinfo features kernelcaps lspci neofetch sysinfo mem free env uptime ps"
+            "  date clock timers cpuinfo features kernelcaps lspci neofetch sysinfo mem free env uptime ps"
         );
         println!("  kstat dmesg bootlog ifconfig netstat ping <IPv4-address> [count]");
         println!("  dns <host>  fetch <http[s]://host[:port]/path>  mode");
@@ -1891,21 +1901,6 @@ fn should_mask_shell_input(line: &[u8], next: u8) -> bool {
                 .is_some_and(|byte| byte.is_ascii_whitespace()))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::should_mask_shell_input;
-
-    #[test]
-    fn masks_account_password_arguments_only() {
-        assert!(!should_mask_shell_input(b"useradd artist power", b'x'));
-        assert!(should_mask_shell_input(b"useradd artist power ", b'x'));
-        assert!(should_mask_shell_input(b"useradd artist power x", b'y'));
-        assert!(!should_mask_shell_input(b"passwd artist", b'x'));
-        assert!(should_mask_shell_input(b"passwd artist ", b'x'));
-        assert!(!should_mask_shell_input(b"echo public ", b'x'));
-    }
-}
-
 const fn authority_name(authority: Authority) -> &'static str {
     match authority {
         Authority::Operator => "Operator",
@@ -2019,5 +2014,20 @@ const fn lifecycle_name(lifecycle: Lifecycle) -> &'static str {
         Lifecycle::Retired => "retired",
         Lifecycle::Recoverable => "recoverable",
         Lifecycle::Removed => "removed",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_mask_shell_input;
+
+    #[test]
+    fn masks_account_password_arguments_only() {
+        assert!(!should_mask_shell_input(b"useradd artist power", b'x'));
+        assert!(should_mask_shell_input(b"useradd artist power ", b'x'));
+        assert!(should_mask_shell_input(b"useradd artist power x", b'y'));
+        assert!(!should_mask_shell_input(b"passwd artist", b'x'));
+        assert!(should_mask_shell_input(b"passwd artist ", b'x'));
+        assert!(!should_mask_shell_input(b"echo public ", b'x'));
     }
 }

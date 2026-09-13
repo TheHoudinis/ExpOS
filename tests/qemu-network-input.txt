@@ -4,7 +4,8 @@ expos
 ifconfig
 fetch http://10.0.2.2:18080/http-fixture.txt
 browser
-/http://10.0.2.2:18080/http-fixture.txt
+/http://10.0.2.2:18080/browser-fixture.html
+/http://10.0.2.2:18080/redirect-target
 
 ping 10.0.2.2 160
 netstat

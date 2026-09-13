@@ -25,7 +25,7 @@ firmware / GRUB (temporary)
 ## Implemented vertical slice
 
 1. The loader validates long-mode support and enters an identity-mapped x86_64
-   kernel with a 512 KiB bootstrap stack.
+   kernel with a 1 MiB bootstrap stack.
 2. The kernel validates Multiboot2, initializes polling serial and VGA output,
    and invokes `hexa_core::bootstrap_demo`.
 3. The demo creates a Root Form and Stable Dimension with independent FINs.
@@ -70,17 +70,27 @@ firmware / GRUB (temporary)
   FIN. The software renderer can program 640x480, 1280x720 or 1920x1080 XRGB
   scanout in QEMU standard VGA's 16 MiB linear framebuffer BAR. The bootstrap
   maps the entire fourth-GiB PCI window, and HexaDisplay checks the selected
-  geometry, stride and required byte count against the aperture before the
-  first framebuffer write.
+  geometry, stride and double-buffer byte count against the aperture before the
+  first framebuffer write. When the adapter accepts a virtual height of twice
+  the visible height, rendering targets the hidden page and presentation flips
+  the VBE Y offset. After a flip, only declared damage rectangles are copied to
+  the newly hidden page, keeping the two pages coherent without a full-screen
+  copy for cursor and terminal updates. Optional VSync performs a bounded
+  legacy-VGA retrace wait; failed waits increment a diagnostic counter instead
+  of blocking forever.
 - The desktop creates separate Browser, Terminal, Forms, Packages,
   Settings, System, Games and Notes surfaces, plus Root, taskbar and launcher
   surfaces. Its flat dark shell provides a compact application menu and bottom
   taskbar without copied third-party assets, promotional copy or instruction
   footers. It starts with no open or pinned apps and supports focus, dragging,
-  minimize, maximize, close and reopen. Settings offers four renderer-defined
-  themes, five procedural wallpapers, four cursor themes and the three display
-  presets. The graphical Terminal keeps bounded scrollback and command history
-  and exposes identity, system, display, network and application commands.
+  minimize, maximize, close and reopen. Settings offers six renderer-defined
+  themes (including Aurora and Rose), seven procedural wallpapers (including
+  Aurora and Mesh), four cursor themes and the three display presets. Its
+  Display page also selects a 60, 75, 120 or 144 Hz compositor presentation
+  target and optional VSync. These are software-pacing targets, not negotiated
+  physical monitor modes. The graphical Terminal keeps bounded scrollback and
+  command history and exposes identity, system, display, network and
+  application commands.
   Each application receives a child Handle containing
   only Display and Input rights; the compositor checks it before visibility,
   geometry, commit or key routing. Leaving graphics restores the VGA mode 3
@@ -92,6 +102,13 @@ firmware / GRUB (temporary)
   ARGB8888 and RGB565 clients. Solid fills use clipped row writes; gradients,
   alpha blending, rounded rectangles and Bresenham lines are native primitives;
   cursor movement repaints only the cursor bounds; games repaint only the active window.
+- Presentation pacing uses a calibrated TSC frequency when CPUID supplies one
+  and a conservative fallback otherwise. Fractional frame periods are carried
+  without cumulative integer drift, clock discontinuities are recoverable, and
+  the graphical Terminal's `display` command reports pacing misses. The console
+  `displayinfo` command reports page-flip/frame/retrace-timeout state, the
+  graphical System surface reports frame count, and `timers` identifies the
+  clock source.
 - Session identity is intentionally separate from a Unix UID. The built-in
   accounts and twelve-slot registry select a DIESE authority input and gate
   shell mutations. Operators can create/delete accounts and change passwords;
@@ -108,8 +125,9 @@ firmware / GRUB (temporary)
   fields and CRC-32 over its header and payload; boot selects the newest valid
   slot, preserving the previous generation across an interrupted or corrupt
   write. Settings persist display mode, theme, wallpaper, cursor, accent,
-  backdrop, pointer speed and desktop/connectivity flags. Form records, notes
-  and PIMP revisions are outside this store and remain volatile.
+  backdrop, pointer speed, presentation rate, VSync and desktop/connectivity
+  flags. Older compatible records default to 60 Hz with VSync enabled. Form
+  records, notes and PIMP revisions are outside this store and remain volatile.
 - Network is a Driver Form protected by requester-bound Network Handles and
   PIMP policy. Its current polling RTL8139 path implements Ethernet, ARP,
   static QEMU-user IPv4, ICMP echo, checksum-validated UDP, DNS A lookup, one
@@ -118,9 +136,10 @@ firmware / GRUB (temporary)
   sends SNI, verifies the requested hostname, certificate time validity from
   the RTC, the chain and signatures, and accepts a fixed AES-128-GCM-SHA256
   suite. TLS record and chain storage are fixed-size. Its Web PKI trust store
-  currently contains only GlobalSign Root R1, not a general operating-system
-  CA bundle. DHCP, IPv6, physical Wi-Fi, concurrent sockets, TCP servers and
-  interrupt-driven I/O are explicitly future work.
+  is not a general operating-system CA bundle: GlobalSign Root R1 is the
+  default anchor, and DigiCert Global Root G2 is selected only for
+  `duckduckgo.com` and its subdomains. DHCP, IPv6, physical Wi-Fi, concurrent
+  sockets, TCP servers and interrupt-driven I/O are explicitly future work.
 - Connectivity settings target a distinct Radio FIN through a requester-bound
   Configure Handle. The manager keeps software policy, PCI/USB presence, driver
   readiness and connection state separate. Disabling Network is checked by the
@@ -130,9 +149,22 @@ firmware / GRUB (temporary)
 - The Browser is an Interface Form above HexaDisplay. Its current document
   engine accepts local `hexa://`, `data:text/html` and bounded `http://` or
   `https://` resources. It receives a requester-bound Network Handle only for
-  non-Guest sessions when PIMP networking is enabled. A verified fetch of
-  `www.youtube.com` returns HTML, but CSS, JavaScript, media containers/codecs
-  and audio/video output are absent, so YouTube playback is not claimed.
+  non-Guest sessions when PIMP networking is enabled. Text entered without a
+  URL scheme is encoded for DuckDuckGo's canonical non-JavaScript HTML endpoint
+  at `https://duckduckgo.com/html/?q=...`. Navigation follows at most three
+  redirects and rejects an HTTPS-to-HTTP downgrade. Search pages are projected
+  into at most eight result titles and links. The allocation-free
+  document core accepts at most 16 KiB, while the native HTTP client retains at
+  most the first 14 KiB of a response body; a document contains at most 48
+  nodes, 32 CSS rules, 16 scripts, 24 statements per script and 12 click
+  handlers. It computes a bounded CSS subset for tag, class, id and inline
+  rules, then runs a deterministic JavaScript subset for document title, node
+  text, supported styles, visibility and local click handlers. It does not
+  evaluate arbitrary ECMAScript or load external scripts, stylesheets, images
+  or fonts, and it exposes no general Web APIs, cookies or storage. Media
+  containers/codecs, audio/video output and GPU rendering are absent. A
+  verified fetch of `www.youtube.com` may return HTML, but YouTube playback is
+  not supported.
 - Go ABI v1 gives Go clients stable call numbers and request/response layouts
   for Forms, Handles, display surfaces, events, browser navigation and package
   transactions. The Go SDK and emulator are runnable today; native Go binary
@@ -162,11 +194,13 @@ not a substitute for the HexaFS block driver, persistent Form graph or FIN
 index.
 
 Alpha.12 includes the runtime-selectable 480p/720p/1080p empty-start desktop,
-normal case-sensitive text, Notes, a richer graphical Terminal, four themes,
-five procedural wallpapers, four cursor themes, dual graphical and console
-login selection, durable accounts/preferences, Ayo v3 artifact transactions,
-and capability-gated native RTL8139/ARP/IPv4/ICMP/UDP/DNS/TCP/HTTP/TLS
-networking.
+normal case-sensitive text, Notes, a richer graphical Terminal, six themes,
+seven procedural wallpapers, four cursor themes, double-buffered presentation
+with damage-region page synchronization, persistent 60/75/120/144 Hz software
+pacing and optional VSync, a bounded native HTML/CSS/JavaScript Browser with
+DuckDuckGo non-JavaScript HTML search, dual graphical and console login
+selection, durable accounts/preferences, Ayo v3 artifact transactions, and
+capability-gated native RTL8139/ARP/IPv4/ICMP/UDP/DNS/TCP/HTTP/TLS networking.
 The Diamond II build is
 also exposed through `make run-alpha`, providing a runnable migration fallback
 for networking, scheduling, ATA persistence and the games not yet redesigned

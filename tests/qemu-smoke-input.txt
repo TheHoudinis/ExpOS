@@ -22,6 +22,7 @@ packages
 relationships Ayo
 date
 cpuinfo
+timers
 features
 lspci
 mem

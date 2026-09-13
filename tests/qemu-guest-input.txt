@@ -5,3 +5,8 @@ whoami
 mkform Forbidden data
 users
 shutdown
+logout
+2222
+operator
+expos
+shutdown

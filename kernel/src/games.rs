@@ -5,8 +5,46 @@ use hexa_core::Rect;
 const SNAKE_CAPACITY: usize = 96;
 const SNAKE_WIDTH: i16 = 32;
 const SNAKE_HEIGHT: i16 = 20;
-const SNAKE_TICK_CYCLES: u64 = 1_200_000_000;
-const PONG_TICK_CYCLES: u64 = 120_000_000;
+const MILLIS_PER_SECOND: u64 = 1_000;
+const FALLBACK_TSC_HZ: u64 = 1_000_000_000;
+const SNAKE_TICK_MILLIS: u64 = 1_200;
+const PONG_TICK_MILLIS: u64 = 120;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GameTiming {
+    snake_interval: u64,
+    pong_interval: u64,
+}
+
+impl GameTiming {
+    const fn calibrated(tsc_hz: u64) -> Self {
+        let tsc_hz = if tsc_hz == 0 { FALLBACK_TSC_HZ } else { tsc_hz };
+        Self {
+            snake_interval: ticks_from_millis(tsc_hz, SNAKE_TICK_MILLIS),
+            pong_interval: ticks_from_millis(tsc_hz, PONG_TICK_MILLIS),
+        }
+    }
+
+    const fn interval(self, mode: GameMode) -> Option<u64> {
+        match mode {
+            GameMode::Menu => None,
+            GameMode::Snake => Some(self.snake_interval),
+            GameMode::Pong => Some(self.pong_interval),
+        }
+    }
+}
+
+const fn ticks_from_millis(tsc_hz: u64, milliseconds: u64) -> u64 {
+    let numerator = tsc_hz as u128 * milliseconds as u128;
+    let ticks = (numerator + (MILLIS_PER_SECOND - 1) as u128) / MILLIS_PER_SECOND as u128;
+    if ticks == 0 {
+        1
+    } else if ticks > u64::MAX as u128 {
+        u64::MAX
+    } else {
+        ticks as u64
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GameMode {
@@ -19,16 +57,22 @@ pub struct GameHub {
     mode: GameMode,
     paused: bool,
     last_tick: u64,
+    timing: GameTiming,
     snake: Snake,
     pong: Pong,
 }
 
 impl GameHub {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
+        Self::with_clock_hz(crate::hardware::clock_info().tsc_hz)
+    }
+
+    const fn with_clock_hz(tsc_hz: u64) -> Self {
         Self {
             mode: GameMode::Menu,
             paused: false,
             last_tick: 0,
+            timing: GameTiming::calibrated(tsc_hz),
             snake: Snake::new(),
             pong: Pong::new(),
         }
@@ -130,10 +174,8 @@ impl GameHub {
             self.last_tick = now;
             return false;
         }
-        let interval = match self.mode {
-            GameMode::Snake => SNAKE_TICK_CYCLES,
-            GameMode::Pong => PONG_TICK_CYCLES,
-            GameMode::Menu => return false,
+        let Some(interval) = self.timing.interval(self.mode) else {
+            return false;
         };
         if now.wrapping_sub(self.last_tick) < interval {
             return false;
@@ -498,4 +540,68 @@ fn draw_number(x: i32, y: i32, mut value: u64, color: u32) {
     bytes[start] = b'0' + value as u8;
     let text = core::str::from_utf8(&bytes[start..]).unwrap_or("?");
     framebuffer::text(x, y, text, color, 1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timing_scales_with_the_reported_tsc_frequency() {
+        let one_ghz = GameTiming::calibrated(1_000_000_000);
+        let two_and_a_half_ghz = GameTiming::calibrated(2_500_000_000);
+
+        assert_eq!(one_ghz.snake_interval, 1_200_000_000);
+        assert_eq!(one_ghz.pong_interval, 120_000_000);
+        assert_eq!(two_and_a_half_ghz.snake_interval, 3_000_000_000);
+        assert_eq!(two_and_a_half_ghz.pong_interval, 300_000_000);
+    }
+
+    #[test]
+    fn zero_frequency_uses_the_conservative_fallback() {
+        assert_eq!(
+            GameTiming::calibrated(0),
+            GameTiming::calibrated(FALLBACK_TSC_HZ)
+        );
+    }
+
+    #[test]
+    fn interval_conversion_rounds_up_and_saturates() {
+        assert_eq!(ticks_from_millis(3, 120), 1);
+        assert_eq!(ticks_from_millis(u64::MAX, 1_200), u64::MAX);
+    }
+
+    #[test]
+    fn pong_ticks_at_the_same_wall_time_on_different_clocks() {
+        let mut slow_clock = GameHub::with_clock_hz(10_000);
+        let mut fast_clock = GameHub::with_clock_hz(25_000);
+        assert!(slow_clock.handle_key(b'2'));
+        assert!(fast_clock.handle_key(b'2'));
+
+        assert!(!slow_clock.tick(1_199));
+        assert!(!fast_clock.tick(2_999));
+        assert!(slow_clock.tick(1_200));
+        assert!(fast_clock.tick(3_000));
+    }
+
+    #[test]
+    fn snake_waits_for_input_then_uses_its_calibrated_interval() {
+        let mut hub = GameHub::with_clock_hz(10_000);
+        assert!(hub.handle_key(b'1'));
+        assert!(!hub.tick(50_000));
+        assert!(hub.handle_key(input::KEY_RIGHT));
+        assert!(!hub.tick(61_999));
+        assert!(hub.tick(62_000));
+    }
+
+    #[test]
+    fn paused_game_anchors_its_next_deadline_to_resume_time() {
+        let mut hub = GameHub::with_clock_hz(10_000);
+        assert!(hub.handle_key(b'2'));
+        assert!(hub.handle_key(b' '));
+        assert!(!hub.tick(50_000));
+        assert!(hub.handle_key(b' '));
+        assert!(!hub.tick(51_199));
+        assert!(hub.tick(51_200));
+    }
 }

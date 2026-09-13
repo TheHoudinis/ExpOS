@@ -1,6 +1,32 @@
 use crate::{port, println};
 use core::arch::x86_64::{__cpuid, _rdtsc};
 
+const FALLBACK_TSC_HZ: u64 = 1_000_000_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClockSource {
+    CpuidRatio,
+    CpuidFrequency,
+    ConservativeFallback,
+}
+
+impl ClockSource {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::CpuidRatio => "CPUID.15H",
+            Self::CpuidFrequency => "CPUID.16H",
+            Self::ConservativeFallback => "1 GHz fallback",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClockInfo {
+    pub tsc_hz: u64,
+    pub source: ClockSource,
+    pub invariant: bool,
+}
+
 /// Allocation-free PCI identity used by early kernel services.  Keeping this
 /// scanner in the hardware layer lets drivers report detected-but-unsupported
 /// devices without each service inventing a second PCI walk.
@@ -68,6 +94,13 @@ pub fn print_cpu_info() {
     );
 }
 
+pub fn print_clock_info() {
+    let clock = clock_info();
+    println!("TSC frequency: {} Hz", clock.tsc_hz);
+    println!("clock source: {}", clock.source.label());
+    println!("invariant TSC: {}", yes_no(clock.invariant));
+}
+
 pub fn print_kernel_features() {
     let basic = __cpuid(1);
     let maximum_extended = __cpuid(0x8000_0000).eax;
@@ -111,7 +144,9 @@ pub fn print_kernel_features() {
         yes_no(cr4 & (1 << 7) != 0),
         yes_no(efer & (1 << 11) != 0)
     );
-    println!("kernel: 64-bit paging, PCI scan, RTC, COM1, PS/2 input, VBE, RTL8139, ATA PIO");
+    println!(
+        "kernel: 64-bit paging, PCI scan, RTC/TSC clock, COM1, PS/2 input, VBE, RTL8139, ATA PIO"
+    );
     println!("services: Forms, FIN resolution, persistent state journal, PIMP/DIESE, Handles");
     println!(
         "desktop: empty-start taskbar shell, window controls, pointer hit-testing, routed input"
@@ -173,7 +208,7 @@ pub fn print_memory_architecture() {
     }
     println!("paging={} long-mode=yes", yes_no(cr0 & (1 << 31) != 0));
     println!("bootstrap map=1 GiB huge-pages  CR3={:#018X}", cr3);
-    println!("kernel stack=512 KiB  QEMU RAM default=256 MiB");
+    println!("kernel stack=1 MiB  QEMU RAM default=256 MiB");
 }
 
 pub fn random_u32() -> u32 {
@@ -186,6 +221,43 @@ pub fn random_u32() -> u32 {
 
 pub fn timestamp() -> u64 {
     unsafe { _rdtsc() }
+}
+
+pub fn clock_info() -> ClockInfo {
+    let maximum_basic = __cpuid(0).eax;
+    let maximum_extended = __cpuid(0x8000_0000).eax;
+    let invariant = maximum_extended >= 0x8000_0007 && (__cpuid(0x8000_0007).edx & (1 << 8)) != 0;
+
+    if maximum_basic >= 0x15 {
+        let ratio = __cpuid(0x15);
+        if ratio.eax != 0 && ratio.ebx != 0 && ratio.ecx != 0 {
+            let frequency = (ratio.ecx as u128 * ratio.ebx as u128 / ratio.eax as u128) as u64;
+            if frequency != 0 {
+                return ClockInfo {
+                    tsc_hz: frequency,
+                    source: ClockSource::CpuidRatio,
+                    invariant,
+                };
+            }
+        }
+    }
+
+    if maximum_basic >= 0x16 {
+        let frequency = __cpuid(0x16).eax as u64 * 1_000_000;
+        if frequency != 0 {
+            return ClockInfo {
+                tsc_hz: frequency,
+                source: ClockSource::CpuidFrequency,
+                invariant,
+            };
+        }
+    }
+
+    ClockInfo {
+        tsc_hz: FALLBACK_TSC_HZ,
+        source: ClockSource::ConservativeFallback,
+        invariant,
+    }
 }
 
 fn read_cmos(register: u8) -> u8 {

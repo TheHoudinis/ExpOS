@@ -32,6 +32,17 @@ const MINIMUM_DISK_SECTORS: u32 = SLOT_B_LBA + SLOT_SECTORS as u32;
 const ACCOUNT_RECORD_LEN: usize = 80;
 const ACCOUNT_RECORDS_OFFSET: usize = 64;
 const FLAG_ACCOUNTS_INITIALIZED: u8 = 1 << 0;
+// Bytes 9..14 of the 32-byte preferences record used to be zero-filled
+// reservation space. A tag lets version-3 slots written before display timing
+// was added keep their safe defaults instead of interpreting reserved bytes as
+// user choices.
+const DISPLAY_TIMING_TAG: [u8; 3] = *b"HZ1";
+const DISPLAY_TIMING_TAG_OFFSET: usize = 9;
+const REFRESH_RATE_OFFSET: usize = 12;
+const VSYNC_OFFSET: usize = 13;
+const PREFERENCES_RESERVED_OFFSET: usize = 14;
+const VSYNC_DISABLED_ID: u8 = 0;
+const VSYNC_ENABLED_ID: u8 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StateError {
@@ -50,6 +61,46 @@ impl StateError {
     }
 }
 
+/// Refresh-rate selection with stable on-disk identifiers.
+///
+/// The discriminants are part of the EXPOST03 preference wire format and must
+/// not be reordered or renumbered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum RefreshRate {
+    Hz60 = 0,
+    Hz75 = 1,
+    Hz120 = 2,
+    Hz144 = 3,
+}
+
+impl RefreshRate {
+    pub const DEFAULT: Self = Self::Hz60;
+
+    pub const fn hz(self) -> u16 {
+        match self {
+            Self::Hz60 => 60,
+            Self::Hz75 => 75,
+            Self::Hz120 => 120,
+            Self::Hz144 => 144,
+        }
+    }
+
+    pub const fn persisted_id(self) -> u8 {
+        self as u8
+    }
+
+    pub const fn from_persisted_id(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Hz60),
+            1 => Some(Self::Hz75),
+            2 => Some(Self::Hz120),
+            3 => Some(Self::Hz144),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PersistentPreferences {
     /// 0=480p, 1=720p, 2=1080p.
@@ -61,7 +112,9 @@ pub struct PersistentPreferences {
     pub backdrop: u8,
     pub pointer_speed: u8,
     pub flags: u16,
-    pub reserved: [u8; 23],
+    pub refresh_rate: RefreshRate,
+    pub vsync: bool,
+    pub reserved: [u8; 18],
 }
 
 impl PersistentPreferences {
@@ -80,7 +133,9 @@ impl PersistentPreferences {
                 | PREF_STATUS_VISIBLE
                 | PREF_WINDOW_BORDERS
                 | PREF_NETWORK_ENABLED,
-            reserved: [0; 23],
+            refresh_rate: RefreshRate::DEFAULT,
+            vsync: true,
+            reserved: [0; 18],
         }
     }
 }
@@ -384,10 +439,33 @@ fn encode_preferences(value: PersistentPreferences, output: &mut [u8]) {
     output[5] = value.backdrop;
     output[6] = value.pointer_speed;
     output[7..9].copy_from_slice(&value.flags.to_le_bytes());
-    output[9..32].copy_from_slice(&value.reserved);
+    output[DISPLAY_TIMING_TAG_OFFSET..REFRESH_RATE_OFFSET].copy_from_slice(&DISPLAY_TIMING_TAG);
+    output[REFRESH_RATE_OFFSET] = value.refresh_rate.persisted_id();
+    output[VSYNC_OFFSET] = if value.vsync {
+        VSYNC_ENABLED_ID
+    } else {
+        VSYNC_DISABLED_ID
+    };
+    output[PREFERENCES_RESERVED_OFFSET..32].copy_from_slice(&value.reserved);
 }
 
 fn decode_preferences(input: &[u8]) -> PersistentPreferences {
+    let has_display_timing =
+        input[DISPLAY_TIMING_TAG_OFFSET..REFRESH_RATE_OFFSET] == DISPLAY_TIMING_TAG;
+    let refresh_rate = if has_display_timing {
+        RefreshRate::from_persisted_id(input[REFRESH_RATE_OFFSET]).unwrap_or(RefreshRate::DEFAULT)
+    } else {
+        RefreshRate::DEFAULT
+    };
+    let vsync = if has_display_timing {
+        match input[VSYNC_OFFSET] {
+            VSYNC_DISABLED_ID => false,
+            VSYNC_ENABLED_ID => true,
+            _ => true,
+        }
+    } else {
+        true
+    };
     sanitize_preferences(PersistentPreferences {
         display_mode: input[0],
         theme: input[1],
@@ -397,9 +475,11 @@ fn decode_preferences(input: &[u8]) -> PersistentPreferences {
         backdrop: input[5],
         pointer_speed: input[6],
         flags: u16::from_le_bytes([input[7], input[8]]),
+        refresh_rate,
+        vsync,
         reserved: {
-            let mut reserved = [0_u8; 23];
-            reserved.copy_from_slice(&input[9..32]);
+            let mut reserved = [0_u8; 18];
+            reserved.copy_from_slice(&input[PREFERENCES_RESERVED_OFFSET..32]);
             reserved
         },
     })
@@ -511,6 +591,13 @@ fn get_u64(input: &[u8], offset: usize) -> u64 {
 mod tests {
     use super::*;
 
+    fn refresh_slot_checksums(encoded: &mut [u8; SLOT_LEN]) {
+        let payload_crc = crc32(&encoded[HEADER_LEN..HEADER_LEN + PAYLOAD_LEN]);
+        put_u32(encoded, 24, payload_crc);
+        let header_crc = crc32(&encoded[..28]);
+        put_u32(encoded, 28, header_crc);
+    }
+
     #[test]
     fn crc_matches_standard_check_value() {
         assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
@@ -522,6 +609,8 @@ mod tests {
         data.accounts_initialized = true;
         data.preferences.theme = 3;
         data.preferences.wallpaper = 2;
+        data.preferences.refresh_rate = RefreshRate::Hz144;
+        data.preferences.vsync = false;
         data.accounts[0].occupied = true;
         data.accounts[0].name_len = 5;
         data.accounts[0].name[..5].copy_from_slice(b"alice");
@@ -536,6 +625,82 @@ mod tests {
         assert_eq!(decoded.generation, 42);
         assert_eq!(decoded.slot, 1);
         assert_eq!(decoded.data, data);
+    }
+
+    #[test]
+    fn refresh_rate_wire_ids_are_stable() {
+        assert_eq!(RefreshRate::Hz60.persisted_id(), 0);
+        assert_eq!(RefreshRate::Hz75.persisted_id(), 1);
+        assert_eq!(RefreshRate::Hz120.persisted_id(), 2);
+        assert_eq!(RefreshRate::Hz144.persisted_id(), 3);
+        assert_eq!(RefreshRate::Hz60.hz(), 60);
+        assert_eq!(RefreshRate::Hz75.hz(), 75);
+        assert_eq!(RefreshRate::Hz120.hz(), 120);
+        assert_eq!(RefreshRate::Hz144.hz(), 144);
+    }
+
+    #[test]
+    fn display_timing_wire_values_are_stable() {
+        let mut data = PersistentData::new();
+        data.preferences.refresh_rate = RefreshRate::Hz75;
+        data.preferences.vsync = false;
+        let mut encoded = [0_u8; SLOT_LEN];
+        encode_slot(&data, 9, &mut encoded);
+
+        let preferences_start = HEADER_LEN + 32;
+        assert_eq!(
+            &encoded[preferences_start + DISPLAY_TIMING_TAG_OFFSET
+                ..preferences_start + REFRESH_RATE_OFFSET],
+            &DISPLAY_TIMING_TAG
+        );
+        assert_eq!(
+            encoded[preferences_start + REFRESH_RATE_OFFSET],
+            RefreshRate::Hz75.persisted_id()
+        );
+        assert_eq!(encoded[preferences_start + VSYNC_OFFSET], VSYNC_DISABLED_ID);
+
+        data.preferences.vsync = true;
+        encode_slot(&data, 10, &mut encoded);
+        assert_eq!(encoded[preferences_start + VSYNC_OFFSET], VSYNC_ENABLED_ID);
+    }
+
+    #[test]
+    fn legacy_expost03_preferences_use_safe_display_timing_defaults() {
+        let mut data = PersistentData::new();
+        data.preferences.refresh_rate = RefreshRate::Hz144;
+        data.preferences.vsync = false;
+        let mut encoded = [0_u8; SLOT_LEN];
+        encode_slot(&data, 11, &mut encoded);
+
+        // Recreate the reserved zero bytes written by EXPOST03 before the
+        // tagged timing extension existed, while retaining valid slot CRCs.
+        let preferences_start = HEADER_LEN + 32;
+        encoded[preferences_start + DISPLAY_TIMING_TAG_OFFSET
+            ..preferences_start + PREFERENCES_RESERVED_OFFSET]
+            .fill(0);
+        refresh_slot_checksums(&mut encoded);
+
+        let decoded = decode_slot(&encoded, 0).unwrap();
+        assert_eq!(decoded.data.preferences.refresh_rate, RefreshRate::Hz60);
+        assert!(decoded.data.preferences.vsync);
+    }
+
+    #[test]
+    fn invalid_checksummed_display_timing_values_fall_back_safely() {
+        let mut data = PersistentData::new();
+        data.preferences.refresh_rate = RefreshRate::Hz144;
+        data.preferences.vsync = false;
+        let mut encoded = [0_u8; SLOT_LEN];
+        encode_slot(&data, 12, &mut encoded);
+
+        let preferences_start = HEADER_LEN + 32;
+        encoded[preferences_start + REFRESH_RATE_OFFSET] = 0xFF;
+        encoded[preferences_start + VSYNC_OFFSET] = 0xFF;
+        refresh_slot_checksums(&mut encoded);
+
+        let decoded = decode_slot(&encoded, 1).unwrap();
+        assert_eq!(decoded.data.preferences.refresh_rate, RefreshRate::Hz60);
+        assert!(decoded.data.preferences.vsync);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use crate::{
+    display_timing::{FrameDecision, FramePacer, RefreshRate, TimingConfig, VSyncPolicy},
     framebuffer,
     input::{
         Input, InputEvent, PointerEvent, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_SUPER_BROWSER,
@@ -9,8 +10,8 @@ use crate::{
 };
 use framebuffer::color;
 use hexa_core::{
-    Authority, BufferFormat, BufferHandle, CapabilityBroker, DisplayServer, Document, Fin,
-    NodeKind, Operations, Rect, SurfaceRole,
+    Authority, BrowserText, BufferFormat, BufferHandle, CapabilityBroker, DisplayServer, Document,
+    Fin, NodeKind, Operations, Rect, SurfaceRole, TextAlign,
 };
 
 pub const DISPLAY_FIN: Fin = Fin::from_u128(0x4449_5350_4C41_5900_0000_0000_0000_0001);
@@ -130,12 +131,58 @@ fn shift_display_mode(mode: framebuffer::DisplayMode, direction: i8) -> framebuf
     framebuffer::DisplayMode::ALL[next]
 }
 
-const HOME: &str = "<title>Home</title><h1>ExpOS</h1><a href='hexa://about'>About</a><a href='hexa://packages'>Packages</a><a href='hexa://system'>System</a>";
-const ABOUT: &str = "<title>About</title><h1>Browser</h1><p>A small native document browser.</p><a href='hexa://home'>Home</a>";
+fn shift_refresh_rate(rate: state::RefreshRate, direction: i8) -> state::RefreshRate {
+    const RATES: [state::RefreshRate; 4] = [
+        state::RefreshRate::Hz60,
+        state::RefreshRate::Hz75,
+        state::RefreshRate::Hz120,
+        state::RefreshRate::Hz144,
+    ];
+    let index = rate.persisted_id() as usize;
+    let next = if direction < 0 {
+        (index + RATES.len() - 1) % RATES.len()
+    } else {
+        (index + 1) % RATES.len()
+    };
+    RATES[next]
+}
+
+const fn refresh_rate_label(rate: state::RefreshRate) -> &'static str {
+    match rate {
+        state::RefreshRate::Hz60 => "60 Hz",
+        state::RefreshRate::Hz75 => "75 Hz",
+        state::RefreshRate::Hz120 => "120 Hz",
+        state::RefreshRate::Hz144 => "144 Hz",
+    }
+}
+
+const fn timing_refresh_rate(rate: state::RefreshRate) -> RefreshRate {
+    match rate {
+        state::RefreshRate::Hz60 => RefreshRate::Hz60,
+        state::RefreshRate::Hz75 => RefreshRate::Hz75,
+        state::RefreshRate::Hz120 => RefreshRate::Hz120,
+        state::RefreshRate::Hz144 => RefreshRate::Hz144,
+    }
+}
+
+fn timing_config(preferences: DesktopPreferences) -> TimingConfig {
+    TimingConfig::new(
+        timing_refresh_rate(preferences.refresh_rate),
+        VSyncPolicy::from_enabled(preferences.vsync),
+        crate::hardware::clock_info().tsc_hz,
+    )
+    .expect("the kernel TSC clock must resolve every supported refresh rate")
+}
+
+const HOME: &str = "<style>h1{color:#74bcc7}.card{background:#151c20;border:1px solid #35433f;padding:8px}button{color:#f0f2f0;background:#365c62;padding:6px}</style><title>Home</title><h1>ExpOS Web</h1><p id='status' class='card'>Starting the bounded web engine</p><button id='demo'>Try JavaScript</button><a href='hexa://about'>About</a><a href='hexa://packages'>Packages</a><a href='hexa://system'>System</a><script>document.title='ExpOS Home';document.getElementById('status').textContent='CSS and JavaScript are active';document.getElementById('demo').onclick=function(){document.getElementById('status').textContent='Button handled locally';}</script>";
+const ABOUT: &str = "<title>About</title><h1>Browser</h1><p>A bounded native HTML, CSS, and JavaScript document engine.</p><a href='hexa://home'>Home</a>";
 const BROWSER_PACKAGES: &str = "<title>Packages</title><h1>Packages</h1><li>Core tools</li><li>Display</li><li>Notes</li><li>Games</li><a href='hexa://home'>Home</a>";
-const BROWSER_SYSTEM: &str = "<title>System</title><h1>System</h1><li>480p / 720p / 1080p display</li><li>Keyboard and mouse</li><li>RTL8139 network</li><a href='hexa://home'>Home</a>";
+const BROWSER_SYSTEM: &str = "<title>System</title><h1>System</h1><li>480p / 720p / 1080p display</li><li>60 / 75 / 120 / 144 Hz compositor pacing</li><li>Keyboard and mouse</li><li>RTL8139 network</li><a href='hexa://home'>Home</a>";
 const NETWORK_BLOCKED: &str = "<title>Offline</title><h1>Offline</h1><p>The address could not be loaded.</p><a href='hexa://home'>Home</a>";
 const NETWORK_ERROR: &str = "<title>Load failed</title><h1>Could not load page</h1><p>Check the address, connection, and certificate.</p><a href='hexa://home'>Home</a>";
+const SEARCH_ERROR: &str = "<title>Search failed</title><h1>Search query is too long</h1><p>Use a shorter query in the address bar.</p><a href='hexa://home'>Home</a>";
+const SEARCH_PREFIX: &str = "https://duckduckgo.com/html/?q=";
+const MAX_BROWSER_REDIRECTS: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AppKind {
@@ -311,7 +358,7 @@ impl SettingsCategory {
             Self::Appearance => 6,
             Self::Network => 4,
             Self::Bluetooth => 2,
-            Self::Display => 4,
+            Self::Display => 6,
             Self::Input => 4,
             Self::Privacy => 2,
             Self::About => 4,
@@ -424,15 +471,28 @@ enum ThemeChoice {
     Graphite,
     Nord,
     Forest,
+    Aurora,
+    Rose,
 }
 
 impl ThemeChoice {
+    const ALL: [Self; 6] = [
+        Self::Obsidian,
+        Self::Graphite,
+        Self::Nord,
+        Self::Forest,
+        Self::Aurora,
+        Self::Rose,
+    ];
+
     const fn label(self) -> &'static str {
         match self {
             Self::Obsidian => "Obsidian",
             Self::Graphite => "Graphite",
             Self::Nord => "Nord",
             Self::Forest => "Forest",
+            Self::Aurora => "Aurora",
+            Self::Rose => "Rose",
         }
     }
 
@@ -442,6 +502,8 @@ impl ThemeChoice {
             Self::Graphite => 0x0020_2225,
             Self::Nord => 0x001B_2430,
             Self::Forest => 0x0014_211C,
+            Self::Aurora => 0x0011_1D25,
+            Self::Rose => 0x0025_171D,
         }
     }
 
@@ -451,6 +513,8 @@ impl ThemeChoice {
             Self::Graphite => 0x0018_1A1D,
             Self::Nord => 0x0013_1B26,
             Self::Forest => 0x000E_1915,
+            Self::Aurora => 0x000B_1720,
+            Self::Rose => 0x001D_1016,
         }
     }
 
@@ -460,6 +524,8 @@ impl ThemeChoice {
             Self::Graphite => color::WINDOW,
             Self::Nord => 0x000E_1722,
             Self::Forest => 0x000B_1612,
+            Self::Aurora => 0x0008_141C,
+            Self::Rose => 0x0018_0B11,
         }
     }
 
@@ -469,6 +535,8 @@ impl ThemeChoice {
             Self::Graphite => 0x0027_292D,
             Self::Nord => 0x001C_2938,
             Self::Forest => 0x0017_2921,
+            Self::Aurora => 0x0014_2930,
+            Self::Rose => 0x0030_1A23,
         }
     }
 
@@ -478,6 +546,8 @@ impl ThemeChoice {
             Self::Graphite => 0x000C_0D0F,
             Self::Nord => 0x0008_101B,
             Self::Forest => 0x0005_100C,
+            Self::Aurora => 0x0004_0E14,
+            Self::Rose => 0x0010_050A,
         }
     }
 
@@ -486,17 +556,20 @@ impl ThemeChoice {
             1 => Self::Graphite,
             2 => Self::Nord,
             3 => Self::Forest,
+            4 => Self::Aurora,
+            5 => Self::Rose,
             _ => Self::Obsidian,
         }
     }
 
     fn shifted(self, direction: i8) -> Self {
-        match (self, direction < 0) {
-            (Self::Obsidian, false) | (Self::Nord, true) => Self::Graphite,
-            (Self::Graphite, false) | (Self::Forest, true) => Self::Nord,
-            (Self::Nord, false) | (Self::Obsidian, true) => Self::Forest,
-            (Self::Forest, false) | (Self::Graphite, true) => Self::Obsidian,
-        }
+        let index = self as usize;
+        let next = if direction < 0 {
+            (index + Self::ALL.len() - 1) % Self::ALL.len()
+        } else {
+            (index + 1) % Self::ALL.len()
+        };
+        Self::ALL[next]
     }
 }
 
@@ -508,9 +581,21 @@ enum WallpaperChoice {
     Horizon,
     Grid,
     Dusk,
+    Aurora,
+    Mesh,
 }
 
 impl WallpaperChoice {
+    const ALL: [Self; 7] = [
+        Self::Solid,
+        Self::Gradient,
+        Self::Horizon,
+        Self::Grid,
+        Self::Dusk,
+        Self::Aurora,
+        Self::Mesh,
+    ];
+
     const fn label(self) -> &'static str {
         match self {
             Self::Solid => "Solid",
@@ -518,6 +603,8 @@ impl WallpaperChoice {
             Self::Horizon => "Horizon",
             Self::Grid => "Grid",
             Self::Dusk => "Dusk",
+            Self::Aurora => "Aurora",
+            Self::Mesh => "Mesh",
         }
     }
 
@@ -527,18 +614,20 @@ impl WallpaperChoice {
             2 => Self::Horizon,
             3 => Self::Grid,
             4 => Self::Dusk,
+            5 => Self::Aurora,
+            6 => Self::Mesh,
             _ => Self::Solid,
         }
     }
 
     fn shifted(self, direction: i8) -> Self {
-        match (self, direction < 0) {
-            (Self::Solid, false) | (Self::Horizon, true) => Self::Gradient,
-            (Self::Gradient, false) | (Self::Grid, true) => Self::Horizon,
-            (Self::Horizon, false) | (Self::Dusk, true) => Self::Grid,
-            (Self::Grid, false) | (Self::Solid, true) => Self::Dusk,
-            (Self::Dusk, false) | (Self::Gradient, true) => Self::Solid,
-        }
+        let index = self as usize;
+        let next = if direction < 0 {
+            (index + Self::ALL.len() - 1) % Self::ALL.len()
+        } else {
+            (index + 1) % Self::ALL.len()
+        };
+        Self::ALL[next]
     }
 }
 
@@ -594,6 +683,8 @@ struct DesktopPreferences {
     window_borders: bool,
     high_contrast: bool,
     pointer_speed: u8,
+    refresh_rate: state::RefreshRate,
+    vsync: bool,
 }
 
 impl DesktopPreferences {
@@ -654,6 +745,8 @@ impl DesktopPreferences {
             window_borders: flags & state::PREF_WINDOW_BORDERS != 0,
             high_contrast: flags & state::PREF_HIGH_CONTRAST != 0,
             pointer_speed: value.pointer_speed.clamp(1, 3),
+            refresh_rate: value.refresh_rate,
+            vsync: value.vsync,
         }
     }
 
@@ -668,6 +761,8 @@ impl DesktopPreferences {
         value.accent = self.accent as u8;
         value.backdrop = self.backdrop as u8;
         value.pointer_speed = self.pointer_speed;
+        value.refresh_rate = self.refresh_rate;
+        value.vsync = self.vsync;
         let desktop_flags = state::PREF_PURE_BLACK_APPS
             | state::PREF_ROUNDED_CONTROLS
             | state::PREF_TASKBAR_VISIBLE
@@ -730,7 +825,7 @@ struct DesktopState {
     settings_row: usize,
     settings_notice: &'static str,
     document: Document,
-    browser_line: [u8; 96],
+    browser_line: [u8; 512],
     browser_len: usize,
     browser_editing: bool,
     terminal_line: [u8; TERMINAL_CAPACITY],
@@ -751,6 +846,8 @@ struct DesktopState {
     cursor: PointerCursor,
     dragging: Option<AppKind>,
     should_exit: bool,
+    frame_pacer: FramePacer,
+    full_redraw_requested: bool,
 }
 
 struct PointerCursor {
@@ -760,6 +857,13 @@ struct PointerCursor {
     style: CursorChoice,
     accent: u32,
     drawn: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PointerRender {
+    None,
+    Cursor(framebuffer::DamageRegion),
+    Full,
 }
 
 impl PointerCursor {
@@ -784,14 +888,25 @@ impl PointerCursor {
         self.drawn = false;
     }
 
-    fn move_by(&mut self, dx: i16, dy: i16) {
+    fn move_by(&mut self, dx: i16, dy: i16) -> Option<framebuffer::DamageRegion> {
         if dx == 0 && dy == 0 {
-            return;
+            return None;
         }
+        let previous = self.damage_region();
         self.restore();
         self.x = (self.x.saturating_add(dx)).clamp(0, framebuffer::width() as i16 - 1);
         self.y = (self.y.saturating_add(dy)).clamp(0, framebuffer::height() as i16 - 1);
         self.draw();
+        Some(previous.union(self.damage_region()))
+    }
+
+    const fn damage_region(&self) -> framebuffer::DamageRegion {
+        framebuffer::DamageRegion::new(
+            self.x as i32,
+            self.y as i32,
+            CURSOR_WIDTH as i32,
+            CURSOR_HEIGHT as i32,
+        )
     }
 
     fn restore(&mut self) {
@@ -896,6 +1011,7 @@ impl DesktopState {
     ) -> Self {
         let active = start_app.unwrap_or(AppKind::Terminal);
         let preferences = DesktopPreferences::from_persistent(state::preferences());
+        let frame_pacer = FramePacer::new(timing_config(preferences), crate::hardware::timestamp());
         let mut server = DisplayServer::new();
         let mut broker = CapabilityBroker::new();
         let compositor_handle = broker
@@ -1059,7 +1175,7 @@ impl DesktopState {
             settings_row: 0,
             settings_notice: "Changes are saved locally.",
             document: Document::parse("hexa://home", HOME).expect("built-in home document"),
-            browser_line: [0; 96],
+            browser_line: [0; 512],
             browser_len: 0,
             browser_editing: false,
             terminal_line: [0; TERMINAL_CAPACITY],
@@ -1080,9 +1196,12 @@ impl DesktopState {
             cursor: PointerCursor::new(preferences.cursor, preferences.accent.color()),
             dragging: None,
             should_exit: false,
+            frame_pacer,
+            full_redraw_requested: false,
         };
         state.terminal_push("ExpOS terminal");
         state.terminal_push("Type help for commands. Up/Down recalls history.");
+        state.log_browser_engine();
         state
     }
 
@@ -1115,6 +1234,13 @@ impl DesktopState {
         }
     }
 
+    fn reconfigure_presentation(&mut self) {
+        self.frame_pacer.reconfigure(
+            timing_config(self.preferences),
+            crate::hardware::timestamp(),
+        );
+    }
+
     fn work_area_bottom(&self) -> i16 {
         if self.preferences.taskbar_visible {
             taskbar_y()
@@ -1132,11 +1258,11 @@ impl DesktopState {
         }
     }
 
-    fn handle_pointer(&mut self, pointer: PointerEvent) -> bool {
+    fn handle_pointer(&mut self, pointer: PointerEvent) -> PointerRender {
         let speed = self.preferences.pointer_speed as i16;
         let motion_x = pointer.dx.saturating_mul(speed);
         let motion_y = pointer.dy.saturating_mul(speed);
-        self.cursor.move_by(motion_x, motion_y);
+        let cursor_damage = self.cursor.move_by(motion_x, motion_y);
         self.route_pointer(pointer);
         if pointer.released & 1 != 0 {
             self.dragging = None;
@@ -1146,12 +1272,18 @@ impl DesktopState {
             && (pointer.dx != 0 || pointer.dy != 0)
         {
             self.drag_active(motion_x, motion_y);
-            return true;
+            return PointerRender::Full;
         }
         if pointer.pressed & 1 != 0 {
-            return self.pointer_press(self.cursor.x, self.cursor.y);
+            return if self.pointer_press(self.cursor.x, self.cursor.y) {
+                PointerRender::Full
+            } else if let Some(damage) = cursor_damage {
+                PointerRender::Cursor(damage)
+            } else {
+                PointerRender::None
+            };
         }
-        false
+        cursor_damage.map_or(PointerRender::None, PointerRender::Cursor)
     }
 
     fn route_pointer(&mut self, pointer: PointerEvent) {
@@ -1489,6 +1621,7 @@ impl DesktopState {
 
     fn set_document(&mut self, document: Document) {
         self.document = document;
+        self.log_browser_engine();
         let surface = self.app_surfaces[AppKind::Browser.index()];
         let damage_rect = self
             .server
@@ -1509,7 +1642,25 @@ impl DesktopState {
         let _ = self.server.commit(BROWSER_FIN, surface);
     }
 
+    fn log_browser_engine(&self) {
+        let report = self.document.script_report();
+        slog!(
+            "HEXA_BROWSER_ENGINE nodes={} css_rules={} scripts={} executed={} rejected={} handlers={}\r\n",
+            self.document.len(),
+            self.document.style_rule_count(),
+            report.scripts_seen,
+            report.scripts_executed,
+            report.scripts_rejected,
+            report.handlers_registered
+        );
+    }
+
     fn navigate_address(&mut self, address: &str) {
+        let address = address.trim();
+        if address.is_empty() {
+            self.navigate("hexa://home", HOME);
+            return;
+        }
         if address.eq_ignore_ascii_case("hexa://home") || address == "home" {
             self.navigate("hexa://home", HOME);
             return;
@@ -1527,7 +1678,19 @@ impl DesktopState {
             return;
         }
         if !address.starts_with("http://") && !address.starts_with("https://") {
-            self.navigate("hexa://error", NETWORK_ERROR);
+            let query = address.strip_prefix('?').unwrap_or(address).trim();
+            let mut url = [0_u8; 512];
+            let Some(length) = encode_search_url(query, &mut url) else {
+                self.navigate("hexa://search-error", SEARCH_ERROR);
+                return;
+            };
+            let url = core::str::from_utf8(&url[..length]).unwrap_or("");
+            slog!(
+                "HEXA_BROWSER_SEARCH query_bytes={} url_bytes={} provider=duckduckgo-html\r\n",
+                query.len(),
+                length
+            );
+            self.navigate_address(url);
             return;
         }
         if !self.network_active() {
@@ -1538,52 +1701,114 @@ impl DesktopState {
         let Some(handle_id) = self.browser_network_handle else {
             return;
         };
-        match network::http_get(&self.broker, handle_id, BROWSER_FIN, STABLE_FIN, address) {
-            Ok(response) => {
-                let mut sanitized = [0_u8; network::HTTP_BODY_CAPACITY];
-                for (output, byte) in sanitized.iter_mut().zip(response.body().iter().copied()) {
-                    *output = if byte.is_ascii_graphic()
-                        || matches!(byte, b' ' | b'\n' | b'\r' | b'\t')
-                    {
-                        byte
-                    } else {
-                        b' '
-                    };
-                }
-                let source = core::str::from_utf8(&sanitized[..response.body_len]).unwrap_or("");
-                let document = Document::parse(address, source).or_else(|_| {
-                    // Script-first sites such as YouTube may not place any of
-                    // our small renderer's supported nodes inside the bounded
-                    // response. The authenticated fetch still succeeded, so
-                    // present that fact without pretending to execute the page.
-                    Document::parse(
-                        address,
-                        "<title>Page loaded</title><h1>Secure response received</h1><p>This site needs CSS, JavaScript, and media features that ExpOS does not implement yet.</p>",
-                    )
-                });
-                match document {
-                    Ok(document) => {
-                        self.set_document(document);
+        let mut current = [0_u8; 512];
+        let Some(current_len) = copy_browser_url(&mut current, address.as_bytes()) else {
+            self.navigate("hexa://error", NETWORK_ERROR);
+            slog!("HEXA_BROWSER_HTTP_ERROR error=BadUrl\r\n");
+            return;
+        };
+        let mut current_len = current_len;
+        for redirect_count in 0..=MAX_BROWSER_REDIRECTS {
+            let current_url = core::str::from_utf8(&current[..current_len]).unwrap_or("");
+            match network::http_get(
+                &self.broker,
+                handle_id,
+                BROWSER_FIN,
+                STABLE_FIN,
+                current_url,
+            ) {
+                Ok(response) => {
+                    if is_http_redirect(response.status) {
+                        let Some(location) = response.location() else {
+                            self.navigate("hexa://error", NETWORK_ERROR);
+                            slog!("HEXA_BROWSER_HTTP_ERROR error=RedirectWithoutLocation\r\n");
+                            return;
+                        };
+                        if redirect_count == MAX_BROWSER_REDIRECTS {
+                            self.navigate("hexa://error", NETWORK_ERROR);
+                            slog!("HEXA_BROWSER_HTTP_ERROR error=TooManyRedirects\r\n");
+                            return;
+                        }
+                        let mut next = [0_u8; 512];
+                        let Some(next_len) = resolve_browser_link(current_url, location, &mut next)
+                        else {
+                            self.navigate("hexa://error", NETWORK_ERROR);
+                            slog!("HEXA_BROWSER_HTTP_ERROR error=BadRedirect\r\n");
+                            return;
+                        };
+                        let next_url = core::str::from_utf8(&next[..next_len]).unwrap_or("");
+                        if current_url.starts_with("https://") && next_url.starts_with("http://") {
+                            self.navigate("hexa://error", NETWORK_ERROR);
+                            slog!("HEXA_BROWSER_HTTP_ERROR error=InsecureRedirect\r\n");
+                            return;
+                        }
                         slog!(
-                            "HEXA_BROWSER_HTTP_OK status={} bytes={} peer={}.{}.{}.{}\r\n",
+                            "HEXA_BROWSER_REDIRECT status={} hop={} target_bytes={}\r\n",
                             response.status,
-                            response.body_len,
-                            response.peer[0],
-                            response.peer[1],
-                            response.peer[2],
-                            response.peer[3]
+                            redirect_count + 1,
+                            next_len
                         );
+                        current[..next_len].copy_from_slice(&next[..next_len]);
+                        current_len = next_len;
+                        continue;
                     }
-                    Err(error) => {
-                        self.navigate("hexa://error", NETWORK_ERROR);
-                        slog!("HEXA_BROWSER_HTTP_ERROR error={:?}\r\n", error);
+                    let mut sanitized = [0_u8; network::HTTP_BODY_CAPACITY];
+                    for (output, byte) in sanitized.iter_mut().zip(response.body().iter().copied())
+                    {
+                        *output = if byte.is_ascii_graphic()
+                            || matches!(byte, b' ' | b'\n' | b'\r' | b'\t')
+                        {
+                            byte
+                        } else {
+                            b' '
+                        };
+                    }
+                    let source =
+                        core::str::from_utf8(&sanitized[..response.body_len]).unwrap_or("");
+                    let projected = Document::parse_duckduckgo_results(current_url, source).ok();
+                    let search_results =
+                        projected.as_ref().map_or(0, |results| results.result_count);
+                    let document = if let Some(results) = projected {
+                        Ok(results.document)
+                    } else {
+                        Document::parse(current_url, source).or_else(|_| {
+                            // Script-first sites may not place any supported
+                            // nodes in the bounded response. The authenticated
+                            // fetch still succeeded, so report that honestly.
+                            Document::parse(
+                                current_url,
+                                "<title>Page loaded</title><h1>Secure response received</h1><p>This page needs external resources, browser APIs, or media features beyond the bounded ExpOS engine.</p>",
+                            )
+                        })
+                    };
+                    match document {
+                        Ok(document) => {
+                            self.set_document(document);
+                            if search_results != 0 {
+                                slog!("HEXA_SEARCH_RESULTS count={}\r\n", search_results);
+                            }
+                            slog!(
+                                "HEXA_BROWSER_HTTP_OK status={} bytes={} peer={}.{}.{}.{}\r\n",
+                                response.status,
+                                response.body_len,
+                                response.peer[0],
+                                response.peer[1],
+                                response.peer[2],
+                                response.peer[3]
+                            );
+                        }
+                        Err(error) => {
+                            self.navigate("hexa://error", NETWORK_ERROR);
+                            slog!("HEXA_BROWSER_HTTP_ERROR error={:?}\r\n", error);
+                        }
                     }
                 }
+                Err(error) => {
+                    self.navigate("hexa://error", NETWORK_ERROR);
+                    slog!("HEXA_BROWSER_HTTP_ERROR error={:?}\r\n", error);
+                }
             }
-            Err(error) => {
-                self.navigate("hexa://error", NETWORK_ERROR);
-                slog!("HEXA_BROWSER_HTTP_ERROR error={:?}\r\n", error);
-            }
+            return;
         }
     }
 
@@ -1603,6 +1828,49 @@ impl DesktopState {
                 self.browser_editing = true;
                 return true;
             }
+        }
+
+        let mut content_y = rect.y as i32 + 110;
+        let mut selected: Option<(usize, BrowserText, bool)> = None;
+        for styled in self.document.styled_nodes() {
+            if styled.node.kind == NodeKind::Title || !styled.style.is_rendered() {
+                continue;
+            }
+            let layout = browser_layout(rect, styled, content_y);
+            content_y = layout.next_y;
+            if (layout.x..layout.x + layout.width).contains(&(x as i32))
+                && (layout.y..layout.y + layout.height).contains(&(y as i32))
+            {
+                selected = Some((styled.index, styled.node.target, styled.clickable));
+                break;
+            }
+        }
+        let Some((index, target, scripted)) = selected else {
+            return false;
+        };
+        if scripted && self.document.dispatch_click_at_node(index) {
+            let report = self.document.script_report();
+            slog!(
+                "HEXA_BROWSER_EVENT type=click node={} executed={}\r\n",
+                index,
+                report.statements_executed
+            );
+            self.log_browser_engine();
+            return true;
+        }
+        if !target.as_str().is_empty() {
+            let mut address = [0_u8; 512];
+            let Some(length) =
+                resolve_browser_link(self.document.url(), target.as_str(), &mut address)
+            else {
+                self.navigate("hexa://error", NETWORK_ERROR);
+                slog!("HEXA_BROWSER_HTTP_ERROR error=BadUrl\r\n");
+                return true;
+            };
+            let address = core::str::from_utf8(&address[..length]).unwrap_or("");
+            self.navigate_address(address);
+            self.frame_pacer.reset_phase(crate::hardware::timestamp());
+            return true;
         }
         false
     }
@@ -1649,13 +1917,14 @@ impl DesktopState {
     }
 
     fn handle_settings_key(&mut self, key: u8) -> bool {
+        self.full_redraw_requested = false;
         match key {
             KEY_LEFT | b'[' => self.shift_settings_category(-1),
             KEY_RIGHT | b']' => self.shift_settings_category(1),
-            KEY_UP => {
+            KEY_UP | b'k' => {
                 self.settings_row = self.settings_row.saturating_sub(1);
             }
-            KEY_DOWN => {
+            KEY_DOWN | b'j' => {
                 self.settings_row = (self.settings_row + 1)
                     .min(self.settings_category.row_count().saturating_sub(1));
             }
@@ -1738,6 +2007,7 @@ impl DesktopState {
     fn activate_setting(&mut self, direction: i8) {
         match (self.settings_category, self.settings_row) {
             (SettingsCategory::System, 0) => {
+                self.full_redraw_requested = true;
                 self.preferences.taskbar_visible = !self.preferences.taskbar_visible;
                 let visible = self.preferences.taskbar_visible;
                 let _ = self
@@ -1762,6 +2032,7 @@ impl DesktopState {
                 self.settings_notice = "Taskbar visibility updated.";
             }
             (SettingsCategory::System, 1) | (SettingsCategory::Network, 1) => {
+                self.full_redraw_requested = true;
                 self.preferences.status_visible = !self.preferences.status_visible;
                 slog!(
                     "HEXA_SETTING_CHANGED key=status-indicator value={}\r\n",
@@ -1774,6 +2045,7 @@ impl DesktopState {
                 self.settings_notice = "Status area visibility updated.";
             }
             (SettingsCategory::Appearance, 0) => {
+                self.full_redraw_requested = true;
                 self.preferences.theme = self.preferences.theme.shifted(direction);
                 slog!(
                     "HEXA_SETTING_CHANGED key=theme value={}\r\n",
@@ -1782,6 +2054,7 @@ impl DesktopState {
                 self.settings_notice = "Desktop theme updated.";
             }
             (SettingsCategory::Appearance, 1) => {
+                self.full_redraw_requested = true;
                 self.preferences.wallpaper = self.preferences.wallpaper.shifted(direction);
                 slog!(
                     "HEXA_SETTING_CHANGED key=wallpaper value={}\r\n",
@@ -1790,6 +2063,7 @@ impl DesktopState {
                 self.settings_notice = "Wallpaper updated.";
             }
             (SettingsCategory::Appearance, 2) => {
+                self.full_redraw_requested = true;
                 self.preferences.accent = self.preferences.accent.shifted(direction);
                 self.cursor
                     .set_style(self.preferences.cursor, self.preferences.accent.color());
@@ -1800,6 +2074,7 @@ impl DesktopState {
                 self.settings_notice = "Accent color updated.";
             }
             (SettingsCategory::Appearance, 3) => {
+                self.full_redraw_requested = true;
                 self.preferences.backdrop = self.preferences.backdrop.shifted(direction);
                 slog!(
                     "HEXA_SETTING_CHANGED key=background-tone value={}\r\n",
@@ -1808,6 +2083,7 @@ impl DesktopState {
                 self.settings_notice = "Wallpaper tone updated.";
             }
             (SettingsCategory::Appearance, 4) => {
+                self.full_redraw_requested = true;
                 self.preferences.pure_black_apps = !self.preferences.pure_black_apps;
                 slog!(
                     "HEXA_SETTING_CHANGED key=pure-black-apps value={}\r\n",
@@ -1820,6 +2096,7 @@ impl DesktopState {
                 self.settings_notice = "Application background updated.";
             }
             (SettingsCategory::Appearance, 5) => {
+                self.full_redraw_requested = true;
                 self.preferences.rounded_controls = !self.preferences.rounded_controls;
                 slog!(
                     "HEXA_SETTING_CHANGED key=rounded-controls value={}\r\n",
@@ -1831,9 +2108,16 @@ impl DesktopState {
                 );
                 self.settings_notice = "Control shape updated.";
             }
-            (SettingsCategory::Network, 0) => self.change_network_policy(),
-            (SettingsCategory::Network, 2) => self.change_radio_policy(radio::RadioKind::Wifi),
+            (SettingsCategory::Network, 0) => {
+                self.full_redraw_requested = true;
+                self.change_network_policy();
+            }
+            (SettingsCategory::Network, 2) => {
+                self.full_redraw_requested = true;
+                self.change_radio_policy(radio::RadioKind::Wifi);
+            }
             (SettingsCategory::Bluetooth, 0) => {
+                self.full_redraw_requested = true;
                 self.change_radio_policy(radio::RadioKind::Bluetooth)
             }
             (SettingsCategory::Display, 0) => {
@@ -1845,7 +2129,27 @@ impl DesktopState {
                 );
                 self.settings_notice = "Resolution applies when the desktop is reopened.";
             }
+            (SettingsCategory::Display, 1) => {
+                self.preferences.refresh_rate =
+                    shift_refresh_rate(self.preferences.refresh_rate, direction);
+                self.reconfigure_presentation();
+                slog!(
+                    "HEXA_SETTING_CHANGED key=refresh-rate value={}\r\n",
+                    refresh_rate_label(self.preferences.refresh_rate)
+                );
+                self.settings_notice = "Compositor presentation rate updated.";
+            }
             (SettingsCategory::Display, 2) => {
+                self.preferences.vsync = !self.preferences.vsync;
+                self.reconfigure_presentation();
+                slog!(
+                    "HEXA_SETTING_CHANGED key=vsync value={}\r\n",
+                    if self.preferences.vsync { "on" } else { "off" }
+                );
+                self.settings_notice = "Page-flip synchronization updated.";
+            }
+            (SettingsCategory::Display, 4) => {
+                self.full_redraw_requested = true;
                 self.preferences.window_borders = !self.preferences.window_borders;
                 slog!(
                     "HEXA_SETTING_CHANGED key=window-borders value={}\r\n",
@@ -1857,7 +2161,8 @@ impl DesktopState {
                 );
                 self.settings_notice = "Window border rendering updated.";
             }
-            (SettingsCategory::Display, 3) => {
+            (SettingsCategory::Display, 5) => {
+                self.full_redraw_requested = true;
                 self.preferences.high_contrast = !self.preferences.high_contrast;
                 slog!(
                     "HEXA_SETTING_CHANGED key=high-contrast value={}\r\n",
@@ -1916,10 +2221,11 @@ impl DesktopState {
         }
         match key {
             b'\n' => {
-                let mut value = [0_u8; 96];
+                let mut value = [0_u8; 512];
                 value[..self.browser_len].copy_from_slice(&self.browser_line[..self.browser_len]);
                 let address = core::str::from_utf8(&value[..self.browser_len]).unwrap_or("");
                 self.navigate_address(address);
+                self.frame_pacer.reset_phase(crate::hardware::timestamp());
                 self.browser_editing = false;
             }
             0x08 => self.browser_len = self.browser_len.saturating_sub(1),
@@ -2074,6 +2380,17 @@ impl DesktopState {
         self.terminal_push_number("height: ", height as u64, " px");
         self.terminal_push_number("stride: ", framebuffer::stride_bytes() as u64, " bytes");
         self.terminal_push_parts(&["next desktop preset: ", requested.label()]);
+        self.terminal_push_number(
+            "presentation target: ",
+            self.preferences.refresh_rate.hz() as u64,
+            " Hz",
+        );
+        self.terminal_push_parts(&["vsync: ", if self.preferences.vsync { "on" } else { "off" }]);
+        let pacing = self.frame_pacer.stats();
+        let scanout = framebuffer::presentation_stats();
+        self.terminal_push_number("frames presented: ", scanout.frames, "");
+        self.terminal_push_number("pacing misses: ", pacing.missed_frames, "");
+        self.terminal_push_number("vblank timeouts: ", scanout.vblank_timeouts, "");
     }
 
     fn terminal_print_network(&mut self) {
@@ -2373,28 +2690,56 @@ fn run_session(
     }
 
     let mut desktop = DesktopState::new(start_app, session, allow_network);
+    // Desktop construction can include capability setup and document parsing;
+    // begin presentation timing only when the first frame is ready to draw.
+    desktop
+        .frame_pacer
+        .reset_phase(crate::hardware::timestamp());
     render(&mut desktop);
     slog!("HEXA_DISPLAY_READY surfaces=11 commit=11\r\n");
     if start_app.is_none() {
         slog!("HEXA_DESKTOP_EMPTY open_apps=0 pinned_apps=0\r\n");
     }
     slog!("HEXA_MOUSE_READY enabled={}\r\n", mouse_ready);
+    slog!(
+        "HEXA_DESKTOP_PREFS theme={} wallpaper={} cursor={} accent={}\r\n",
+        desktop.preferences.theme.label(),
+        desktop.preferences.wallpaper.label(),
+        desktop.preferences.cursor.label(),
+        desktop.preferences.accent.label()
+    );
+    let clock = crate::hardware::clock_info();
+    slog!(
+        "HEXA_PRESENTATION_READY rate={} vsync={} pageflip={} clock_hz={} source={}\r\n",
+        refresh_rate_label(desktop.preferences.refresh_rate),
+        desktop.preferences.vsync,
+        framebuffer::presentation_stats().page_flip_available,
+        clock.tsc_hz,
+        clock.source.label()
+    );
 
     while !desktop.should_exit {
         let Some(event) = input.poll_event() else {
+            let now = crate::hardware::timestamp();
             if desktop.active == AppKind::Games
                 && desktop.app_is_visible(AppKind::Games)
-                && desktop.games.tick(crate::hardware::timestamp())
+                && desktop.games.tick(now)
             {
                 render_active_window(&mut desktop);
+            } else {
+                let _ = desktop.frame_pacer.decide(now, false);
             }
             core::hint::spin_loop();
             continue;
         };
         let InputEvent::Key(key) = event else {
             if let InputEvent::Pointer(pointer) = event {
-                if desktop.handle_pointer(pointer) {
-                    render(&mut desktop);
+                match desktop.handle_pointer(pointer) {
+                    PointerRender::None => {}
+                    PointerRender::Cursor(damage) => {
+                        present_frame_damage(&mut desktop, &[damage]);
+                    }
+                    PointerRender::Full => render(&mut desktop),
                 }
             }
             continue;
@@ -2454,7 +2799,11 @@ fn run_session(
             && desktop.app_is_visible(AppKind::Settings)
             && desktop.handle_settings_key(key)
         {
-            render(&mut desktop);
+            if desktop.full_redraw_requested {
+                render(&mut desktop);
+            } else {
+                render_active_window(&mut desktop);
+            }
             continue;
         }
         match key {
@@ -2517,6 +2866,15 @@ fn run_session(
         render(&mut desktop);
     }
 
+    let pacing = desktop.frame_pacer.stats();
+    let presentation = framebuffer::presentation_stats();
+    slog!(
+        "HEXA_PRESENTATION_STATS frames={} missed={} idle={} vblank_timeouts={}\r\n",
+        presentation.frames,
+        pacing.missed_frames,
+        pacing.idle_frames,
+        presentation.vblank_timeouts
+    );
     framebuffer::exit();
     crate::clear_console();
     crate::println!("HexaDisplay session closed; command environment restored.");
@@ -2695,6 +3053,40 @@ fn draw_wallpaper(preferences: DesktopPreferences) {
                 28,
             );
         }
+        WallpaperChoice::Aurora => {
+            framebuffer::vertical_gradient(0, 0, width, height, 0x0004_101B, 0x0002_060B);
+            let accent = preferences.accent.color();
+            let band_height = (height / 8).max(24);
+            for band in 0..5 {
+                let y = height / 7 + band * band_height;
+                let inset = band * width / 18;
+                framebuffer::rounded_rect(
+                    inset - width / 5,
+                    y,
+                    width - inset / 2,
+                    band_height + 18,
+                    band_height / 2,
+                    if band % 2 == 0 { accent } else { color::CYAN },
+                );
+                framebuffer::alpha_rect(0, y + band_height / 3, width, band_height, base, 205);
+            }
+        }
+        WallpaperChoice::Mesh => {
+            framebuffer::vertical_gradient(0, 0, width, height, base, 0x0002_0508);
+            let accent = preferences.accent.color();
+            let spacing = if width <= 640 { 56 } else { 88 };
+            let mut offset = -height;
+            while offset < width {
+                framebuffer::line(offset, 0, offset + height, height, accent);
+                offset += spacing;
+            }
+            let mut offset = 0;
+            while offset < width + height {
+                framebuffer::line(offset, 0, offset - height, height, preferences.theme.card());
+                offset += spacing;
+            }
+            framebuffer::alpha_rect(0, 0, width, height, base, 155);
+        }
     }
 }
 
@@ -2704,11 +3096,11 @@ fn render(desktop: &mut DesktopState) {
 
     for app in AppKind::ALL {
         if app != desktop.active && desktop.app_is_visible(app) {
-            draw_app(desktop, app, false);
+            draw_app(desktop, app, false, true);
         }
     }
     if desktop.app_is_visible(desktop.active) {
-        draw_app(desktop, desktop.active, true);
+        draw_app(desktop, desktop.active, true, true);
     }
     if desktop.preferences.taskbar_visible {
         draw_dock(desktop);
@@ -2718,18 +3110,71 @@ fn render(desktop: &mut DesktopState) {
     }
     desktop.cursor.draw();
     desktop.drain_protocol_events();
+    present_frame(desktop);
 }
 
 fn render_active_window(desktop: &mut DesktopState) {
     desktop.cursor.restore();
+    let mut damage = [desktop.cursor.damage_region(); 2];
+    let mut damage_count = 1;
     if desktop.app_is_visible(desktop.active) {
-        draw_app(desktop, desktop.active, true);
+        let rect = desktop
+            .server
+            .surface(desktop.active_surface())
+            .map(|surface| surface.current.rect)
+            .unwrap_or_else(|| {
+                let (width, height) = app_dimensions();
+                Rect::new(8, 8, width, height)
+            });
+        damage[damage_count] = framebuffer::DamageRegion::new(
+            rect.x as i32,
+            rect.y as i32,
+            rect.width as i32 + 10,
+            rect.height as i32 + 12,
+        );
+        damage_count += 1;
+        draw_app(desktop, desktop.active, true, false);
     }
     desktop.cursor.draw();
     desktop.drain_protocol_events();
+    present_frame_damage(desktop, &damage[..damage_count]);
 }
 
-fn draw_app(desktop: &DesktopState, app: AppKind, focused: bool) {
+fn present_frame(desktop: &mut DesktopState) {
+    pace_frame(desktop);
+    framebuffer::present(desktop.preferences.vsync);
+}
+
+fn present_frame_damage(desktop: &mut DesktopState, damage: &[framebuffer::DamageRegion]) {
+    pace_frame(desktop);
+    framebuffer::present_damage(desktop.preferences.vsync, damage);
+}
+
+fn pace_frame(desktop: &mut DesktopState) {
+    loop {
+        let now = crate::hardware::timestamp();
+        match desktop.frame_pacer.decide(now, true) {
+            FrameDecision::WaitUntil { deadline } => {
+                while crate::hardware::timestamp() < deadline.not_before_tick() {
+                    core::hint::spin_loop();
+                }
+            }
+            FrameDecision::PresentNow { missed_frames, .. } => {
+                let severe_miss = desktop.preferences.refresh_rate.hz() as u64 / 2;
+                if missed_frames >= severe_miss {
+                    slog!("HEXA_FRAME_MISSED count={}\r\n", missed_frames);
+                }
+                break;
+            }
+            FrameDecision::ClockExhausted => {
+                desktop.frame_pacer.reset_phase(now);
+            }
+            FrameDecision::Idle { .. } => {}
+        }
+    }
+}
+
+fn draw_app(desktop: &DesktopState, app: AppKind, focused: bool, draw_shadow: bool) {
     let rect = desktop
         .server
         .surface(desktop.app_surfaces[app.index()])
@@ -2738,7 +3183,7 @@ fn draw_app(desktop: &DesktopState, app: AppKind, focused: bool) {
             let (width, height) = app_dimensions();
             Rect::new(8, 8, width, height)
         });
-    draw_window(rect, app.label(), focused, desktop.preferences);
+    draw_window(rect, app.label(), focused, desktop.preferences, draw_shadow);
     let responsive_full = matches!(
         app,
         AppKind::Browser | AppKind::Terminal | AppKind::Settings | AppKind::Notes
@@ -2758,19 +3203,37 @@ fn draw_app(desktop: &DesktopState, app: AppKind, focused: bool) {
     }
 }
 
-fn draw_window(rect: Rect, title: &str, focused: bool, preferences: DesktopPreferences) {
+fn draw_window(
+    rect: Rect,
+    title: &str,
+    focused: bool,
+    preferences: DesktopPreferences,
+    draw_shadow: bool,
+) {
     let x = rect.x as i32;
     let y = rect.y as i32;
     let width = rect.width as i32;
     let height = rect.height as i32;
-    framebuffer::rect(x, y, width, height, preferences.window_color());
+    if draw_shadow && width > 24 && height > 24 {
+        framebuffer::alpha_rect(x + 8, y + 10, width, height, 0x0000_0000, 105);
+    }
+    if preferences.rounded_controls {
+        framebuffer::rounded_rect(x, y, width, height, 10, preferences.window_color());
+    } else {
+        framebuffer::rect(x, y, width, height, preferences.window_color());
+    }
     if preferences.window_borders {
         framebuffer::outline(x, y, width, height, preferences.border_color(focused));
     }
     if focused {
         framebuffer::rect(x + 1, y + 1, width - 2, 2, preferences.accent.color());
     }
-    framebuffer::rect(x + 1, y + 3, width - 2, 29, preferences.chrome_color());
+    if preferences.rounded_controls {
+        framebuffer::rounded_rect(x + 1, y + 3, width - 2, 29, 8, preferences.chrome_color());
+        framebuffer::rect(x + 1, y + 18, width - 2, 14, preferences.chrome_color());
+    } else {
+        framebuffer::rect(x + 1, y + 3, width - 2, 29, preferences.chrome_color());
+    }
     framebuffer::text(x + 12, y + 13, title, color::INK, 1);
     framebuffer::line(
         x + width - 126,
@@ -2781,9 +3244,141 @@ fn draw_window(rect: Rect, title: &str, focused: bool, preferences: DesktopPrefe
     );
     framebuffer::line(x + width - 84, y + 3, x + width - 84, y + 31, color::BORDER);
     framebuffer::line(x + width - 42, y + 3, x + width - 42, y + 31, color::BORDER);
-    framebuffer::text(x + width - 109, y + 12, "-", color::MUTED, 1);
-    framebuffer::outline(x + width - 69, y + 11, 12, 10, color::MUTED);
-    framebuffer::text(x + width - 25, y + 12, "x", color::MUTED, 1);
+    settings_rect(
+        preferences,
+        x + width - 120,
+        y + 7,
+        32,
+        21,
+        5,
+        preferences.card_color(),
+    );
+    settings_rect(
+        preferences,
+        x + width - 79,
+        y + 7,
+        32,
+        21,
+        5,
+        preferences.card_color(),
+    );
+    settings_rect(
+        preferences,
+        x + width - 38,
+        y + 7,
+        30,
+        21,
+        5,
+        if focused {
+            0x0066_3038
+        } else {
+            preferences.card_color()
+        },
+    );
+    framebuffer::text(x + width - 109, y + 13, "-", color::MUTED, 1);
+    framebuffer::outline(x + width - 69, y + 12, 12, 8, color::MUTED);
+    framebuffer::text(x + width - 28, y + 13, "x", color::INK, 1);
+}
+
+#[derive(Clone, Copy)]
+struct BrowserLayout {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    text_x: i32,
+    text_y: i32,
+    text_width: i32,
+    scale: i32,
+    next_y: i32,
+}
+
+fn browser_layout(rect: Rect, styled: hexa_core::StyledNode<'_>, content_y: i32) -> BrowserLayout {
+    let style = styled.style;
+    let margin_left = style.margin.left as i32;
+    let margin_right = style.margin.right as i32;
+    let margin_top = style.margin.top as i32;
+    let margin_bottom = style.margin.bottom as i32;
+    let border = style.border.width.min(4) as i32;
+    let padding_left = style.padding.left.max(0) as i32;
+    let padding_right = style.padding.right.max(0) as i32;
+    let padding_top = style.padding.top.max(0) as i32;
+    let padding_bottom = style.padding.bottom.max(0) as i32;
+    let scale = match style.font_size {
+        0..=18 => 1,
+        19..=31 => 2,
+        _ => 3,
+    };
+    let button = styled.tag.eq_ignore_ascii_case("button");
+    let prefix = if button {
+        0
+    } else if matches!(styled.node.kind, NodeKind::Link | NodeKind::ListItem) {
+        18
+    } else {
+        0
+    };
+    let x = rect.x as i32 + 34 + margin_left;
+    let available_width = (rect.width as i32 - 68 - margin_left - margin_right).max(48);
+    let width = if button {
+        available_width.min(280)
+    } else {
+        available_width
+    };
+    let text_width = (width - border * 2 - padding_left - padding_right - prefix).max(24);
+    let text_height = browser_wrapped_height(styled.node.text.as_str(), text_width, scale);
+    let minimum_height = if button { 30 } else { 0 };
+    let height = (border * 2 + padding_top + text_height + padding_bottom).max(minimum_height);
+    let y = content_y + margin_top;
+    let mut text_x = x + border + padding_left + prefix;
+    let text_y = y
+        + border
+        + padding_top
+        + (height - border * 2 - padding_top - padding_bottom - text_height) / 2;
+    let one_line_width = styled.node.text.as_str().len() as i32 * framebuffer::text_advance(scale);
+    if one_line_width <= text_width {
+        text_x += match style.text_align {
+            TextAlign::Center => (text_width - one_line_width) / 2,
+            TextAlign::Right => text_width - one_line_width,
+            TextAlign::Left | TextAlign::Justify => 0,
+        };
+    }
+    BrowserLayout {
+        x,
+        y,
+        width,
+        height,
+        text_x,
+        text_y,
+        text_width,
+        scale,
+        next_y: y + height + margin_bottom + 8,
+    }
+}
+
+fn browser_wrapped_height(value: &str, width: i32, scale: i32) -> i32 {
+    let advance = framebuffer::text_advance(scale);
+    let line_height = if scale <= 1 { 10 } else { 18 };
+    let mut used = 0;
+    let mut lines = 1;
+    for word in value.split_ascii_whitespace() {
+        let word_width = word.len() as i32 * advance;
+        let required = if used == 0 {
+            word_width
+        } else {
+            advance + word_width
+        };
+        if used != 0 && used + required > width {
+            lines += 1;
+            used = word_width;
+        } else {
+            used += required;
+        }
+    }
+    lines * line_height
+}
+
+const fn browser_color(value: hexa_core::CssColor) -> u32 {
+    ((value.red as u32) << 16) | ((value.green as u32) << 8) | value.blue as u32
 }
 
 fn draw_browser(rect: Rect, desktop: &DesktopState) {
@@ -2830,60 +3425,104 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
     } else {
         desktop.document.url()
     };
-    framebuffer::text(x + 96, y + 64, address, color::INK, 1);
+    let address_capacity = ((width - 116) / framebuffer::text_advance(1)).max(1) as usize;
+    let (address_text, address_color) = if desktop.browser_editing && address.is_empty() {
+        ("Search DuckDuckGo or enter an address", color::MUTED)
+    } else if desktop.browser_editing && address.len() > address_capacity {
+        (&address[address.len() - address_capacity..], color::INK)
+    } else if address.len() > address_capacity {
+        (&address[..address_capacity], color::INK)
+    } else {
+        (address, color::INK)
+    };
+    framebuffer::text(x + 96, y + 64, address_text, address_color, 1);
     if desktop.browser_editing {
-        framebuffer::rect(
-            x + 96 + address.len() as i32 * framebuffer::text_advance(1),
-            y + 61,
-            2,
-            14,
-            color::GREEN,
-        );
+        let caret_x =
+            (x + 96 + address.len().min(address_capacity) as i32 * framebuffer::text_advance(1))
+                .min(x + width - 24);
+        framebuffer::rect(caret_x, y + 61, 2, 14, color::GREEN);
     }
     let mut content_y = y + 110;
-    for node in desktop.document.nodes() {
+    for styled in desktop.document.styled_nodes() {
         if content_y > bottom - 24 {
             break;
         }
-        match node.kind {
-            NodeKind::Title => {}
-            NodeKind::Heading => {
-                framebuffer::text(x + 34, content_y, node.text.as_str(), color::INK, 2);
-                content_y += 31;
-            }
-            NodeKind::Paragraph => {
-                content_y = wrapped_text(
-                    x + 34,
-                    content_y,
-                    width - 80,
-                    node.text.as_str(),
-                    color::INK,
-                    1,
-                ) + 12;
-            }
-            NodeKind::Link => {
-                framebuffer::text(x + 38, content_y, ">", color::GREEN, 1);
-                content_y = wrapped_text(
-                    x + 54,
-                    content_y,
-                    width - 105,
-                    node.text.as_str(),
-                    color::INK,
-                    1,
-                ) + 10;
-            }
-            NodeKind::ListItem => {
-                framebuffer::rect(x + 40, content_y + 3, 4, 4, color::GREEN);
-                content_y = wrapped_text(
-                    x + 54,
-                    content_y,
-                    width - 105,
-                    node.text.as_str(),
-                    color::INK,
-                    1,
-                ) + 10;
+        if styled.node.kind == NodeKind::Title || !styled.style.is_rendered() {
+            continue;
+        }
+        let layout = browser_layout(rect, styled, content_y);
+        if layout.y > bottom - 24 {
+            break;
+        }
+        let button = styled.tag.eq_ignore_ascii_case("button");
+        if styled.style.background.alpha != 0 || button {
+            let background = if styled.style.background.alpha == 0 {
+                desktop.preferences.accent.color()
+            } else {
+                browser_color(styled.style.background)
+            };
+            if button {
+                framebuffer::rounded_rect(
+                    layout.x,
+                    layout.y,
+                    layout.width,
+                    layout.height,
+                    5,
+                    background,
+                );
+            } else if styled.style.background.alpha == u8::MAX {
+                framebuffer::rect(layout.x, layout.y, layout.width, layout.height, background);
+            } else {
+                framebuffer::alpha_rect(
+                    layout.x,
+                    layout.y,
+                    layout.width,
+                    layout.height,
+                    background,
+                    styled.style.background.alpha,
+                );
             }
         }
+        let border_width = styled.style.border.width.min(4) as i32;
+        for inset in 0..border_width {
+            framebuffer::outline(
+                layout.x + inset,
+                layout.y + inset,
+                layout.width - inset * 2,
+                layout.height - inset * 2,
+                browser_color(styled.style.border.color),
+            );
+        }
+        match styled.node.kind {
+            NodeKind::Title => {}
+            NodeKind::ListItem => {
+                framebuffer::rect(layout.x + 5, layout.text_y + 3, 5, 5, color::GREEN);
+            }
+            NodeKind::Link if !button => {
+                framebuffer::text(layout.x + 3, layout.text_y, ">", color::GREEN, 1);
+            }
+            NodeKind::Heading | NodeKind::Paragraph | NodeKind::Link => {}
+        }
+        let ink = browser_color(styled.style.color);
+        let _ = wrapped_text(
+            layout.text_x,
+            layout.text_y,
+            layout.text_width,
+            styled.node.text.as_str(),
+            ink,
+            layout.scale,
+        );
+        if styled.style.font_weight >= 600 {
+            let _ = wrapped_text(
+                layout.text_x + 1,
+                layout.text_y,
+                layout.text_width,
+                styled.node.text.as_str(),
+                ink,
+                layout.scale,
+            );
+        }
+        content_y = layout.next_y;
     }
 }
 
@@ -3434,10 +4073,10 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 y,
                 content_width,
                 1,
-                "Active output",
-                "Direct XRGB8888 HexaDisplay composition",
-                framebuffer::current_mode().label(),
-                SettingControl::Status { ready: true },
+                "Presentation rate",
+                "Frame pacing target; physical output remains host-controlled",
+                refresh_rate_label(desktop.preferences.refresh_rate),
+                SettingControl::Choice,
             );
             settings_row(
                 desktop,
@@ -3445,6 +4084,37 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 y,
                 content_width,
                 2,
+                "VSync",
+                "Synchronize double-buffer page flips to vertical retrace",
+                if desktop.preferences.vsync {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.vsync,
+                    available: framebuffer::presentation_stats().page_flip_available,
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                3,
+                "Active output",
+                "Double-buffered XRGB8888 HexaDisplay composition",
+                framebuffer::current_mode().label(),
+                SettingControl::Status {
+                    ready: framebuffer::presentation_stats().page_flip_available,
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                4,
                 "Window borders",
                 "Draw an outline around application windows",
                 if desktop.preferences.window_borders {
@@ -3462,7 +4132,7 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 content_x,
                 y,
                 content_width,
-                3,
+                5,
                 "High contrast",
                 "Strengthen edges and active window focus",
                 if desktop.preferences.high_contrast {
@@ -3832,8 +4502,8 @@ fn draw_system(rect: Rect, desktop: &DesktopState) {
         right_x,
         y + 174,
         metric_width,
-        "Go ABI",
-        "Version 1",
+        "Presentation",
+        refresh_rate_label(desktop.preferences.refresh_rate),
         color::GREEN,
     );
     metric(
@@ -3861,6 +4531,9 @@ fn draw_system(rect: Rect, desktop: &DesktopState) {
     );
     framebuffer::text(x + 352, y + 343, "Active", color::MUTED, 1);
     framebuffer::text(x + 430, y + 343, desktop.active.label(), color::CYAN, 1);
+    let stats = framebuffer::presentation_stats();
+    framebuffer::text(x + 540, y + 343, "Frames", color::MUTED, 1);
+    draw_number(x + 602, y + 343, stats.frames, color::GREEN);
 }
 
 fn metric(x: i32, y: i32, width: i32, label: &str, value: &str, accent: u32) {
@@ -3991,6 +4664,131 @@ fn wrapped_text(mut x: i32, mut y: i32, width: i32, value: &str, color: u32, sca
     y + if scale <= 1 { 8 } else { 16 }
 }
 
+fn encode_search_url(query: &str, output: &mut [u8]) -> Option<usize> {
+    let prefix = SEARCH_PREFIX.as_bytes();
+    if prefix.len() > output.len() {
+        return None;
+    }
+    output[..prefix.len()].copy_from_slice(prefix);
+    let mut length = prefix.len();
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for byte in query.bytes() {
+        let encoded = if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            [byte, 0, 0]
+        } else if byte == b' ' {
+            [b'+', 0, 0]
+        } else {
+            [b'%', HEX[(byte >> 4) as usize], HEX[(byte & 0x0F) as usize]]
+        };
+        let count = if encoded[0] == b'%' { 3 } else { 1 };
+        if length + count > output.len() {
+            return None;
+        }
+        output[length..length + count].copy_from_slice(&encoded[..count]);
+        length += count;
+    }
+    Some(length)
+}
+
+const fn is_http_redirect(status: u16) -> bool {
+    matches!(status, 301 | 302 | 303 | 307 | 308)
+}
+
+fn resolve_browser_link(base: &str, target: &str, output: &mut [u8]) -> Option<usize> {
+    let target = target.trim();
+    if target.is_empty() || !target.is_ascii() {
+        return None;
+    }
+    if target.starts_with("http://")
+        || target.starts_with("https://")
+        || target.starts_with("hexa://")
+    {
+        return copy_browser_url(output, target.as_bytes());
+    }
+
+    if target.starts_with("//") {
+        let scheme = if base.starts_with("https://") {
+            b"https:".as_slice()
+        } else if base.starts_with("http://") {
+            b"http:".as_slice()
+        } else {
+            return None;
+        };
+        return join_browser_url(output, scheme, target.as_bytes());
+    }
+
+    if target.starts_with('#') {
+        let fragment_start = base.find('#').unwrap_or(base.len());
+        return join_browser_url(
+            output,
+            &base.as_bytes()[..fragment_start],
+            target.as_bytes(),
+        );
+    }
+
+    let scheme_end = base.find("://")?.checked_add(3)?;
+    let authority_end = base[scheme_end..]
+        .find(['/', '?', '#'])
+        .map(|offset| scheme_end + offset)
+        .unwrap_or(base.len());
+    if target.starts_with('/') {
+        return join_browser_url(output, &base.as_bytes()[..authority_end], target.as_bytes());
+    }
+
+    let fragment_start = base.find('#').unwrap_or(base.len());
+    let clean_end = base[..fragment_start].find('?').unwrap_or(fragment_start);
+    if target.starts_with('?') {
+        if authority_end == clean_end {
+            let length = authority_end.checked_add(1)?.checked_add(target.len())?;
+            if length > output.len() {
+                return None;
+            }
+            output[..authority_end].copy_from_slice(&base.as_bytes()[..authority_end]);
+            output[authority_end] = b'/';
+            output[authority_end + 1..length].copy_from_slice(target.as_bytes());
+            return Some(length);
+        }
+        return join_browser_url(output, &base.as_bytes()[..clean_end], target.as_bytes());
+    }
+    let path_start = authority_end.min(clean_end);
+    if path_start == clean_end {
+        let length = base[..authority_end]
+            .len()
+            .checked_add(1)?
+            .checked_add(target.len())?;
+        if length > output.len() {
+            return None;
+        }
+        output[..authority_end].copy_from_slice(&base.as_bytes()[..authority_end]);
+        output[authority_end] = b'/';
+        output[authority_end + 1..length].copy_from_slice(target.as_bytes());
+        return Some(length);
+    }
+    let directory_end = base[path_start..clean_end]
+        .rfind('/')
+        .map(|offset| path_start + offset + 1)
+        .unwrap_or_else(|| authority_end.saturating_add(1).min(clean_end));
+    join_browser_url(output, &base.as_bytes()[..directory_end], target.as_bytes())
+}
+
+fn copy_browser_url(output: &mut [u8], value: &[u8]) -> Option<usize> {
+    if value.len() > output.len() {
+        return None;
+    }
+    output[..value.len()].copy_from_slice(value);
+    Some(value.len())
+}
+
+fn join_browser_url(output: &mut [u8], left: &[u8], right: &[u8]) -> Option<usize> {
+    let length = left.len().checked_add(right.len())?;
+    if length > output.len() {
+        return None;
+    }
+    output[..left.len()].copy_from_slice(left);
+    output[left.len()..length].copy_from_slice(right);
+    Some(length)
+}
+
 fn draw_number(x: i32, y: i32, mut value: u64, color: u32) {
     let mut bytes = [b'0'; 20];
     let mut start = bytes.len() - 1;
@@ -4002,4 +4800,76 @@ fn draw_number(x: i32, y: i32, mut value: u64, color: u32) {
     bytes[start] = b'0' + value as u8;
     let text = core::str::from_utf8(&bytes[start..]).unwrap_or("?");
     framebuffer::text(x, y, text, color, 1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_url_uses_duckduckgo_html_and_percent_encoding() {
+        let mut output = [0_u8; 512];
+        let length = encode_search_url("rust os + tls", &mut output).unwrap();
+        assert_eq!(
+            core::str::from_utf8(&output[..length]).unwrap(),
+            "https://duckduckgo.com/html/?q=rust+os+%2B+tls"
+        );
+    }
+
+    #[test]
+    fn browser_links_resolve_absolute_root_query_and_relative_targets() {
+        let mut output = [0_u8; 512];
+        let cases = [
+            (
+                "https://html.duckduckgo.com/html/?q=kernel",
+                "//duckduckgo.com/l/?uddg=example",
+                "https://duckduckgo.com/l/?uddg=example",
+            ),
+            (
+                "https://html.duckduckgo.com/html/?q=kernel",
+                "/html/?q=display",
+                "https://html.duckduckgo.com/html/?q=display",
+            ),
+            (
+                "https://example.com/docs/page.html",
+                "?compact=1",
+                "https://example.com/docs/page.html?compact=1",
+            ),
+            (
+                "https://example.com/docs/page.html",
+                "next.html",
+                "https://example.com/docs/next.html",
+            ),
+            (
+                "https://example.com",
+                "index.html",
+                "https://example.com/index.html",
+            ),
+            (
+                "https://example.com?q=old",
+                "?q=new",
+                "https://example.com/?q=new",
+            ),
+            (
+                "https://example.com/page?q=one#old",
+                "#section",
+                "https://example.com/page?q=one#section",
+            ),
+        ];
+        for (base, target, expected) in cases {
+            output.fill(0);
+            let length = resolve_browser_link(base, target, &mut output).unwrap();
+            assert_eq!(core::str::from_utf8(&output[..length]).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn only_navigation_redirect_statuses_are_followed() {
+        for status in [301, 302, 303, 307, 308] {
+            assert!(is_http_redirect(status));
+        }
+        for status in [200, 300, 304, 305, 306, 400] {
+            assert!(!is_http_redirect(status));
+        }
+    }
 }

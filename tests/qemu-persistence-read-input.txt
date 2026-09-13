@@ -5,3 +5,8 @@ whoami
 desktop
 q
 shutdown
+logout
+2222
+operator
+expos
+shutdown

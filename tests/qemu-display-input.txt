@@ -13,6 +13,11 @@ s2
 4
 5
 
+j
+
+
+j
+
 t
 help
 status

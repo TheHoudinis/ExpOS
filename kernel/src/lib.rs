@@ -12,6 +12,7 @@ mod allocator;
 mod compat;
 mod crypto;
 mod desktop;
+pub mod display_timing;
 mod framebuffer;
 mod games;
 mod hardware;
