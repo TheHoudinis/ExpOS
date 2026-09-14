@@ -73,11 +73,17 @@ firmware / GRUB (temporary)
   geometry, stride and double-buffer byte count against the aperture before the
   first framebuffer write. When the adapter accepts a virtual height of twice
   the visible height, rendering targets the hidden page and presentation flips
-  the VBE Y offset. After a flip, only declared damage rectangles are copied to
-  the newly hidden page, keeping the two pages coherent without a full-screen
-  copy for cursor and terminal updates. Optional VSync performs a bounded
+  the VBE Y offset. Every flip is read back from hardware; if the adapter
+  rejects it, the completed damage is copied to the prior visible page and
+  page flipping is disabled. After a successful flip, only declared damage
+  rectangles are copied to the newly hidden page, keeping the two pages
+  coherent without a full-screen copy for cursor and terminal updates. Optional VSync performs a bounded
   legacy-VGA retrace wait; failed waits increment a diagnostic counter instead
-  of blocking forever.
+  of blocking forever. Fresh state requests 480p and 60 Hz. The boot chooser
+  and graphical login explicitly present their back buffers before waiting for
+  input, and a rejected saved mode is retried at 480p before console fallback.
+  Checksummed but out-of-range display preferences fail down to their lowest
+  supported values rather than being clamped upward.
 - The desktop creates separate Browser, Terminal, Forms, Packages,
   Settings, System, Games and Notes surfaces, plus Root, taskbar and launcher
   surfaces. Its flat dark shell provides a compact application menu and bottom
@@ -108,7 +114,12 @@ firmware / GRUB (temporary)
   the graphical Terminal's `display` command reports pacing misses. The console
   `displayinfo` command reports page-flip/frame/retrace-timeout state, the
   graphical System surface reports frame count, and `timers` identifies the
-  clock source.
+  clock source. `displaydiag` exposes adapter identity, requested/active mode,
+  memory bounds and presentation counters; `stateinfo` reports the persistent
+  display selection; `diag` combines these with clock and network status.
+  Operator-only `safevideo`/`displayreset` persists 480p, 60 Hz and VSync on as
+  a console recovery path. If persistence fails, the sanitized values still
+  replace the in-memory preferences for the rest of that boot.
 - Session identity is intentionally separate from a Unix UID. The built-in
   accounts and twelve-slot registry select a DIESE authority input and gate
   shell mutations. Operators can create/delete accounts and change passwords;

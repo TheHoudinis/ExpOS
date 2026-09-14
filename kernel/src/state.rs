@@ -120,7 +120,7 @@ pub struct PersistentPreferences {
 impl PersistentPreferences {
     pub const fn new() -> Self {
         Self {
-            display_mode: 2,
+            display_mode: 0,
             theme: 0,
             wallpaper: 0,
             cursor_theme: 0,
@@ -272,6 +272,47 @@ pub fn loaded_generation() -> Option<u64> {
 
 pub fn preferences() -> PersistentPreferences {
     STATE.lock().data.preferences
+}
+
+/// Apply preferences to the current session without writing the state disk.
+///
+/// Recovery commands use this after a persistence failure so safe display
+/// choices still take effect for the remainder of the current boot.
+pub fn apply_runtime_preferences(preferences: PersistentPreferences) {
+    STATE.lock().data.preferences = sanitize_preferences(preferences);
+}
+
+pub fn print_diagnostics() {
+    let state = STATE.lock();
+    let preferences = state.data.preferences;
+    println!("STATE DIAGNOSTICS");
+    println!(
+        "disk: available={} loaded={} generation={} slot={}",
+        state.device.is_some(),
+        state.loaded,
+        state.generation,
+        if !state.loaded {
+            "none"
+        } else if state.active_slot == 0 {
+            "A"
+        } else {
+            "B"
+        }
+    );
+    println!(
+        "display: preset-id={} refresh={}Hz vsync={}",
+        preferences.display_mode,
+        preferences.refresh_rate.hz(),
+        if preferences.vsync { "on" } else { "off" }
+    );
+    println!(
+        "appearance: theme={} wallpaper={} cursor={} accent={} pointer-speed={}",
+        preferences.theme,
+        preferences.wallpaper,
+        preferences.cursor_theme,
+        preferences.accent,
+        preferences.pointer_speed
+    );
 }
 
 pub fn save_preferences(preferences: PersistentPreferences) -> Result<(), StateError> {
@@ -486,13 +527,34 @@ fn decode_preferences(input: &[u8]) -> PersistentPreferences {
 }
 
 fn sanitize_preferences(mut value: PersistentPreferences) -> PersistentPreferences {
-    value.display_mode = value.display_mode.min(2);
-    value.theme = value.theme.min(15);
-    value.wallpaper = value.wallpaper.min(15);
-    value.cursor_theme = value.cursor_theme.min(15);
-    value.accent = value.accent.min(15);
-    value.backdrop = value.backdrop.min(15);
-    value.pointer_speed = value.pointer_speed.clamp(1, 3);
+    value.display_mode = match value.display_mode {
+        0..=2 => value.display_mode,
+        _ => 0,
+    };
+    value.theme = match value.theme {
+        0..=5 => value.theme,
+        _ => 0,
+    };
+    value.wallpaper = match value.wallpaper {
+        0..=6 => value.wallpaper,
+        _ => 0,
+    };
+    value.cursor_theme = match value.cursor_theme {
+        0..=3 => value.cursor_theme,
+        _ => 0,
+    };
+    value.accent = match value.accent {
+        0..=3 => value.accent,
+        _ => 0,
+    };
+    value.backdrop = match value.backdrop {
+        0..=2 => value.backdrop,
+        _ => 0,
+    };
+    value.pointer_speed = match value.pointer_speed {
+        1..=3 => value.pointer_speed,
+        _ => 1,
+    };
     value.flags &= PREF_PURE_BLACK_APPS
         | PREF_ROUNDED_CONTROLS
         | PREF_TASKBAR_VISIBLE
@@ -604,6 +666,20 @@ mod tests {
     }
 
     #[test]
+    fn fresh_preferences_choose_the_lowest_safe_display_settings() {
+        let preferences = PersistentPreferences::new();
+        assert_eq!(preferences.display_mode, 0);
+        assert_eq!(preferences.refresh_rate, RefreshRate::Hz60);
+        assert!(preferences.vsync);
+        assert_eq!(preferences.theme, 0);
+        assert_eq!(preferences.wallpaper, 0);
+        assert_eq!(preferences.cursor_theme, 0);
+        assert_eq!(preferences.accent, 0);
+        assert_eq!(preferences.backdrop, 0);
+        assert_eq!(preferences.pointer_speed, 1);
+    }
+
+    #[test]
     fn slot_round_trip_preserves_accounts_and_preferences() {
         let mut data = PersistentData::new();
         data.accounts_initialized = true;
@@ -701,6 +777,27 @@ mod tests {
         let decoded = decode_slot(&encoded, 1).unwrap();
         assert_eq!(decoded.data.preferences.refresh_rate, RefreshRate::Hz60);
         assert!(decoded.data.preferences.vsync);
+    }
+
+    #[test]
+    fn invalid_checksummed_preference_ids_fall_back_to_lowest_choices() {
+        let data = PersistentData::new();
+        let mut encoded = [0_u8; SLOT_LEN];
+        encode_slot(&data, 13, &mut encoded);
+
+        let preferences_start = HEADER_LEN + 32;
+        encoded[preferences_start..preferences_start + 7].fill(0xFF);
+        refresh_slot_checksums(&mut encoded);
+
+        let decoded = decode_slot(&encoded, 0).unwrap();
+        let preferences = decoded.data.preferences;
+        assert_eq!(preferences.display_mode, 0);
+        assert_eq!(preferences.theme, 0);
+        assert_eq!(preferences.wallpaper, 0);
+        assert_eq!(preferences.cursor_theme, 0);
+        assert_eq!(preferences.accent, 0);
+        assert_eq!(preferences.backdrop, 0);
+        assert_eq!(preferences.pointer_speed, 1);
     }
 
     #[test]

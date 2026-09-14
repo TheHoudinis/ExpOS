@@ -26,6 +26,11 @@ timers
 features
 lspci
 mem
+displaydiag
+stateinfo
+diag
+safevideo
+stateinfo
 calc 7 * 6
 factor 84
 makedim Development

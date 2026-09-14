@@ -441,6 +441,48 @@ impl Shell {
                 println!("Display FIN={}", crate::desktop::DISPLAY_FIN);
                 true
             }
+            "displaydiag" => {
+                crate::framebuffer::print_diagnostics();
+                true
+            }
+            "stateinfo" => {
+                crate::state::print_diagnostics();
+                true
+            }
+            "safevideo" | "displayreset" => {
+                let mut preferences = crate::state::preferences();
+                preferences.display_mode = crate::framebuffer::DisplayMode::P480.persisted();
+                preferences.refresh_rate = crate::state::RefreshRate::Hz60;
+                preferences.vsync = true;
+                let _ = crate::framebuffer::request_mode(crate::framebuffer::DisplayMode::P480);
+                match crate::state::save_preferences(preferences) {
+                    Ok(()) => {
+                        println!("Safe video saved: 480p, 60Hz, VSync on.");
+                        slog!("HEXA_SAFE_VIDEO_APPLIED persisted=true\r\n");
+                    }
+                    Err(error) => {
+                        crate::state::apply_runtime_preferences(preferences);
+                        println!(
+                            "Safe video selected for this boot, but was not saved: {}.",
+                            error.message()
+                        );
+                        slog!(
+                            "HEXA_SAFE_VIDEO_APPLIED persisted=false error={:?}\r\n",
+                            error
+                        );
+                    }
+                }
+                println!("Run 'desktop' to retry graphics.");
+                true
+            }
+            "diag" | "diagnose" => {
+                println!("EXPOS DIAGNOSTIC REPORT");
+                crate::framebuffer::print_diagnostics();
+                crate::state::print_diagnostics();
+                crate::hardware::print_clock_info();
+                crate::network::print_configuration();
+                true
+            }
             "desktop" => {
                 crate::desktop::run_with_network(
                     input,
@@ -728,7 +770,9 @@ impl Shell {
         println!("  revoke <id>  handlecheck <id> <requester> <operation>");
         println!("  pimp <name> <key=value>");
         println!("  relate/unrelate <source> <kind> <target>  relationships <source>");
-        println!("  desktop browser displayinfo goabi");
+        println!(
+            "  desktop browser displayinfo displaydiag stateinfo diag safevideo displayreset goabi"
+        );
         println!("  ayo games arcade legacy reboot shutdown");
         println!(
             "  date clock timers cpuinfo features kernelcaps lspci neofetch sysinfo mem free env uptime ps"
@@ -1751,6 +1795,7 @@ fn is_shell_command(name: &str) -> bool {
             | "clear"
             | "echo"
             | "about"
+            | "version"
             | "status"
             | "whoami"
             | "users"
@@ -1781,6 +1826,12 @@ fn is_shell_command(name: &str) -> bool {
             | "bootlog"
             | "mode"
             | "displayinfo"
+            | "displaydiag"
+            | "stateinfo"
+            | "diag"
+            | "diagnose"
+            | "safevideo"
+            | "displayreset"
             | "desktop"
             | "browser"
             | "goabi"
@@ -1842,6 +1893,8 @@ fn is_mutating_command(name: &str) -> bool {
             | "grant"
             | "revoke"
             | "pimp"
+            | "safevideo"
+            | "displayreset"
             | "relate"
             | "unrelate"
             | "ping"
@@ -1866,6 +1919,8 @@ fn is_operator_command(name: &str) -> bool {
             | "grant"
             | "revoke"
             | "pimp"
+            | "safevideo"
+            | "displayreset"
             | "reboot"
             | "shutdown"
             | "halt"
@@ -2019,7 +2074,9 @@ const fn lifecycle_name(lifecycle: Lifecycle) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::should_mask_shell_input;
+    use super::{
+        is_mutating_command, is_operator_command, is_shell_command, should_mask_shell_input,
+    };
 
     #[test]
     fn masks_account_password_arguments_only() {
@@ -2029,5 +2086,45 @@ mod tests {
         assert!(!should_mask_shell_input(b"passwd artist", b'x'));
         assert!(should_mask_shell_input(b"passwd artist ", b'x'));
         assert!(!should_mask_shell_input(b"echo public ", b'x'));
+    }
+
+    #[test]
+    fn command_registry_includes_version_diagnostics_and_display_recovery() {
+        for command in [
+            "version",
+            "displaydiag",
+            "stateinfo",
+            "diag",
+            "diagnose",
+            "safevideo",
+            "displayreset",
+        ] {
+            assert!(is_shell_command(command), "missing command: {command}");
+        }
+        assert!(!is_shell_command("not-a-command"));
+    }
+
+    #[test]
+    fn diagnostics_are_read_only_but_display_recovery_is_operator_only() {
+        for command in ["version", "displaydiag", "stateinfo", "diag", "diagnose"] {
+            assert!(
+                !is_mutating_command(command),
+                "mutating diagnostic: {command}"
+            );
+            assert!(
+                !is_operator_command(command),
+                "operator-only diagnostic: {command}"
+            );
+        }
+        for command in ["safevideo", "displayreset"] {
+            assert!(
+                is_mutating_command(command),
+                "read-only recovery: {command}"
+            );
+            assert!(
+                is_operator_command(command),
+                "non-operator recovery: {command}"
+            );
+        }
     }
 }

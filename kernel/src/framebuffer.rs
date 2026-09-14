@@ -50,9 +50,9 @@ const VBLANK_POLL_LIMIT: usize = 250_000;
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum DisplayMode {
+    #[default]
     P480 = 0,
     P720 = 1,
-    #[default]
     P1080 = 2,
 }
 
@@ -145,13 +145,16 @@ const _: () = assert!(DisplayMode::P480.double_buffer_bytes() <= LFB_APERTURE_BY
 const _: () = assert!(DisplayMode::P720.double_buffer_bytes() <= LFB_APERTURE_BYTES);
 const _: () = assert!(DisplayMode::P1080.double_buffer_bytes() <= LFB_APERTURE_BYTES);
 
-static REQUESTED_MODE: AtomicU8 = AtomicU8::new(DisplayMode::P1080 as u8);
+static REQUESTED_MODE: AtomicU8 = AtomicU8::new(DisplayMode::P480 as u8);
 static ACTIVE_DISPLAY_MODE: AtomicU8 = AtomicU8::new(NO_ACTIVE_MODE);
 static PAGE_FLIP_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static DRAW_Y: AtomicU16 = AtomicU16::new(0);
 static FRONT_Y: AtomicU16 = AtomicU16::new(0);
+static HARDWARE_Y_OFFSET: AtomicU16 = AtomicU16::new(0);
+static FRONT_CONTENT_VISIBLE: AtomicBool = AtomicBool::new(false);
 static PRESENTED_FRAMES: AtomicU64 = AtomicU64::new(0);
 static VBLANK_TIMEOUTS: AtomicU64 = AtomicU64::new(0);
+static PAGE_FLIP_FAILURES: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Mode {
@@ -180,7 +183,12 @@ impl Mode {
 pub struct PresentationStats {
     pub frames: u64,
     pub vblank_timeouts: u64,
+    pub page_flip_failures: u64,
     pub page_flip_available: bool,
+    /// Last hardware-read value of the VBE Y-offset register.
+    pub hardware_y_offset: u16,
+    /// True only after presented pixels are known to occupy the hardware front page.
+    pub visible_content: bool,
 }
 
 /// A clipped scanout area that must be copied to the newly hidden page after
@@ -338,7 +346,10 @@ pub fn presentation_stats() -> PresentationStats {
     PresentationStats {
         frames: PRESENTED_FRAMES.load(Ordering::Acquire),
         vblank_timeouts: VBLANK_TIMEOUTS.load(Ordering::Acquire),
+        page_flip_failures: PAGE_FLIP_FAILURES.load(Ordering::Acquire),
         page_flip_available: PAGE_FLIP_AVAILABLE.load(Ordering::Acquire),
+        hardware_y_offset: HARDWARE_Y_OFFSET.load(Ordering::Acquire),
+        visible_content: FRONT_CONTENT_VISIBLE.load(Ordering::Acquire),
     }
 }
 
@@ -353,7 +364,63 @@ pub fn active_mode() -> Option<Mode> {
 }
 
 pub fn enter() -> bool {
-    program_mode(requested_mode())
+    let requested = requested_mode();
+    crate::slog!("HEXA_DISPLAY_ENTER requested={}\r\n", requested.label());
+    if program_mode(requested) {
+        return true;
+    }
+    if requested != DisplayMode::P480 {
+        crate::slog!(
+            "HEXA_DISPLAY_FALLBACK from={} to=480p reason=mode-rejected\r\n",
+            requested.label()
+        );
+        REQUESTED_MODE.store(DisplayMode::P480.persisted(), Ordering::Release);
+        if program_mode(DisplayMode::P480) {
+            return true;
+        }
+    }
+    crate::slog!("HEXA_DISPLAY_UNAVAILABLE reason=no-supported-vbe-mode\r\n");
+    false
+}
+
+pub fn print_diagnostics() {
+    let adapter_id = read(INDEX_ID);
+    let requested = requested_mode();
+    let active = active_display_mode();
+    let presentation = presentation_stats();
+    crate::println!("DISPLAY DIAGNOSTICS");
+    crate::println!("adapter: id={:#06X} bochs-vbe={}", adapter_id, available());
+    crate::println!(
+        "requested: {} {}x{}x{} required={} bytes double-buffer={} bytes",
+        requested.label(),
+        requested.width(),
+        requested.height(),
+        BITS_PER_PIXEL,
+        requested.scanout_bytes(),
+        requested.double_buffer_bytes()
+    );
+    if let Some(mode) = active {
+        crate::println!(
+            "active: {} {}x{} front-y={} draw-y={}",
+            mode.label(),
+            mode.width(),
+            mode.height(),
+            FRONT_Y.load(Ordering::Acquire),
+            DRAW_Y.load(Ordering::Acquire)
+        );
+    } else {
+        crate::println!("active: text mode (graphical scanout disabled)");
+    }
+    crate::println!(
+        "presentation: pageflip={} hardware-y={} visible={} frames={} vblank-timeouts={} flip-failures={}",
+        presentation.page_flip_available,
+        presentation.hardware_y_offset,
+        presentation.visible_content,
+        presentation.frames,
+        presentation.vblank_timeouts,
+        presentation.page_flip_failures
+    );
+    crate::println!("aperture: {} bytes", LFB_APERTURE_BYTES);
 }
 
 fn program_mode(requested: DisplayMode) -> bool {
@@ -361,8 +428,11 @@ fn program_mode(requested: DisplayMode) -> bool {
     PAGE_FLIP_AVAILABLE.store(false, Ordering::Release);
     DRAW_Y.store(0, Ordering::Release);
     FRONT_Y.store(0, Ordering::Release);
+    HARDWARE_Y_OFFSET.store(0, Ordering::Release);
+    FRONT_CONTENT_VISIBLE.store(false, Ordering::Release);
     PRESENTED_FRAMES.store(0, Ordering::Release);
     VBLANK_TIMEOUTS.store(0, Ordering::Release);
+    PAGE_FLIP_FAILURES.store(0, Ordering::Release);
     if !available() {
         return false;
     }
@@ -426,6 +496,7 @@ fn program_mode(requested: DisplayMode) -> bool {
     DRAW_Y.store(if page_flip { mode.height } else { 0 }, Ordering::Release);
     FRONT_Y.store(0, Ordering::Release);
     write(INDEX_Y_OFFSET, 0);
+    HARDWARE_Y_OFFSET.store(read(INDEX_Y_OFFSET), Ordering::Release);
     crate::slog!(
         "HEXA_DISPLAY_MODE width={} height={} bpp={} stride={} bytes={} preset={} pageflip={} virtual_height={}\r\n",
         mode.width,
@@ -444,6 +515,8 @@ fn program_mode(requested: DisplayMode) -> bool {
 pub fn exit() {
     ACTIVE_DISPLAY_MODE.store(NO_ACTIVE_MODE, Ordering::Release);
     write(INDEX_Y_OFFSET, 0);
+    HARDWARE_Y_OFFSET.store(read(INDEX_Y_OFFSET), Ordering::Release);
+    FRONT_CONTENT_VISIBLE.store(false, Ordering::Release);
     write(INDEX_ENABLE, DISABLED);
     PAGE_FLIP_AVAILABLE.store(false, Ordering::Release);
     DRAW_Y.store(0, Ordering::Release);
@@ -477,14 +550,53 @@ pub fn present_damage(vsync: bool, damage: &[DamageRegion]) {
     }
     if page_flip {
         let height = current_mode().height() as u16;
+        let prior_front = FRONT_Y.load(Ordering::Acquire);
         let next_front = DRAW_Y.load(Ordering::Acquire);
         write(INDEX_Y_OFFSET, next_front);
-        FRONT_Y.store(next_front, Ordering::Release);
-        let next_draw = if next_front == 0 { height } else { 0 };
-        DRAW_Y.store(next_draw, Ordering::Release);
-        for region in damage {
-            copy_region(next_front, next_draw, *region);
+        let hardware_y_offset = read(INDEX_Y_OFFSET);
+        HARDWARE_Y_OFFSET.store(hardware_y_offset, Ordering::Release);
+        if hardware_y_offset == next_front {
+            FRONT_Y.store(next_front, Ordering::Release);
+            let next_draw = if next_front == 0 { height } else { 0 };
+            DRAW_Y.store(next_draw, Ordering::Release);
+            for region in damage {
+                copy_region(next_front, next_draw, *region);
+            }
+            FRONT_CONTENT_VISIBLE.store(true, Ordering::Release);
+        } else {
+            // Some VBE implementations accept a two-page virtual mode but do
+            // not honor later Y-offset flips. Preserve the completed frame by
+            // copying its damage back to the page that was visible before the
+            // rejected flip, then remain in direct-to-front rendering mode.
+            PAGE_FLIP_FAILURES.fetch_add(1, Ordering::AcqRel);
+            if next_front != prior_front {
+                for region in damage {
+                    copy_region(next_front, prior_front, *region);
+                }
+            }
+            write(INDEX_Y_OFFSET, prior_front);
+            let recovered_y_offset = read(INDEX_Y_OFFSET);
+            HARDWARE_Y_OFFSET.store(recovered_y_offset, Ordering::Release);
+            FRONT_Y.store(prior_front, Ordering::Release);
+            DRAW_Y.store(prior_front, Ordering::Release);
+            PAGE_FLIP_AVAILABLE.store(false, Ordering::Release);
+            let visible = recovered_y_offset == prior_front;
+            FRONT_CONTENT_VISIBLE.store(visible, Ordering::Release);
+            crate::slog!(
+                "HEXA_PAGE_FLIP_DISABLED requested_y={} actual_y={} recovered_y={} visible={}\r\n",
+                next_front,
+                hardware_y_offset,
+                recovered_y_offset,
+                visible
+            );
         }
+    } else {
+        let hardware_y_offset = read(INDEX_Y_OFFSET);
+        HARDWARE_Y_OFFSET.store(hardware_y_offset, Ordering::Release);
+        FRONT_CONTENT_VISIBLE.store(
+            hardware_y_offset == FRONT_Y.load(Ordering::Acquire),
+            Ordering::Release,
+        );
     }
     PRESENTED_FRAMES.fetch_add(1, Ordering::AcqRel);
 }
@@ -1056,6 +1168,7 @@ mod tests {
 
     #[test]
     fn progressive_modes_have_expected_geometry() {
+        assert_eq!(DisplayMode::default(), DisplayMode::P480);
         assert_eq!(DisplayMode::P480.dimensions(), (640, 480));
         assert_eq!(DisplayMode::P720.dimensions(), (1280, 720));
         assert_eq!(DisplayMode::P1080.dimensions(), (1920, 1080));
@@ -1099,7 +1212,7 @@ mod tests {
         assert_eq!(width(), 640);
         assert_eq!(height(), 480);
         assert_eq!(active_display_mode(), None);
-        assert!(request_mode(DisplayMode::P1080));
+        assert!(request_mode(DisplayMode::P480));
     }
 
     #[test]

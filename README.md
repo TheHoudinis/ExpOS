@@ -8,7 +8,8 @@ ExpOS is the Form-native HexaOS rebuild described by
   typed relationships and transactional HexaFS metadata;
 - HexaDisplay, a runtime-selectable 640x480, 1280x720 or 1920x1080 software
   compositor with Form-owned surfaces, double-buffered Bochs/QEMU scanout and
-  selectable 60, 75, 120 or 144 Hz presentation pacing;
+  selectable 60, 75, 120 or 144 Hz presentation pacing; fresh state starts at
+  the lowest safe choices, 640x480 and 60 Hz;
 - a flat dark desktop with an application menu and taskbar, no default or
   pinned applications, and movable, closable, minimizable and maximizable
   windows;
@@ -61,6 +62,14 @@ primary ATA disk. Account and customization changes are journaled there. The
 image is intentionally preserved by `make clean`; copy it to back up the
 current local state.
 
+The boot chooser and graphical login explicitly present their completed back
+buffer before waiting for input. If a saved display mode is rejected, ExpOS
+automatically retries 480p before falling back to the console. For manual
+recovery, choose Console, sign in as `operator`, run `displaydiag` and
+`stateinfo` (or combined `diag`), then run `safevideo`. That saves 480p, 60 Hz
+and VSync on; if the state disk cannot be written, the same safe settings stay
+active for the current boot. `desktop` retries graphics without rebooting.
+
 Choose `1` for the graphical environment or `2` for the console. The built-in
 development accounts are:
 
@@ -111,14 +120,15 @@ Settings controls are clickable and keyboard-accessible. Appearance, taskbar,
 status-area, border, contrast, pointer-speed, theme, wallpaper and cursor
 changes take effect immediately and persist. Resolution can be selected as
 480p (640x480), 720p (1280x720) or 1080p (1920x1080); it is saved immediately
-and applied when the desktop is reopened. Presentation pacing can be selected
-as 60, 75, 120 or 144 Hz and VSync can be enabled or disabled; both settings
-also persist. These rates are compositor frame targets, not physical monitor
-modes or a claim that QEMU changed the host display's refresh rate. With VSync
-enabled, HexaDisplay performs a bounded VGA vertical-retrace wait before its
-Bochs framebuffer page flip; a timeout is recorded instead of hanging the
-kernel. The Network switch is enforced by the native packet path through a
-requester-bound Configure Handle; it is not a painted UI flag.
+and applied when the desktop is reopened. A fresh state image defaults to 480p
+and 60 Hz. Presentation pacing can be selected as 60, 75, 120 or 144 Hz and
+VSync can be enabled or disabled; both settings also persist. These rates are
+compositor frame targets, not physical monitor modes or a claim that QEMU
+changed the host display's refresh rate. With VSync enabled, HexaDisplay
+performs a bounded VGA vertical-retrace wait before its Bochs framebuffer page
+flip; a timeout is recorded instead of hanging the kernel. The Network switch
+is enforced by the native packet path through a requester-bound Configure
+Handle; it is not a painted UI flag.
 
 ## Network and Browser
 

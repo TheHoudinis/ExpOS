@@ -43,6 +43,7 @@ check: $(ISO)
 	truncate -s $(STATE_SIZE) $(BUILD)/check-state.img
 	set +e; timeout 30 $(QEMU) -drive file=$(BUILD)/check-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-smoke-input.txt > $(BUILD)/serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
 	grep -q "HEXA_BOOT_OK" $(BUILD)/serial.log
+	grep -Eq "HEXA_BOOT_SCREEN_PRESENTED preset=480p frames=[1-9][0-9]* pageflip=true y_offset=480 visible=true" $(BUILD)/serial.log
 	grep -q "HEXA_BOOT_MODE console" $(BUILD)/serial.log
 	grep -q "HEXA_LOGIN_OK user=operator" $(BUILD)/serial.log
 	grep -q "HEXA_SHELL_READY" $(BUILD)/serial.log
@@ -54,6 +55,17 @@ check: $(ISO)
 	grep -q "KERNEL FEATURE MATRIX" $(BUILD)/serial.log
 	grep -q "TSC frequency: .* Hz" $(BUILD)/serial.log
 	grep -q "clock source:" $(BUILD)/serial.log
+	grep -q "EXPOS DIAGNOSTIC REPORT" $(BUILD)/serial.log
+	grep -q "DISPLAY DIAGNOSTICS" $(BUILD)/serial.log
+	grep -q "requested: 480p 640x480x32" $(BUILD)/serial.log
+	grep -q "STATE DIAGNOSTICS" $(BUILD)/serial.log
+	grep -q "display: preset-id=0 refresh=60Hz vsync=on" $(BUILD)/serial.log
+	grep -q "HEXA_COMMAND_OK displaydiag" $(BUILD)/serial.log
+	grep -q "HEXA_COMMAND_OK stateinfo" $(BUILD)/serial.log
+	grep -q "HEXA_COMMAND_OK diag" $(BUILD)/serial.log
+	grep -q "HEXA_SAFE_VIDEO_APPLIED persisted=true" $(BUILD)/serial.log
+	grep -q "HEXA_COMMAND_OK safevideo" $(BUILD)/serial.log
+	awk '/HEXA_SAFE_VIDEO_APPLIED persisted=true/{applied=1; next} applied && /display: preset-id=0 refresh=60Hz vsync=on/{verified=1} END{exit !verified}' $(BUILD)/serial.log
 	grep -q "Ayo.*package" $(BUILD)/serial.log
 	grep -q "HexaDisplay.*service" $(BUILD)/serial.log
 	grep -q "GoABI.*interface" $(BUILD)/serial.log
@@ -80,9 +92,11 @@ display-check: $(ISO)
 	rm -f $(BUILD)/display-state.img
 	truncate -s $(STATE_SIZE) $(BUILD)/display-state.img
 	set +e; timeout 30 $(QEMU) -drive file=$(BUILD)/display-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-display-input.txt > $(BUILD)/display-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
-	grep -q "framebuffer: 1920x1080 XRGB8888 scanout available=true" $(BUILD)/display-serial.log
+	grep -Eq "HEXA_BOOT_SCREEN_PRESENTED preset=480p frames=[1-9][0-9]* pageflip=true y_offset=480 visible=true" $(BUILD)/display-serial.log
+	grep -Eq "HEXA_LOGIN_SCREEN_PRESENTED preset=480p frames=[1-9][0-9]* pageflip=true y_offset=480 visible=true" $(BUILD)/display-serial.log
+	grep -q "framebuffer: 640x480 XRGB8888 scanout available=true" $(BUILD)/display-serial.log
 	grep -q "HEXA_BOOT_MODE graphical" $(BUILD)/display-serial.log
-	grep -q "HEXA_DISPLAY_MODE width=1920 height=1080 bpp=32 stride=7680 bytes=8294400" $(BUILD)/display-serial.log
+	grep -q "HEXA_DISPLAY_MODE width=640 height=480 bpp=32 stride=2560 bytes=1228800 preset=480p" $(BUILD)/display-serial.log
 	grep -q "HEXA_DISPLAY_MODE .*pageflip=true" $(BUILD)/display-serial.log
 	grep -q "HEXA_PRESENTATION_READY rate=60 Hz vsync=true pageflip=true" $(BUILD)/display-serial.log
 	grep -q "HEXA_DISPLAY_READY surfaces=11 commit=11" $(BUILD)/display-serial.log
@@ -90,14 +104,15 @@ display-check: $(ISO)
 	grep -q "HEXA_MOUSE_READY enabled=true" $(BUILD)/display-serial.log
 	grep -q "HEXA_APP_OPENED SETTINGS" $(BUILD)/display-serial.log
 	grep -q "HEXA_SETTING_CHANGED key=theme value=Graphite" $(BUILD)/display-serial.log
-	grep -q "HEXA_SETTING_CHANGED key=resolution value=480p" $(BUILD)/display-serial.log
 	grep -q "HEXA_SETTING_CHANGED key=resolution value=720p" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=resolution value=1080p" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=resolution value=480p" $(BUILD)/display-serial.log
 	grep -q "HEXA_SETTING_CHANGED key=refresh-rate value=75 Hz" $(BUILD)/display-serial.log
 	grep -q "HEXA_SETTING_CHANGED key=refresh-rate value=120 Hz" $(BUILD)/display-serial.log
 	grep -q "HEXA_SETTING_CHANGED key=refresh-rate value=144 Hz" $(BUILD)/display-serial.log
 	grep -q "HEXA_SETTING_CHANGED key=vsync value=off" $(BUILD)/display-serial.log
 	grep -q "HEXA_SETTING_CHANGED key=vsync value=on" $(BUILD)/display-serial.log
-	grep -q "HEXA_DISPLAY_MODE width=1280 height=720 bpp=32 stride=5120 bytes=3686400 preset=720p" $(BUILD)/display-serial.log
+	grep -q "HEXA_DISPLAY_MODE width=640 height=480 bpp=32 stride=2560 bytes=1228800 preset=480p" $(BUILD)/display-serial.log
 	grep -q "HEXA_SETTING_CHANGED key=taskbar value=off" $(BUILD)/display-serial.log
 	grep -q "HEXA_SETTING_CHANGED key=network value=off" $(BUILD)/display-serial.log
 	grep -q "HEXA_SETTING_CHANGED key=network value=on" $(BUILD)/display-serial.log
@@ -125,6 +140,10 @@ session-check: $(ISO)
 	grep -q "HEXA_LOGIN_OK user=guest" $(BUILD)/guest-serial.log
 	grep -q "guest (Guest authority)" $(BUILD)/guest-serial.log
 	grep -q "DIESE denied 'mkform' for Guest authority" $(BUILD)/guest-serial.log
+	grep -q "DIESE denied 'safevideo' for Guest authority" $(BUILD)/guest-serial.log
+	grep -q "DIESE denied 'displayreset' for Guest authority" $(BUILD)/guest-serial.log
+	grep -q "HEXA_COMMAND_DENIED safevideo" $(BUILD)/guest-serial.log
+	grep -q "HEXA_COMMAND_DENIED displayreset" $(BUILD)/guest-serial.log
 	! grep -q "Created and bound 'Forbidden'" $(BUILD)/guest-serial.log
 	grep -q "HEXA_COMMAND_OK shutdown" $(BUILD)/guest-serial.log
 	@echo ">>> EXPOS SESSION AUTHORITY TEST PASSED <<<"
@@ -204,6 +223,11 @@ persistence-check: $(ISO)
 	grep -q "HEXA_ACCOUNTS_READY source=disk persisted=true" $(BUILD)/persistence-read.log
 	grep -q "HEXA_LOGIN_OK user=keeper" $(BUILD)/persistence-read.log
 	grep -q "keeper (Power authority)" $(BUILD)/persistence-read.log
+	grep -q "DIESE denied 'safevideo' for Power authority" $(BUILD)/persistence-read.log
+	grep -q "DIESE denied 'displayreset' for Power authority" $(BUILD)/persistence-read.log
+	grep -q "HEXA_COMMAND_DENIED safevideo" $(BUILD)/persistence-read.log
+	grep -q "HEXA_COMMAND_DENIED displayreset" $(BUILD)/persistence-read.log
+	! grep -q "HEXA_SAFE_VIDEO_APPLIED" $(BUILD)/persistence-read.log
 	grep -q "HEXA_DISPLAY_MODE width=640 height=480 bpp=32 stride=2560 bytes=1228800 preset=480p" $(BUILD)/persistence-read.log
 	grep -q "HEXA_DESKTOP_PREFS theme=Graphite" $(BUILD)/persistence-read.log
 	grep -q "HEXA_PRESENTATION_READY rate=144 Hz vsync=false pageflip=true" $(BUILD)/persistence-read.log

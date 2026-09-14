@@ -440,6 +440,16 @@ pub fn choose_boot_mode(input: &mut Input) -> BootMode {
     let mut pointer_y = (framebuffer::height() / 2) as i16;
     render_boot_mode(selected);
     draw_login_cursor(pointer_x, pointer_y);
+    framebuffer::present(false);
+    let presentation = framebuffer::presentation_stats();
+    slog!(
+        "HEXA_BOOT_SCREEN_PRESENTED preset={} frames={} pageflip={} y_offset={} visible={}\r\n",
+        framebuffer::current_mode().label(),
+        presentation.frames,
+        presentation.page_flip_available,
+        presentation.hardware_y_offset,
+        presentation.visible_content
+    );
     slog!("HEXA_BOOT_MODE_READY\r\n");
     loop {
         let Some(event) = input.poll_event() else {
@@ -488,6 +498,7 @@ pub fn choose_boot_mode(input: &mut Input) -> BootMode {
         }
         render_boot_mode(selected);
         draw_login_cursor(pointer_x, pointer_y);
+        framebuffer::present(false);
     }
 }
 
@@ -533,6 +544,16 @@ fn login_once(input: &mut Input, mode: BootMode) -> LoginAttempt {
             denied,
         );
         draw_login_cursor(pointer_x, pointer_y);
+        framebuffer::present(false);
+        let presentation = framebuffer::presentation_stats();
+        slog!(
+            "HEXA_LOGIN_SCREEN_PRESENTED preset={} frames={} pageflip={} y_offset={} visible={}\r\n",
+            framebuffer::current_mode().label(),
+            presentation.frames,
+            presentation.page_flip_available,
+            presentation.hardware_y_offset,
+            presentation.visible_content
+        );
     } else {
         println!("ExpOS login");
         println!("Press Esc to use the graphical login.");
@@ -603,6 +624,7 @@ fn login_once(input: &mut Input, mode: BootMode) -> LoginAttempt {
                     denied,
                 );
                 draw_login_cursor(pointer_x, pointer_y);
+                framebuffer::present(false);
             }
             continue;
         };
@@ -676,6 +698,7 @@ fn login_once(input: &mut Input, mode: BootMode) -> LoginAttempt {
                 denied,
             );
             draw_login_cursor(pointer_x, pointer_y);
+            framebuffer::present(false);
         }
     }
 }
@@ -728,6 +751,7 @@ fn boot_mode_card(x: i32, y: i32, title: &str, selected: bool) {
 fn complete_login(session: Session, graphical: bool) -> Session {
     if graphical {
         render_welcome(session);
+        framebuffer::present(false);
         framebuffer::exit();
     }
     crate::clear_console();

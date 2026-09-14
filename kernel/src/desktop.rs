@@ -2676,13 +2676,6 @@ fn run_session(
     allow_network: bool,
 ) {
     let mouse_ready = input.enable_mouse();
-    if state::persistent_available() {
-        if let Some(mode) =
-            framebuffer::DisplayMode::from_persisted(state::preferences().display_mode)
-        {
-            let _ = framebuffer::request_mode(mode);
-        }
-    }
     if !framebuffer::enter() {
         crate::println!("HexaDisplay unavailable: no Bochs/QEMU VBE framebuffer.");
         slog!("HEXA_DISPLAY_UNAVAILABLE\r\n");

@@ -3,6 +3,8 @@ guest
 guest
 whoami
 mkform Forbidden data
+safevideo
+displayreset
 users
 shutdown
 logout
