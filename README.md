@@ -7,14 +7,15 @@ ExpOS is the Form-native HexaOS rebuild described by
 - FIN identity, Dimensions, PIMP/DIESE policy, capability-scoped Form Handles,
   typed relationships and transactional HexaFS metadata;
 - HexaDisplay, a runtime-selectable 640x480, 1280x720 or 1920x1080 software
-  compositor with Form-owned surfaces, double-buffered Bochs/QEMU scanout and
-  selectable 60, 75, 120 or 144 Hz presentation pacing; fresh state starts at
+  compositor with Form-owned surfaces, atomic commits, presentation-complete
+  frame events, bounded damage-region scanout, double-buffered Bochs/QEMU
+  output and selectable 60, 75, 120 or 144 Hz pacing; fresh state starts at
   the lowest safe choices, 640x480 and 60 Hz;
 - a flat dark desktop with an application menu and taskbar, no default or
   pinned applications, and movable, closable, minimizable and maximizable
   windows;
-- an interactive Settings control center for appearance, display, input,
-  network, Wi-Fi, Bluetooth, privacy and system behavior, including six
+- an interactive Settings control center for appearance, display, performance,
+  input, network, Wi-Fi, Bluetooth, privacy and system behavior, including six
   themes, seven procedural wallpapers and four cursor themes;
 - readable case-sensitive 8x8 framebuffer text and an expanded 8x16 VGA
   console font;
@@ -108,9 +109,12 @@ Esc             Return to the console
 The graphical Terminal has 40 lines of scrollback, 24 history entries with Up
 and Down recall, and commands for identity, status, display, networking,
 applications, users and basic shell-style operations. Run `help` inside it for
-the exact list. `displayinfo` reports the selected presentation target,
-VSync/page-flip state, completed frames and bounded vertical-retrace timeouts;
-`timers` reports the TSC clock source used by the frame pacer. In Browser, click
+the exact list. Its `display` command reports the active and requested modes,
+presentation policy, frame-pacing and scanout counters. The console
+`displayinfo` command summarizes the selected presentation target and
+VSync/page-flip state; `displaydiag` also reports submitted and copied damage,
+damage-collapse, page-flip-failure and bounded vertical-retrace-timeout
+counters. `timers` reports the TSC clock source used by the frame pacer. In Browser, click
 the address field or press `/`, type an `http://` or `https://` URL, and press
 Enter. Text without a scheme is treated as a search query and sent to
 DuckDuckGo's non-JavaScript HTML search; prefix a query with `?` for the same
@@ -129,6 +133,23 @@ performs a bounded VGA vertical-retrace wait before its Bochs framebuffer page
 flip; a timeout is recorded instead of hanging the kernel. The Network switch
 is enforced by the native packet path through a requester-bound Configure
 Handle; it is not a painted UI flag.
+
+Open **Settings > Performance** to choose the renderer's cost/latency tradeoff.
+Window shadows and procedural wallpaper effects are independent toggles.
+**Efficient** presentation follows the selected software cadence for every
+frame; **Responsive** permits only partial damaged commits to bypass that
+cadence, while full repaints remain paced and the separate VSync preference is
+still honored. Fresh state uses Efficient presentation with shadows and
+wallpaper effects off, so the desktop begins with the least expensive renderer
+path. These choices persist. With the keyboard, `6` selects Performance, `j`/`k`
+select a row, Enter or Space activates it, and `+`/`-` move choices.
+
+HexaDisplay adopts compositor concepts also used by Wayland—client-owned
+surfaces, pending state published by an atomic commit, explicit surface damage
+and frame completion after presentation—but it is a Form-native protocol, not
+a Wayland wire protocol or `libwayland` compatibility layer. Consecutive pure
+mouse-motion packets are combined into a bounded compositor update; keyboard
+input and mouse-button transitions are retained in order.
 
 ## Network and Browser
 

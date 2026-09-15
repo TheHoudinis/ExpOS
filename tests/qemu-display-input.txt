@@ -3,6 +3,7 @@ operator
 expos
 q
 displayinfo
+displaydiag
 browser
 q
 desktop
@@ -19,6 +20,9 @@ j
 
 j
 
+6
+j
+j
 t
 help
 status

@@ -65,9 +65,17 @@ firmware / GRUB (temporary)
   share an atomic transaction; scripts, symlinks and path traversal are denied.
 - HexaDisplay uses a Wayland-like ownership model without copying Wayland's
   Unix socket/file-descriptor ABI: clients own surfaces and Buffer Handles,
-  mutate pending state, report damage, and publish atomically with `commit`.
-  Focus, configure, frame-complete, key and pointer events are routed back to the owning
-  FIN. The software renderer can program 640x480, 1280x720 or 1920x1080 XRGB
+  mutate pending state, report surface-local damage, and publish atomically
+  with `commit`. This is a Form-native compositor protocol, not Wayland
+  compatibility. Damage is clipped to the surface and coalesced without
+  allocation. Moves, resizes, visibility changes and destruction also retain
+  the old output footprint so damage-driven composition cannot leave ghosts.
+  Multiple commits before presentation retain their combined damage and
+  request one callback carrying the newest commit sequence.
+  `FrameDone` is emitted only after the compositor crosses the framebuffer
+  presentation boundary; queue pressure defers rather than drops it. Focus,
+  configure, frame-complete, key and pointer events are routed back to the
+  owning FIN. The software renderer can program 640x480, 1280x720 or 1920x1080 XRGB
   scanout in QEMU standard VGA's 16 MiB linear framebuffer BAR. The bootstrap
   maps the entire fourth-GiB PCI window, and HexaDisplay checks the selected
   geometry, stride and double-buffer byte count against the aperture before the
@@ -75,9 +83,14 @@ firmware / GRUB (temporary)
   the visible height, rendering targets the hidden page and presentation flips
   the VBE Y offset. Every flip is read back from hardware; if the adapter
   rejects it, the completed damage is copied to the prior visible page and
-  page flipping is disabled. After a successful flip, only declared damage
-  rectangles are copied to the newly hidden page, keeping the two pages
-  coherent without a full-screen copy for cursor and terminal updates. Optional VSync performs a bounded
+  page flipping is disabled. Before synchronization, scanout damage is clipped
+  in a fixed 32-region stack buffer. A bounding merge is used only when it does
+  not copy more pixels than the original regions; overflow collapses to one
+  safe bounding rectangle instead of losing pixels or allocating. After a
+  successful flip, only normalized damage
+  is copied to the newly hidden page, keeping the two pages coherent without a
+  full-screen copy for cursor and terminal updates. Submitted/copy region and
+  pixel totals, collapse count and flip failures remain observable. Optional VSync performs a bounded
   legacy-VGA retrace wait; failed waits increment a diagnostic counter instead
   of blocking forever. Fresh state requests 480p and 60 Hz. The boot chooser
   and graphical login explicitly present their back buffers before waiting for
@@ -94,7 +107,13 @@ firmware / GRUB (temporary)
   Aurora and Mesh), four cursor themes and the three display presets. Its
   Display page also selects a 60, 75, 120 or 144 Hz compositor presentation
   target and optional VSync. These are software-pacing targets, not negotiated
-  physical monitor modes. The graphical Terminal keeps bounded scrollback and
+  physical monitor modes. The Performance page independently controls window
+  shadows, procedural wallpaper rendering and an Efficient/Responsive policy.
+  Efficient mode paces every frame; Responsive mode bypasses software pacing
+  only for damaged commits, while full redraws stay paced and VSync remains an
+  independent presentation constraint. All three optional features persist and
+  default off or Efficient so a fresh state starts on the least expensive path.
+  The graphical Terminal keeps bounded scrollback and
   command history and exposes identity, system, display, network and
   application commands.
   Each application receives a child Handle containing
@@ -104,7 +123,10 @@ firmware / GRUB (temporary)
 - The PS/2 adapter enables the auxiliary device, validates ACKs and decodes
   synchronized three-byte packets. The compositor clamps a save-under cursor,
   hit-tests the topmost visible surface and checks its Input Handle before
-  routing motion or button events. The buffer protocol represents XRGB8888,
+  routing motion or button events. Up to sixteen consecutive pure-motion
+  packets are folded into one saturating delta before a repaint. The first key
+  or button transition is retained for the next poll, so batching cannot erase
+  an input edge. The buffer protocol represents XRGB8888,
   ARGB8888 and RGB565 clients. Solid fills use clipped row writes; gradients,
   alpha blending, rounded rectangles and Bresenham lines are native primitives;
   cursor movement repaints only the cursor bounds; games repaint only the active window.
@@ -115,10 +137,15 @@ firmware / GRUB (temporary)
   `displayinfo` command reports page-flip/frame/retrace-timeout state, the
   graphical System surface reports frame count, and `timers` identifies the
   clock source. `displaydiag` exposes adapter identity, requested/active mode,
-  memory bounds and presentation counters; `stateinfo` reports the persistent
+  memory bounds, presentation state, normalized-damage counters and flip
+  failures; the graphical Terminal's `display` command exposes its active and
+  requested modes, policy, pacing and scanout counters. `stateinfo` reports the persistent
   display selection; `diag` combines these with clock and network status.
   Operator-only `safevideo`/`displayreset` persists 480p, 60 Hz and VSync on as
-  a console recovery path. If persistence fails, the sanitized values still
+  a console recovery path. A boot/login frame that cannot be confirmed visible
+  falls back to the console, and an active desktop returns to the command
+  environment instead of waiting behind a black scanout. If persistence fails,
+  the sanitized values still
   replace the in-memory preferences for the rest of that boot.
 - Session identity is intentionally separate from a Unix UID. The built-in
   accounts and twelve-slot registry select a DIESE authority input and gate
@@ -136,8 +163,9 @@ firmware / GRUB (temporary)
   fields and CRC-32 over its header and payload; boot selects the newest valid
   slot, preserving the previous generation across an interrupted or corrupt
   write. Settings persist display mode, theme, wallpaper, cursor, accent,
-  backdrop, pointer speed, presentation rate, VSync and desktop/connectivity
-  flags. Older compatible records default to 60 Hz with VSync enabled. Form
+  backdrop, pointer speed, presentation rate, VSync, shadows, wallpaper effects,
+  presentation policy and desktop/connectivity flags. Older compatible records
+  default to 60 Hz with VSync enabled and use the low-cost renderer policy. Form
   records, notes and PIMP revisions are outside this store and remain volatile.
 - Network is a Driver Form protected by requester-bound Network Handles and
   PIMP policy. Its current polling RTL8139 path implements Ethernet, ARP,
@@ -207,8 +235,10 @@ index.
 Alpha.12 includes the runtime-selectable 480p/720p/1080p empty-start desktop,
 normal case-sensitive text, Notes, a richer graphical Terminal, six themes,
 seven procedural wallpapers, four cursor themes, double-buffered presentation
-with damage-region page synchronization, persistent 60/75/120/144 Hz software
-pacing and optional VSync, a bounded native HTML/CSS/JavaScript Browser with
+with atomic surface commits, presentation-bound frame completion, bounded
+damage coalescing and page synchronization, persistent 60/75/120/144 Hz
+software pacing, opt-in responsive damaged commits and optional VSync, a
+bounded native HTML/CSS/JavaScript Browser with
 DuckDuckGo non-JavaScript HTML search, dual graphical and console login
 selection, durable accounts/preferences, Ayo v3 artifact transactions, and
 capability-gated native RTL8139/ARP/IPv4/ICMP/UDP/DNS/TCP/HTTP/TLS networking.

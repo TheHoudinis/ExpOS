@@ -9,5 +9,8 @@ j
 
 
 j
+6
+j
+j
 q
 shutdown

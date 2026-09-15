@@ -429,6 +429,17 @@ fn valid_password(password: &[u8]) -> bool {
         && password.iter().all(|byte| byte.is_ascii_graphic())
 }
 
+fn present_graphical(stage: &str) -> bool {
+    let visible = framebuffer::present(false);
+    if !visible {
+        slog!(
+            "HEXA_GRAPHICS_PRESENT_FAILED stage={} reason=scanout-not-visible\r\n",
+            stage
+        );
+    }
+    visible
+}
+
 pub fn choose_boot_mode(input: &mut Input) -> BootMode {
     let _ = input.enable_mouse();
     if !framebuffer::enter() {
@@ -440,7 +451,12 @@ pub fn choose_boot_mode(input: &mut Input) -> BootMode {
     let mut pointer_y = (framebuffer::height() / 2) as i16;
     render_boot_mode(selected);
     draw_login_cursor(pointer_x, pointer_y);
-    framebuffer::present(false);
+    if !present_graphical("boot-chooser") {
+        framebuffer::exit();
+        crate::clear_console();
+        slog!("HEXA_BOOT_MODE console fallback=true reason=scanout-not-visible\r\n");
+        return BootMode::Console;
+    }
     let presentation = framebuffer::presentation_stats();
     slog!(
         "HEXA_BOOT_SCREEN_PRESENTED preset={} frames={} pageflip={} y_offset={} visible={}\r\n",
@@ -498,7 +514,12 @@ pub fn choose_boot_mode(input: &mut Input) -> BootMode {
         }
         render_boot_mode(selected);
         draw_login_cursor(pointer_x, pointer_y);
-        framebuffer::present(false);
+        if !present_graphical("boot-chooser") {
+            framebuffer::exit();
+            crate::clear_console();
+            slog!("HEXA_BOOT_MODE console fallback=true reason=scanout-not-visible\r\n");
+            return BootMode::Console;
+        }
     }
 }
 
@@ -544,7 +565,12 @@ fn login_once(input: &mut Input, mode: BootMode) -> LoginAttempt {
             denied,
         );
         draw_login_cursor(pointer_x, pointer_y);
-        framebuffer::present(false);
+        if !present_graphical("login") {
+            crypto::wipe(&mut password);
+            framebuffer::exit();
+            crate::clear_console();
+            return LoginAttempt::SwitchEnvironment;
+        }
         let presentation = framebuffer::presentation_stats();
         slog!(
             "HEXA_LOGIN_SCREEN_PRESENTED preset={} frames={} pageflip={} y_offset={} visible={}\r\n",
@@ -624,7 +650,12 @@ fn login_once(input: &mut Input, mode: BootMode) -> LoginAttempt {
                     denied,
                 );
                 draw_login_cursor(pointer_x, pointer_y);
-                framebuffer::present(false);
+                if !present_graphical("login") {
+                    crypto::wipe(&mut password);
+                    framebuffer::exit();
+                    crate::clear_console();
+                    return LoginAttempt::SwitchEnvironment;
+                }
             }
             continue;
         };
@@ -698,7 +729,12 @@ fn login_once(input: &mut Input, mode: BootMode) -> LoginAttempt {
                 denied,
             );
             draw_login_cursor(pointer_x, pointer_y);
-            framebuffer::present(false);
+            if !present_graphical("login") {
+                crypto::wipe(&mut password);
+                framebuffer::exit();
+                crate::clear_console();
+                return LoginAttempt::SwitchEnvironment;
+            }
         }
     }
 }
@@ -751,7 +787,7 @@ fn boot_mode_card(x: i32, y: i32, title: &str, selected: bool) {
 fn complete_login(session: Session, graphical: bool) -> Session {
     if graphical {
         render_welcome(session);
-        framebuffer::present(false);
+        let _ = present_graphical("welcome");
         framebuffer::exit();
     }
     crate::clear_console();

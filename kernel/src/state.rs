@@ -19,6 +19,14 @@ pub const PREF_HIGH_CONTRAST: u16 = 1 << 5;
 pub const PREF_NETWORK_ENABLED: u16 = 1 << 6;
 pub const PREF_BLUETOOTH_ENABLED: u16 = 1 << 7;
 pub const PREF_WIFI_ENABLED: u16 = 1 << 8;
+/// Draw a translucent offset behind windows during full compositor repaints.
+/// Kept opt-in because it adds a framebuffer blend over every window.
+pub const PREF_WINDOW_SHADOWS: u16 = 1 << 9;
+/// Enable procedural wallpaper rendering instead of the inexpensive solid fill.
+pub const PREF_WALLPAPER_EFFECTS: u16 = 1 << 10;
+/// Let damaged commits bypass the software cadence wait. Hardware
+/// VSync remains independently controlled by `vsync`.
+pub const PREF_RESPONSIVE_PRESENTATION: u16 = 1 << 11;
 
 const MAGIC: [u8; 8] = *b"EXPOST03";
 const FORMAT_VERSION: u16 = 3;
@@ -313,6 +321,24 @@ pub fn print_diagnostics() {
         preferences.accent,
         preferences.pointer_speed
     );
+    println!(
+        "render: shadows={} wallpaper-effects={} policy={}",
+        if preferences.flags & PREF_WINDOW_SHADOWS != 0 {
+            "on"
+        } else {
+            "off"
+        },
+        if preferences.flags & PREF_WALLPAPER_EFFECTS != 0 {
+            "on"
+        } else {
+            "off"
+        },
+        if preferences.flags & PREF_RESPONSIVE_PRESENTATION != 0 {
+            "responsive"
+        } else {
+            "efficient"
+        }
+    );
 }
 
 pub fn save_preferences(preferences: PersistentPreferences) -> Result<(), StateError> {
@@ -563,7 +589,10 @@ fn sanitize_preferences(mut value: PersistentPreferences) -> PersistentPreferenc
         | PREF_HIGH_CONTRAST
         | PREF_NETWORK_ENABLED
         | PREF_BLUETOOTH_ENABLED
-        | PREF_WIFI_ENABLED;
+        | PREF_WIFI_ENABLED
+        | PREF_WINDOW_SHADOWS
+        | PREF_WALLPAPER_EFFECTS
+        | PREF_RESPONSIVE_PRESENTATION;
     value
 }
 
@@ -677,6 +706,24 @@ mod tests {
         assert_eq!(preferences.accent, 0);
         assert_eq!(preferences.backdrop, 0);
         assert_eq!(preferences.pointer_speed, 1);
+        assert_eq!(preferences.flags & PREF_WINDOW_SHADOWS, 0);
+        assert_eq!(preferences.flags & PREF_WALLPAPER_EFFECTS, 0);
+        assert_eq!(preferences.flags & PREF_RESPONSIVE_PRESENTATION, 0);
+    }
+
+    #[test]
+    fn performance_preference_flags_round_trip_and_unknown_bits_are_removed() {
+        let mut data = PersistentData::new();
+        data.preferences.flags =
+            PREF_WINDOW_SHADOWS | PREF_WALLPAPER_EFFECTS | PREF_RESPONSIVE_PRESENTATION | 0xF000;
+        let mut encoded = [0_u8; SLOT_LEN];
+        encode_slot(&data, 14, &mut encoded);
+
+        let decoded = decode_slot(&encoded, 1).unwrap();
+        assert_eq!(
+            decoded.data.preferences.flags,
+            PREF_WINDOW_SHADOWS | PREF_WALLPAPER_EFFECTS | PREF_RESPONSIVE_PRESENTATION
+        );
     }
 
     #[test]

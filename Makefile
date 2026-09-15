@@ -99,6 +99,7 @@ display-check: $(ISO)
 	grep -q "HEXA_DISPLAY_MODE width=640 height=480 bpp=32 stride=2560 bytes=1228800 preset=480p" $(BUILD)/display-serial.log
 	grep -q "HEXA_DISPLAY_MODE .*pageflip=true" $(BUILD)/display-serial.log
 	grep -q "HEXA_PRESENTATION_READY rate=60 Hz vsync=true pageflip=true" $(BUILD)/display-serial.log
+	awk '/HEXA_RENDER_POLICY/{first=1; if ($$0 ~ /mode=Efficient damage=true shadows=false wallpaper_effects=false/) safe=1; exit} END{exit !(first && safe)}' $(BUILD)/display-serial.log
 	grep -q "HEXA_DISPLAY_READY surfaces=11 commit=11" $(BUILD)/display-serial.log
 	grep -q "HEXA_DESKTOP_EMPTY open_apps=0 pinned_apps=0" $(BUILD)/display-serial.log
 	grep -q "HEXA_MOUSE_READY enabled=true" $(BUILD)/display-serial.log
@@ -112,6 +113,9 @@ display-check: $(ISO)
 	grep -q "HEXA_SETTING_CHANGED key=refresh-rate value=144 Hz" $(BUILD)/display-serial.log
 	grep -q "HEXA_SETTING_CHANGED key=vsync value=off" $(BUILD)/display-serial.log
 	grep -q "HEXA_SETTING_CHANGED key=vsync value=on" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=window-shadows value=on" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=wallpaper-effects value=on" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=presentation-policy value=Responsive" $(BUILD)/display-serial.log
 	grep -q "HEXA_DISPLAY_MODE width=640 height=480 bpp=32 stride=2560 bytes=1228800 preset=480p" $(BUILD)/display-serial.log
 	grep -q "HEXA_SETTING_CHANGED key=taskbar value=off" $(BUILD)/display-serial.log
 	grep -q "HEXA_SETTING_CHANGED key=network value=off" $(BUILD)/display-serial.log
@@ -125,10 +129,13 @@ display-check: $(ISO)
 	grep -q "HEXA_TERMINAL_COMMAND name=ps" $(BUILD)/display-serial.log
 	grep -q "HEXA_APP_CLOSED TERMINAL" $(BUILD)/display-serial.log
 	grep -q "HEXA_APP_REOPENED TERMINAL" $(BUILD)/display-serial.log
-	grep -Eq "HEXA_PRESENTATION_STATS frames=[1-9][0-9]* missed=[0-9]+ idle=[0-9]+ vblank_timeouts=0" $(BUILD)/display-serial.log
+	grep -Eq "HEXA_PRESENTATION_STATS frames=[1-9][0-9]* missed=[0-9]+ idle=[0-9]+ vblank_timeouts=0 responsive_commits=[1-9][0-9]*" $(BUILD)/display-serial.log
+	grep -Eq "HEXA_RENDER_STATS full=[1-9][0-9]* damaged=[1-9][0-9]* callbacks=[1-9][0-9]* surface_frames=[1-9][0-9]* pointer_merged=[0-9]+ submitted_regions=[1-9][0-9]* copied_regions=[1-9][0-9]* copied_pixels=[1-9][0-9]* collapses=[0-9]+" $(BUILD)/display-serial.log
+	grep -Eq "damage: submitted-regions=[1-9][0-9]* submitted-pixels=[1-9][0-9]* copied-regions=[1-9][0-9]* copied-pixels=[1-9][0-9]* collapses=[0-9]+" $(BUILD)/display-serial.log
 	grep -q "HEXA_DISPLAY_CLOSED" $(BUILD)/display-serial.log
 	grep -q "HEXA_COMMAND_OK desktop" $(BUILD)/display-serial.log
 	grep -q "HEXA_PRESENTATION_READY rate=144 Hz vsync=true pageflip=true" $(BUILD)/display-serial.log
+	grep -q "HEXA_RENDER_POLICY mode=Responsive damage=true shadows=true wallpaper_effects=true" $(BUILD)/display-serial.log
 	grep -q "ExpOS Go ABI v1" $(BUILD)/display-serial.log
 	@echo ">>> EXPOS DISPLAY TEST PASSED <<<"
 
@@ -216,6 +223,9 @@ persistence-check: $(ISO)
 	grep -q "HEXA_SETTING_CHANGED key=resolution value=480p" $(BUILD)/persistence-write.log
 	grep -q "HEXA_SETTING_CHANGED key=refresh-rate value=144 Hz" $(BUILD)/persistence-write.log
 	grep -q "HEXA_SETTING_CHANGED key=vsync value=off" $(BUILD)/persistence-write.log
+	grep -q "HEXA_SETTING_CHANGED key=window-shadows value=on" $(BUILD)/persistence-write.log
+	grep -q "HEXA_SETTING_CHANGED key=wallpaper-effects value=on" $(BUILD)/persistence-write.log
+	grep -q "HEXA_SETTING_CHANGED key=presentation-policy value=Responsive" $(BUILD)/persistence-write.log
 	grep -q "HEXA_STATE_COMMIT generation=" $(BUILD)/persistence-write.log
 	! grep -q "violetmemory" $(BUILD)/persistence-write.log
 	! LC_ALL=C grep -a -q "violetmemory" $(BUILD)/persistence-state.img
@@ -231,6 +241,8 @@ persistence-check: $(ISO)
 	grep -q "HEXA_DISPLAY_MODE width=640 height=480 bpp=32 stride=2560 bytes=1228800 preset=480p" $(BUILD)/persistence-read.log
 	grep -q "HEXA_DESKTOP_PREFS theme=Graphite" $(BUILD)/persistence-read.log
 	grep -q "HEXA_PRESENTATION_READY rate=144 Hz vsync=false pageflip=true" $(BUILD)/persistence-read.log
+	grep -q "HEXA_RENDER_POLICY mode=Responsive damage=true shadows=true wallpaper_effects=true" $(BUILD)/persistence-read.log
+	grep -Eq "HEXA_RENDER_STATS full=[1-9][0-9]* damaged=[0-9]+ callbacks=[1-9][0-9]* surface_frames=[1-9][0-9]* pointer_merged=[0-9]+ submitted_regions=[1-9][0-9]* copied_regions=[1-9][0-9]* copied_pixels=[1-9][0-9]* collapses=[0-9]+" $(BUILD)/persistence-read.log
 	! grep -q "violetmemory" $(BUILD)/persistence-read.log
 	grep -q "HEXA_COMMAND_OK shutdown" $(BUILD)/persistence-read.log
 	@echo ">>> EXPOS PERSISTENCE TEST PASSED <<<"

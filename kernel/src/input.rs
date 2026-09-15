@@ -3,6 +3,7 @@ use core::arch::x86_64::_rdtsc;
 
 const PS2_STATUS: u16 = 0x64;
 const PS2_DATA: u16 = 0x60;
+const MAX_POINTER_BATCH: usize = 16;
 
 pub const KEY_UP: u8 = 0x80;
 pub const KEY_DOWN: u8 = 0x81;
@@ -45,6 +46,7 @@ pub struct Input {
     mouse_index: usize,
     mouse_buttons: u8,
     mouse_enabled: bool,
+    pending_event: Option<InputEvent>,
 }
 
 impl Input {
@@ -60,6 +62,7 @@ impl Input {
             mouse_index: 0,
             mouse_buttons: 0,
             mouse_enabled: false,
+            pending_event: None,
         }
     }
 
@@ -95,6 +98,9 @@ impl Input {
     }
 
     pub fn poll_event(&mut self) -> Option<InputEvent> {
+        if let Some(event) = self.pending_event.take() {
+            return Some(event);
+        }
         if let Some(byte) = serial::COM1.lock().try_read() {
             return self.decode_serial(byte).map(InputEvent::Key);
         }
@@ -114,6 +120,36 @@ impl Input {
         } else {
             self.decode_scancode(data).map(InputEvent::Key)
         }
+    }
+
+    /// Collapse a bounded run of pure pointer-motion packets into one update.
+    ///
+    /// A compositor should normally display the newest pointer position once
+    /// per frame instead of rendering every intermediate PS/2 packet. Button
+    /// transitions and keyboard input are never folded or dropped: the first
+    /// non-mergeable event is retained for the next [`poll_event`] call.
+    pub fn coalesce_pointer_motion(&mut self, first: PointerEvent) -> (PointerEvent, usize) {
+        let mut combined = first;
+        let mut merged = 0;
+        for _ in 1..MAX_POINTER_BATCH {
+            let Some(event) = self.poll_event() else {
+                break;
+            };
+            match event {
+                InputEvent::Pointer(next) if can_merge_pointer_motion(combined, next) => {
+                    combined.dx = combined.dx.saturating_add(next.dx);
+                    combined.dy = combined.dy.saturating_add(next.dy);
+                    combined.buttons = next.buttons;
+                    merged += 1;
+                }
+                other => {
+                    debug_assert!(self.pending_event.is_none());
+                    self.pending_event = Some(other);
+                    break;
+                }
+            }
+        }
+        (combined, merged)
     }
 
     fn decode_mouse(&mut self, byte: u8) -> Option<PointerEvent> {
@@ -313,6 +349,14 @@ impl Input {
     }
 }
 
+const fn can_merge_pointer_motion(current: PointerEvent, next: PointerEvent) -> bool {
+    current.pressed == 0
+        && current.released == 0
+        && next.pressed == 0
+        && next.released == 0
+        && current.buttons == next.buttons
+}
+
 fn controller_write_command(command: u8) -> bool {
     if !controller_wait_write() {
         return false;
@@ -405,5 +449,49 @@ fn apply_modifiers(byte: u8, shift: bool, caps_lock: bool) -> u8 {
         b'.' => b'>',
         b'/' => b'?',
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{can_merge_pointer_motion, Input, InputEvent, PointerEvent};
+
+    const fn pointer(dx: i16, dy: i16, buttons: u8, pressed: u8, released: u8) -> PointerEvent {
+        PointerEvent {
+            dx,
+            dy,
+            buttons,
+            pressed,
+            released,
+        }
+    }
+
+    #[test]
+    fn pointer_motion_can_coalesce_only_without_losing_button_edges() {
+        let motion = pointer(3, -2, 0, 0, 0);
+        assert!(can_merge_pointer_motion(motion, pointer(4, 1, 0, 0, 0)));
+        assert!(can_merge_pointer_motion(
+            pointer(1, 1, 1, 0, 0),
+            pointer(2, 2, 1, 0, 0)
+        ));
+        assert!(!can_merge_pointer_motion(motion, pointer(0, 0, 1, 1, 0)));
+        assert!(!can_merge_pointer_motion(
+            pointer(0, 0, 1, 0, 0),
+            pointer(0, 0, 0, 0, 1)
+        ));
+        assert!(!can_merge_pointer_motion(
+            pointer(1, 1, 0, 0, 0),
+            pointer(1, 1, 1, 0, 0)
+        ));
+    }
+
+    #[test]
+    fn deferred_input_is_delivered_before_polling_hardware_again() {
+        let mut input = Input::new();
+        let transition = InputEvent::Pointer(pointer(0, 0, 1, 1, 0));
+        input.pending_event = Some(transition);
+
+        assert_eq!(input.poll_event(), Some(transition));
+        assert!(input.pending_event.is_none());
     }
 }

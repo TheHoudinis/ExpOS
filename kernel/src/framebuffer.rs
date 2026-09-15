@@ -43,6 +43,12 @@ const NO_ACTIVE_MODE: u8 = u8::MAX;
 const VGA_INPUT_STATUS: u16 = 0x03DA;
 const VGA_VERTICAL_RETRACE: u8 = 1 << 3;
 const VBLANK_POLL_LIMIT: usize = 250_000;
+/// Upper bound for damage bookkeeping on the kernel stack.
+///
+/// Desktop commits normally submit only a handful of regions. If a caller
+/// exceeds this bound, normalization safely collapses all damage into one
+/// bounding rectangle instead of allocating or losing pixels.
+const MAX_DAMAGE_REGIONS: usize = 32;
 
 /// A user-selectable progressive display mode.
 ///
@@ -155,6 +161,11 @@ static FRONT_CONTENT_VISIBLE: AtomicBool = AtomicBool::new(false);
 static PRESENTED_FRAMES: AtomicU64 = AtomicU64::new(0);
 static VBLANK_TIMEOUTS: AtomicU64 = AtomicU64::new(0);
 static PAGE_FLIP_FAILURES: AtomicU64 = AtomicU64::new(0);
+static SUBMITTED_DAMAGE_REGIONS: AtomicU64 = AtomicU64::new(0);
+static SUBMITTED_DAMAGE_PIXELS: AtomicU64 = AtomicU64::new(0);
+static COPIED_DAMAGE_REGIONS: AtomicU64 = AtomicU64::new(0);
+static COPIED_DAMAGE_PIXELS: AtomicU64 = AtomicU64::new(0);
+static DAMAGE_COLLAPSES: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Mode {
@@ -189,6 +200,18 @@ pub struct PresentationStats {
     pub hardware_y_offset: u16,
     /// True only after presented pixels are known to occupy the hardware front page.
     pub visible_content: bool,
+    /// Damage rectangles supplied by callers, including clipped-out entries.
+    pub submitted_regions: u64,
+    /// Visible pixels represented by submitted rectangles before coalescing.
+    /// Overlapping submissions therefore contribute more than once here.
+    pub submitted_pixels: u64,
+    /// Normalized, non-overlapping rectangles actually copied between pages.
+    pub copied_regions: u64,
+    /// Pixels actually copied between pages after clipping and coalescing.
+    pub copied_pixels: u64,
+    /// Frames whose damage exceeded the bounded region set and was collapsed
+    /// into one safe bounding rectangle.
+    pub damage_collapses: u64,
 }
 
 /// A clipped scanout area that must be copied to the newly hidden page after
@@ -247,12 +270,144 @@ struct ClippedRegion {
 }
 
 impl ClippedRegion {
+    const EMPTY: Self = Self {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+
     const fn width(self) -> usize {
         self.right - self.left
     }
 
     const fn height(self) -> usize {
         self.bottom - self.top
+    }
+
+    const fn pixels(self) -> usize {
+        self.width() * self.height()
+    }
+
+    const fn touches_or_overlaps(self, other: Self) -> bool {
+        self.left <= other.right
+            && other.left <= self.right
+            && self.top <= other.bottom
+            && other.top <= self.bottom
+    }
+
+    const fn union(self, other: Self) -> Self {
+        Self {
+            left: if self.left < other.left {
+                self.left
+            } else {
+                other.left
+            },
+            top: if self.top < other.top {
+                self.top
+            } else {
+                other.top
+            },
+            right: if self.right > other.right {
+                self.right
+            } else {
+                other.right
+            },
+            bottom: if self.bottom > other.bottom {
+                self.bottom
+            } else {
+                other.bottom
+            },
+        }
+    }
+
+    const fn can_merge_without_extra_copy(self, other: Self) -> bool {
+        if !self.touches_or_overlaps(other) {
+            return false;
+        }
+        let union_pixels = self.union(other).pixels();
+        let separate_pixels = self.pixels().saturating_add(other.pixels());
+        union_pixels <= separate_pixels
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct NormalizedDamage {
+    regions: [ClippedRegion; MAX_DAMAGE_REGIONS],
+    len: usize,
+    submitted_regions: u64,
+    submitted_pixels: u64,
+    collapsed: bool,
+}
+
+impl NormalizedDamage {
+    const fn empty() -> Self {
+        Self {
+            regions: [ClippedRegion::EMPTY; MAX_DAMAGE_REGIONS],
+            len: 0,
+            submitted_regions: 0,
+            submitted_pixels: 0,
+            collapsed: false,
+        }
+    }
+
+    fn copied_regions(&self) -> u64 {
+        self.len as u64
+    }
+
+    fn copied_pixels(&self) -> u64 {
+        self.regions[..self.len]
+            .iter()
+            .fold(0_u64, |total, region| {
+                total.saturating_add(region.pixels() as u64)
+            })
+    }
+
+    fn remove(&mut self, index: usize) {
+        for current in index..self.len - 1 {
+            self.regions[current] = self.regions[current + 1];
+        }
+        self.len -= 1;
+        self.regions[self.len] = ClippedRegion::EMPTY;
+    }
+
+    fn collapse_with(&mut self, candidate: ClippedRegion) {
+        let mut combined = candidate;
+        for region in &self.regions[..self.len] {
+            combined = combined.union(*region);
+        }
+        self.regions = [ClippedRegion::EMPTY; MAX_DAMAGE_REGIONS];
+        self.regions[0] = combined;
+        self.len = 1;
+        self.collapsed = true;
+    }
+
+    fn add(&mut self, mut candidate: ClippedRegion) {
+        if self.collapsed {
+            self.regions[0] = self.regions[0].union(candidate);
+            return;
+        }
+
+        // Restart after every merge: growing the candidate can make another
+        // bounding merge cost-effective. This reaches a fixed point while the
+        // hard region bound keeps work and stack use deterministic.
+        let mut index = 0;
+        while index < self.len {
+            if candidate.can_merge_without_extra_copy(self.regions[index]) {
+                candidate = candidate.union(self.regions[index]);
+                self.remove(index);
+                index = 0;
+            } else {
+                index += 1;
+            }
+        }
+
+        if self.len == MAX_DAMAGE_REGIONS {
+            self.collapse_with(candidate);
+        } else {
+            self.regions[self.len] = candidate;
+            self.len += 1;
+        }
     }
 }
 
@@ -274,6 +429,25 @@ fn clip_region(region: DamageRegion, mode_width: i32, mode_height: i32) -> Optio
         right: right as usize,
         bottom: bottom as usize,
     })
+}
+
+fn normalize_damage(
+    damage: &[DamageRegion],
+    mode_width: i32,
+    mode_height: i32,
+) -> NormalizedDamage {
+    let mut normalized = NormalizedDamage::empty();
+    normalized.submitted_regions = damage.len() as u64;
+    for region in damage {
+        let Some(clipped) = clip_region(*region, mode_width, mode_height) else {
+            continue;
+        };
+        normalized.submitted_pixels = normalized
+            .submitted_pixels
+            .saturating_add(clipped.pixels() as u64);
+        normalized.add(clipped);
+    }
+    normalized
 }
 
 pub mod color {
@@ -350,6 +524,11 @@ pub fn presentation_stats() -> PresentationStats {
         page_flip_available: PAGE_FLIP_AVAILABLE.load(Ordering::Acquire),
         hardware_y_offset: HARDWARE_Y_OFFSET.load(Ordering::Acquire),
         visible_content: FRONT_CONTENT_VISIBLE.load(Ordering::Acquire),
+        submitted_regions: SUBMITTED_DAMAGE_REGIONS.load(Ordering::Acquire),
+        submitted_pixels: SUBMITTED_DAMAGE_PIXELS.load(Ordering::Acquire),
+        copied_regions: COPIED_DAMAGE_REGIONS.load(Ordering::Acquire),
+        copied_pixels: COPIED_DAMAGE_PIXELS.load(Ordering::Acquire),
+        damage_collapses: DAMAGE_COLLAPSES.load(Ordering::Acquire),
     }
 }
 
@@ -420,6 +599,14 @@ pub fn print_diagnostics() {
         presentation.vblank_timeouts,
         presentation.page_flip_failures
     );
+    crate::println!(
+        "damage: submitted-regions={} submitted-pixels={} copied-regions={} copied-pixels={} collapses={}",
+        presentation.submitted_regions,
+        presentation.submitted_pixels,
+        presentation.copied_regions,
+        presentation.copied_pixels,
+        presentation.damage_collapses
+    );
     crate::println!("aperture: {} bytes", LFB_APERTURE_BYTES);
 }
 
@@ -433,6 +620,11 @@ fn program_mode(requested: DisplayMode) -> bool {
     PRESENTED_FRAMES.store(0, Ordering::Release);
     VBLANK_TIMEOUTS.store(0, Ordering::Release);
     PAGE_FLIP_FAILURES.store(0, Ordering::Release);
+    SUBMITTED_DAMAGE_REGIONS.store(0, Ordering::Release);
+    SUBMITTED_DAMAGE_PIXELS.store(0, Ordering::Release);
+    COPIED_DAMAGE_REGIONS.store(0, Ordering::Release);
+    COPIED_DAMAGE_PIXELS.store(0, Ordering::Release);
+    DAMAGE_COLLAPSES.store(0, Ordering::Release);
     if !available() {
         return false;
     }
@@ -532,23 +724,42 @@ pub fn exit() {
 /// then refreshed from the new one so partial window redraws remain correct.
 /// A bounded VGA retrace wait is used when requested; failure never hangs the
 /// kernel and is visible through [`presentation_stats`].
-pub fn present(vsync: bool) {
+/// Return `true` only when the completed content is confirmed on the hardware
+/// front page. A rejected page flip can still succeed after the changed pixels
+/// are copied back and the previous front page is restored.
+pub fn present(vsync: bool) -> bool {
     let damage = DamageRegion::new(0, 0, width() as i32, height() as i32);
-    present_damage(vsync, &[damage]);
+    present_damage(vsync, &[damage])
 }
 
 /// Present the composed page and synchronize only the damaged rectangles to
-/// the next back page. Callers must include every modified area, including
-/// software-cursor pixels, or use [`present`] after a full-screen redraw.
-pub fn present_damage(vsync: bool, damage: &[DamageRegion]) {
+/// the next back page. Damage is clipped and coalesced in a bounded stack
+/// buffer first. Regions merge only when the resulting bounding copy is no
+/// larger than copying them separately.
+/// Callers must include every modified area, including software-cursor pixels,
+/// or use [`present`] after a full-screen redraw.
+/// Return `true` only when the completed content is confirmed on the hardware
+/// front page. Submitted/copy damage counters still record attempted work when
+/// scanout confirmation fails, while the presented-frame counter does not.
+pub fn present_damage(vsync: bool, damage: &[DamageRegion]) -> bool {
     if active_display_mode().is_none() {
-        return;
+        return false;
+    }
+    let normalized = normalize_damage(
+        damage,
+        current_mode().width() as i32,
+        current_mode().height() as i32,
+    );
+    SUBMITTED_DAMAGE_REGIONS.fetch_add(normalized.submitted_regions, Ordering::AcqRel);
+    SUBMITTED_DAMAGE_PIXELS.fetch_add(normalized.submitted_pixels, Ordering::AcqRel);
+    if normalized.collapsed {
+        DAMAGE_COLLAPSES.fetch_add(1, Ordering::AcqRel);
     }
     let page_flip = PAGE_FLIP_AVAILABLE.load(Ordering::Acquire);
     if vsync && page_flip && !wait_for_vertical_retrace() {
         VBLANK_TIMEOUTS.fetch_add(1, Ordering::AcqRel);
     }
-    if page_flip {
+    let visible = if page_flip {
         let height = current_mode().height() as u16;
         let prior_front = FRONT_Y.load(Ordering::Acquire);
         let next_front = DRAW_Y.load(Ordering::Acquire);
@@ -559,10 +770,9 @@ pub fn present_damage(vsync: bool, damage: &[DamageRegion]) {
             FRONT_Y.store(next_front, Ordering::Release);
             let next_draw = if next_front == 0 { height } else { 0 };
             DRAW_Y.store(next_draw, Ordering::Release);
-            for region in damage {
-                copy_region(next_front, next_draw, *region);
-            }
+            copy_damage(next_front, next_draw, &normalized);
             FRONT_CONTENT_VISIBLE.store(true, Ordering::Release);
+            true
         } else {
             // Some VBE implementations accept a two-page virtual mode but do
             // not honor later Y-offset flips. Preserve the completed frame by
@@ -570,9 +780,7 @@ pub fn present_damage(vsync: bool, damage: &[DamageRegion]) {
             // rejected flip, then remain in direct-to-front rendering mode.
             PAGE_FLIP_FAILURES.fetch_add(1, Ordering::AcqRel);
             if next_front != prior_front {
-                for region in damage {
-                    copy_region(next_front, prior_front, *region);
-                }
+                copy_damage(next_front, prior_front, &normalized);
             }
             write(INDEX_Y_OFFSET, prior_front);
             let recovered_y_offset = read(INDEX_Y_OFFSET);
@@ -589,16 +797,19 @@ pub fn present_damage(vsync: bool, damage: &[DamageRegion]) {
                 recovered_y_offset,
                 visible
             );
+            visible
         }
     } else {
         let hardware_y_offset = read(INDEX_Y_OFFSET);
         HARDWARE_Y_OFFSET.store(hardware_y_offset, Ordering::Release);
-        FRONT_CONTENT_VISIBLE.store(
-            hardware_y_offset == FRONT_Y.load(Ordering::Acquire),
-            Ordering::Release,
-        );
+        let visible = hardware_y_offset == FRONT_Y.load(Ordering::Acquire);
+        FRONT_CONTENT_VISIBLE.store(visible, Ordering::Release);
+        visible
+    };
+    if visible {
+        PRESENTED_FRAMES.fetch_add(1, Ordering::AcqRel);
     }
-    PRESENTED_FRAMES.fetch_add(1, Ordering::AcqRel);
+    visible
 }
 
 pub fn clear(value: u32) {
@@ -713,12 +924,16 @@ unsafe fn copy_dwords(source: *const u32, destination: *mut u32, count: usize) {
     }
 }
 
-fn copy_region(source_y: u16, target_y: u16, region: DamageRegion) {
-    let mode_width = width() as i32;
-    let mode_height = height() as i32;
-    let Some(clipped) = clip_region(region, mode_width, mode_height) else {
-        return;
-    };
+fn copy_damage(source_y: u16, target_y: u16, damage: &NormalizedDamage) {
+    debug_assert_ne!(source_y, target_y);
+    for region in &damage.regions[..damage.len] {
+        copy_clipped_region(source_y, target_y, *region);
+    }
+    COPIED_DAMAGE_REGIONS.fetch_add(damage.copied_regions(), Ordering::AcqRel);
+    COPIED_DAMAGE_PIXELS.fetch_add(damage.copied_pixels(), Ordering::AcqRel);
+}
+
+fn copy_clipped_region(source_y: u16, target_y: u16, clipped: ClippedRegion) {
     let stride_pixels = stride_bytes() / BYTES_PER_PIXEL;
     let source = source_y as usize * stride_pixels;
     let target = target_y as usize * stride_pixels;
@@ -1268,6 +1483,235 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn damage_normalization_coalesces_overlapping_rectangles() {
+        let normalized = normalize_damage(
+            &[
+                DamageRegion::new(10, 20, 30, 10),
+                DamageRegion::new(25, 20, 30, 10),
+            ],
+            640,
+            480,
+        );
+        assert_eq!(normalized.submitted_regions, 2);
+        assert_eq!(normalized.submitted_pixels, 600);
+        assert_eq!(normalized.len, 1);
+        assert_eq!(
+            normalized.regions[0],
+            ClippedRegion {
+                left: 10,
+                top: 20,
+                right: 55,
+                bottom: 30,
+            }
+        );
+        assert_eq!(normalized.copied_regions(), 1);
+        assert_eq!(normalized.copied_pixels(), 450);
+        assert!(!normalized.collapsed);
+    }
+
+    #[test]
+    fn damage_normalization_merges_aligned_edges_without_expanding_corner_damage() {
+        let edge = normalize_damage(
+            &[
+                DamageRegion::new(0, 0, 10, 10),
+                DamageRegion::new(10, 0, 5, 10),
+            ],
+            640,
+            480,
+        );
+        assert_eq!(edge.len, 1);
+        assert_eq!(edge.copied_pixels(), 150);
+
+        let corner = normalize_damage(
+            &[
+                DamageRegion::new(0, 0, 10, 10),
+                DamageRegion::new(10, 10, 5, 5),
+            ],
+            640,
+            480,
+        );
+        assert_eq!(corner.len, 2);
+        assert_eq!(corner.copied_pixels(), 125);
+        assert_eq!(
+            corner.regions[0],
+            ClippedRegion {
+                left: 0,
+                top: 0,
+                right: 10,
+                bottom: 10,
+            }
+        );
+        assert_eq!(
+            corner.regions[1],
+            ClippedRegion {
+                left: 10,
+                top: 10,
+                right: 15,
+                bottom: 15,
+            }
+        );
+    }
+
+    #[test]
+    fn damage_normalization_does_not_turn_crossed_lines_into_a_full_screen_copy() {
+        let normalized = normalize_damage(
+            &[
+                DamageRegion::new(0, 100, 640, 1),
+                DamageRegion::new(320, 0, 1, 480),
+            ],
+            640,
+            480,
+        );
+
+        assert_eq!(normalized.len, 2);
+        assert_eq!(normalized.submitted_pixels, 1_120);
+        assert_eq!(normalized.copied_pixels(), 1_120);
+        assert!(!normalized.regions[0].can_merge_without_extra_copy(normalized.regions[1]));
+    }
+
+    #[test]
+    fn damage_normalization_restarts_until_transitive_merges_finish() {
+        let normalized = normalize_damage(
+            &[
+                DamageRegion::new(0, 5, 10, 10),
+                DamageRegion::new(20, 5, 10, 10),
+                DamageRegion::new(10, 5, 10, 10),
+            ],
+            640,
+            480,
+        );
+        assert_eq!(normalized.len, 1);
+        assert_eq!(
+            normalized.regions[0],
+            ClippedRegion {
+                left: 0,
+                top: 5,
+                right: 30,
+                bottom: 15,
+            }
+        );
+        assert_eq!(normalized.submitted_pixels, 300);
+        assert_eq!(normalized.copied_pixels(), 300);
+    }
+
+    #[test]
+    fn damage_normalization_clips_before_merging_and_ignores_empty_entries() {
+        let normalized = normalize_damage(
+            &[
+                DamageRegion::new(-5, 4, 10, 6),
+                DamageRegion::new(5, 4, 8, 6),
+                DamageRegion::new(700, 20, 10, 10),
+                DamageRegion::new(1, 1, 0, 8),
+            ],
+            640,
+            480,
+        );
+        assert_eq!(normalized.submitted_regions, 4);
+        assert_eq!(normalized.submitted_pixels, 78);
+        assert_eq!(normalized.len, 1);
+        assert_eq!(
+            normalized.regions[0],
+            ClippedRegion {
+                left: 0,
+                top: 4,
+                right: 13,
+                bottom: 10,
+            }
+        );
+        assert_eq!(normalized.copied_pixels(), 78);
+    }
+
+    #[test]
+    fn damage_normalization_preserves_separated_regions() {
+        let normalized = normalize_damage(
+            &[
+                DamageRegion::new(5, 5, 10, 10),
+                DamageRegion::new(30, 40, 5, 7),
+                DamageRegion::new(100, 100, -1, 4),
+            ],
+            640,
+            480,
+        );
+        assert_eq!(normalized.submitted_regions, 3);
+        assert_eq!(normalized.submitted_pixels, 135);
+        assert_eq!(normalized.len, 2);
+        assert_eq!(normalized.copied_regions(), 2);
+        assert_eq!(normalized.copied_pixels(), 135);
+        assert!(!normalized.regions[0].touches_or_overlaps(normalized.regions[1]));
+    }
+
+    #[test]
+    fn damage_normalization_is_empty_when_nothing_is_visible() {
+        let normalized = normalize_damage(
+            &[
+                DamageRegion::new(-20, -20, 5, 5),
+                DamageRegion::new(10, 10, 0, 20),
+            ],
+            640,
+            480,
+        );
+        assert_eq!(normalized.submitted_regions, 2);
+        assert_eq!(normalized.submitted_pixels, 0);
+        assert_eq!(normalized.len, 0);
+        assert_eq!(normalized.copied_regions(), 0);
+        assert_eq!(normalized.copied_pixels(), 0);
+        assert!(!normalized.collapsed);
+    }
+
+    #[test]
+    fn damage_normalization_collapses_overflow_without_losing_later_damage() {
+        let mut damage = [DamageRegion::new(0, 0, 0, 0); MAX_DAMAGE_REGIONS + 2];
+        for (index, region) in damage[..MAX_DAMAGE_REGIONS + 1].iter_mut().enumerate() {
+            *region = DamageRegion::new((index * 3) as i32, 0, 1, 1);
+        }
+        damage[MAX_DAMAGE_REGIONS + 1] = DamageRegion::new(200, 20, 2, 2);
+
+        let normalized = normalize_damage(&damage, 640, 480);
+        assert_eq!(
+            normalized.submitted_regions,
+            (MAX_DAMAGE_REGIONS + 2) as u64
+        );
+        assert_eq!(
+            normalized.submitted_pixels,
+            (MAX_DAMAGE_REGIONS + 1) as u64 + 4
+        );
+        assert_eq!(normalized.len, 1);
+        assert!(normalized.collapsed);
+        assert_eq!(
+            normalized.regions[0],
+            ClippedRegion {
+                left: 0,
+                top: 0,
+                right: 202,
+                bottom: 22,
+            }
+        );
+        assert_eq!(normalized.copied_regions(), 1);
+        assert_eq!(normalized.copied_pixels(), 202 * 22);
+    }
+
+    #[test]
+    fn normalized_regions_leave_no_cost_effective_merge() {
+        let normalized = normalize_damage(
+            &[
+                DamageRegion::new(10, 10, 30, 4),
+                DamageRegion::new(20, 0, 4, 30),
+                DamageRegion::new(200, 200, 10, 10),
+                DamageRegion::new(205, 205, 20, 20),
+                DamageRegion::new(400, 300, 8, 8),
+            ],
+            640,
+            480,
+        );
+        for left in 0..normalized.len {
+            for right in left + 1..normalized.len {
+                assert!(!normalized.regions[left]
+                    .can_merge_without_extra_copy(normalized.regions[right]));
+            }
+        }
     }
 
     #[test]

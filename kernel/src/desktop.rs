@@ -174,6 +174,10 @@ fn timing_config(preferences: DesktopPreferences) -> TimingConfig {
     .expect("the kernel TSC clock must resolve every supported refresh rate")
 }
 
+const fn bypass_software_pacing(responsive: bool, damaged_commit: bool) -> bool {
+    responsive && damaged_commit
+}
+
 const HOME: &str = "<style>h1{color:#74bcc7}.card{background:#151c20;border:1px solid #35433f;padding:8px}button{color:#f0f2f0;background:#365c62;padding:6px}</style><title>Home</title><h1>ExpOS Web</h1><p id='status' class='card'>Starting the bounded web engine</p><button id='demo'>Try JavaScript</button><a href='hexa://about'>About</a><a href='hexa://packages'>Packages</a><a href='hexa://system'>System</a><script>document.title='ExpOS Home';document.getElementById('status').textContent='CSS and JavaScript are active';document.getElementById('demo').onclick=function(){document.getElementById('status').textContent='Button handled locally';}</script>";
 const ABOUT: &str = "<title>About</title><h1>Browser</h1><p>A bounded native HTML, CSS, and JavaScript document engine.</p><a href='hexa://home'>Home</a>";
 const BROWSER_PACKAGES: &str = "<title>Packages</title><h1>Packages</h1><li>Core tools</li><li>Display</li><li>Notes</li><li>Games</li><a href='hexa://home'>Home</a>";
@@ -287,7 +291,7 @@ impl AppKind {
     }
 }
 
-const SETTINGS_CATEGORY_COUNT: usize = 8;
+const SETTINGS_CATEGORY_COUNT: usize = 9;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsCategory {
@@ -296,6 +300,7 @@ enum SettingsCategory {
     Network,
     Bluetooth,
     Display,
+    Performance,
     Input,
     Privacy,
     About,
@@ -308,6 +313,7 @@ impl SettingsCategory {
         Self::Network,
         Self::Bluetooth,
         Self::Display,
+        Self::Performance,
         Self::Input,
         Self::Privacy,
         Self::About,
@@ -320,9 +326,10 @@ impl SettingsCategory {
             Self::Network => 2,
             Self::Bluetooth => 3,
             Self::Display => 4,
-            Self::Input => 5,
-            Self::Privacy => 6,
-            Self::About => 7,
+            Self::Performance => 5,
+            Self::Input => 6,
+            Self::Privacy => 7,
+            Self::About => 8,
         }
     }
 
@@ -333,6 +340,7 @@ impl SettingsCategory {
             Self::Network => "Network & Wi-Fi",
             Self::Bluetooth => "Bluetooth",
             Self::Display => "Display",
+            Self::Performance => "Performance",
             Self::Input => "Mouse & keyboard",
             Self::Privacy => "Privacy",
             Self::About => "About",
@@ -346,6 +354,7 @@ impl SettingsCategory {
             Self::Network => "Connections and network access",
             Self::Bluetooth => "Nearby wireless devices",
             Self::Display => "HexaDisplay output",
+            Self::Performance => "Rendering cost and responsiveness",
             Self::Input => "Pointer and keyboard",
             Self::Privacy => "Local data and access",
             Self::About => "ExpOS system information",
@@ -359,6 +368,7 @@ impl SettingsCategory {
             Self::Network => 4,
             Self::Bluetooth => 2,
             Self::Display => 6,
+            Self::Performance => 4,
             Self::Input => 4,
             Self::Privacy => 2,
             Self::About => 4,
@@ -682,6 +692,9 @@ struct DesktopPreferences {
     status_visible: bool,
     window_borders: bool,
     high_contrast: bool,
+    window_shadows: bool,
+    wallpaper_effects: bool,
+    responsive_presentation: bool,
     pointer_speed: u8,
     refresh_rate: state::RefreshRate,
     vsync: bool,
@@ -730,6 +743,14 @@ impl DesktopPreferences {
         }
     }
 
+    const fn presentation_policy_label(self) -> &'static str {
+        if self.responsive_presentation {
+            "Responsive"
+        } else {
+            "Efficient"
+        }
+    }
+
     fn from_persistent(value: state::PersistentPreferences) -> Self {
         let flags = value.flags;
         Self {
@@ -744,6 +765,9 @@ impl DesktopPreferences {
             status_visible: flags & state::PREF_STATUS_VISIBLE != 0,
             window_borders: flags & state::PREF_WINDOW_BORDERS != 0,
             high_contrast: flags & state::PREF_HIGH_CONTRAST != 0,
+            window_shadows: flags & state::PREF_WINDOW_SHADOWS != 0,
+            wallpaper_effects: flags & state::PREF_WALLPAPER_EFFECTS != 0,
+            responsive_presentation: flags & state::PREF_RESPONSIVE_PRESENTATION != 0,
             pointer_speed: value.pointer_speed.clamp(1, 3),
             refresh_rate: value.refresh_rate,
             vsync: value.vsync,
@@ -771,7 +795,10 @@ impl DesktopPreferences {
             | state::PREF_HIGH_CONTRAST
             | state::PREF_NETWORK_ENABLED
             | state::PREF_WIFI_ENABLED
-            | state::PREF_BLUETOOTH_ENABLED;
+            | state::PREF_BLUETOOTH_ENABLED
+            | state::PREF_WINDOW_SHADOWS
+            | state::PREF_WALLPAPER_EFFECTS
+            | state::PREF_RESPONSIVE_PRESENTATION;
         value.flags &= !desktop_flags;
         if self.pure_black_apps {
             value.flags |= state::PREF_PURE_BLACK_APPS;
@@ -790,6 +817,15 @@ impl DesktopPreferences {
         }
         if self.high_contrast {
             value.flags |= state::PREF_HIGH_CONTRAST;
+        }
+        if self.window_shadows {
+            value.flags |= state::PREF_WINDOW_SHADOWS;
+        }
+        if self.wallpaper_effects {
+            value.flags |= state::PREF_WALLPAPER_EFFECTS;
+        }
+        if self.responsive_presentation {
+            value.flags |= state::PREF_RESPONSIVE_PRESENTATION;
         }
         let connectivity = radio::snapshot();
         if connectivity.network_enabled {
@@ -847,6 +883,12 @@ struct DesktopState {
     dragging: Option<AppKind>,
     should_exit: bool,
     frame_pacer: FramePacer,
+    responsive_commits: u64,
+    full_frame_commits: u64,
+    damaged_frame_commits: u64,
+    frame_callbacks: u64,
+    pointer_packets_merged: u64,
+    deferred_presents: u64,
     full_redraw_requested: bool,
 }
 
@@ -1197,6 +1239,12 @@ impl DesktopState {
             dragging: None,
             should_exit: false,
             frame_pacer,
+            responsive_commits: 0,
+            full_frame_commits: 0,
+            damaged_frame_commits: 0,
+            frame_callbacks: 0,
+            pointer_packets_merged: 0,
+            deferred_presents: 0,
             full_redraw_requested: false,
         };
         state.terminal_push("ExpOS terminal");
@@ -1928,7 +1976,7 @@ impl DesktopState {
                 self.settings_row = (self.settings_row + 1)
                     .min(self.settings_category.row_count().saturating_sub(1));
             }
-            b'1'..=b'8' => {
+            b'1'..=b'9' => {
                 let index = (key - b'1') as usize;
                 self.select_settings_category(SettingsCategory::ALL[index]);
             }
@@ -2174,6 +2222,46 @@ impl DesktopState {
                 );
                 self.settings_notice = "Contrast rendering updated.";
             }
+            (SettingsCategory::Performance, 0) => {
+                self.full_redraw_requested = true;
+                self.preferences.window_shadows = !self.preferences.window_shadows;
+                slog!(
+                    "HEXA_SETTING_CHANGED key=window-shadows value={}\r\n",
+                    if self.preferences.window_shadows {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                );
+                self.settings_notice = "Window shadow rendering updated.";
+            }
+            (SettingsCategory::Performance, 1) => {
+                self.full_redraw_requested = true;
+                self.preferences.wallpaper_effects = !self.preferences.wallpaper_effects;
+                slog!(
+                    "HEXA_SETTING_CHANGED key=wallpaper-effects value={}\r\n",
+                    if self.preferences.wallpaper_effects {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                );
+                self.settings_notice = "Procedural wallpaper rendering updated.";
+            }
+            (SettingsCategory::Performance, 2) => {
+                self.preferences.responsive_presentation =
+                    !self.preferences.responsive_presentation;
+                self.frame_pacer.reset_phase(crate::hardware::timestamp());
+                slog!(
+                    "HEXA_SETTING_CHANGED key=presentation-policy value={}\r\n",
+                    self.preferences.presentation_policy_label()
+                );
+                self.settings_notice = if self.preferences.responsive_presentation {
+                    "Damaged commits now bypass software pacing."
+                } else {
+                    "All commits now follow the efficient software cadence."
+                };
+            }
             (SettingsCategory::Input, 0) => {
                 self.preferences.pointer_speed = if direction < 0 {
                     match self.preferences.pointer_speed {
@@ -2386,11 +2474,25 @@ impl DesktopState {
             " Hz",
         );
         self.terminal_push_parts(&["vsync: ", if self.preferences.vsync { "on" } else { "off" }]);
+        self.terminal_push_parts(&[
+            "presentation policy: ",
+            self.preferences.presentation_policy_label(),
+        ]);
         let pacing = self.frame_pacer.stats();
         let scanout = framebuffer::presentation_stats();
         self.terminal_push_number("frames presented: ", scanout.frames, "");
         self.terminal_push_number("pacing misses: ", pacing.missed_frames, "");
+        self.terminal_push_number("responsive damage commits: ", self.responsive_commits, "");
+        self.terminal_push_number("full-frame commits: ", self.full_frame_commits, "");
+        self.terminal_push_number("damaged commits: ", self.damaged_frame_commits, "");
+        self.terminal_push_number("surface callbacks: ", self.frame_callbacks, "");
+        self.terminal_push_number("pointer packets merged: ", self.pointer_packets_merged, "");
+        self.terminal_push_number("deferred presents: ", self.deferred_presents, "");
         self.terminal_push_number("vblank timeouts: ", scanout.vblank_timeouts, "");
+        self.terminal_push_number("damage regions submitted: ", scanout.submitted_regions, "");
+        self.terminal_push_number("damage regions copied: ", scanout.copied_regions, "");
+        self.terminal_push_number("damage pixels copied: ", scanout.copied_pixels, "");
+        self.terminal_push_number("damage collapses: ", scanout.damage_collapses, "");
     }
 
     fn terminal_print_network(&mut self) {
@@ -2465,6 +2567,22 @@ impl DesktopState {
         self.terminal_push_parts(&["wallpaper: ", self.preferences.wallpaper.label()]);
         self.terminal_push_parts(&["cursor: ", self.preferences.cursor.label()]);
         self.terminal_push_parts(&["accent: ", self.preferences.accent.label()]);
+        self.terminal_push_parts(&[
+            "wallpaper effects: ",
+            if self.preferences.wallpaper_effects {
+                "on"
+            } else {
+                "off"
+            },
+        ]);
+        self.terminal_push_parts(&[
+            "window shadows: ",
+            if self.preferences.window_shadows {
+                "on"
+            } else {
+                "off"
+            },
+        ]);
     }
 
     fn terminal_print_storage(&mut self) {
@@ -2689,6 +2807,13 @@ fn run_session(
         .frame_pacer
         .reset_phase(crate::hardware::timestamp());
     render(&mut desktop);
+    if desktop.should_exit {
+        slog!("HEXA_DISPLAY_SESSION_ABORTED reason=scanout-not-visible\r\n");
+        framebuffer::exit();
+        crate::clear_console();
+        crate::println!("HexaDisplay could not confirm scanout; command environment restored.");
+        return;
+    }
     slog!("HEXA_DISPLAY_READY surfaces=11 commit=11\r\n");
     if start_app.is_none() {
         slog!("HEXA_DESKTOP_EMPTY open_apps=0 pinned_apps=0\r\n");
@@ -2710,6 +2835,12 @@ fn run_session(
         clock.tsc_hz,
         clock.source.label()
     );
+    slog!(
+        "HEXA_RENDER_POLICY mode={} damage=true shadows={} wallpaper_effects={}\r\n",
+        desktop.preferences.presentation_policy_label(),
+        desktop.preferences.window_shadows,
+        desktop.preferences.wallpaper_effects
+    );
 
     while !desktop.should_exit {
         let Some(event) = input.poll_event() else {
@@ -2725,8 +2856,12 @@ fn run_session(
             core::hint::spin_loop();
             continue;
         };
-        let InputEvent::Key(key) = event else {
-            if let InputEvent::Pointer(pointer) = event {
+        let key = match event {
+            InputEvent::Key(key) => key,
+            InputEvent::Pointer(pointer) => {
+                let (pointer, merged) = input.coalesce_pointer_motion(pointer);
+                desktop.pointer_packets_merged =
+                    desktop.pointer_packets_merged.saturating_add(merged as u64);
                 match desktop.handle_pointer(pointer) {
                     PointerRender::None => {}
                     PointerRender::Cursor(damage) => {
@@ -2734,8 +2869,8 @@ fn run_session(
                     }
                     PointerRender::Full => render(&mut desktop),
                 }
+                continue;
             }
-            continue;
         };
         desktop.route_key(key);
 
@@ -2862,11 +2997,25 @@ fn run_session(
     let pacing = desktop.frame_pacer.stats();
     let presentation = framebuffer::presentation_stats();
     slog!(
-        "HEXA_PRESENTATION_STATS frames={} missed={} idle={} vblank_timeouts={}\r\n",
+        "HEXA_PRESENTATION_STATS frames={} missed={} idle={} vblank_timeouts={} responsive_commits={}\r\n",
         presentation.frames,
         pacing.missed_frames,
         pacing.idle_frames,
-        presentation.vblank_timeouts
+        presentation.vblank_timeouts,
+        desktop.responsive_commits
+    );
+    slog!(
+        "HEXA_RENDER_STATS full={} damaged={} callbacks={} surface_frames={} pointer_merged={} submitted_regions={} copied_regions={} copied_pixels={} collapses={} deferred={}\r\n",
+        desktop.full_frame_commits,
+        desktop.damaged_frame_commits,
+        desktop.frame_callbacks,
+        desktop.server.frame_sequence(),
+        desktop.pointer_packets_merged,
+        presentation.submitted_regions,
+        presentation.copied_regions,
+        presentation.copied_pixels,
+        presentation.damage_collapses,
+        desktop.deferred_presents
     );
     framebuffer::exit();
     crate::clear_console();
@@ -2999,6 +3148,10 @@ fn draw_wallpaper(preferences: DesktopPreferences) {
     let width = framebuffer::width() as i32;
     let height = framebuffer::height() as i32;
     let base = preferences.backdrop.color();
+    if !preferences.wallpaper_effects {
+        framebuffer::clear(base);
+        return;
+    }
     match preferences.wallpaper {
         WallpaperChoice::Solid => framebuffer::clear(base),
         WallpaperChoice::Gradient => {
@@ -3102,7 +3255,6 @@ fn render(desktop: &mut DesktopState) {
         draw_launcher(desktop);
     }
     desktop.cursor.draw();
-    desktop.drain_protocol_events();
     present_frame(desktop);
 }
 
@@ -3129,21 +3281,44 @@ fn render_active_window(desktop: &mut DesktopState) {
         draw_app(desktop, desktop.active, true, false);
     }
     desktop.cursor.draw();
-    desktop.drain_protocol_events();
     present_frame_damage(desktop, &damage[..damage_count]);
 }
 
 fn present_frame(desktop: &mut DesktopState) {
-    pace_frame(desktop);
-    framebuffer::present(desktop.preferences.vsync);
+    pace_frame(desktop, false);
+    let visible = framebuffer::present(desktop.preferences.vsync);
+    desktop.full_frame_commits = desktop.full_frame_commits.saturating_add(1);
+    complete_visible_frame(desktop, visible);
+    desktop.drain_protocol_events();
 }
 
 fn present_frame_damage(desktop: &mut DesktopState, damage: &[framebuffer::DamageRegion]) {
-    pace_frame(desktop);
-    framebuffer::present_damage(desktop.preferences.vsync, damage);
+    pace_frame(desktop, true);
+    let visible = framebuffer::present_damage(desktop.preferences.vsync, damage);
+    desktop.damaged_frame_commits = desktop.damaged_frame_commits.saturating_add(1);
+    complete_visible_frame(desktop, visible);
+    desktop.drain_protocol_events();
 }
 
-fn pace_frame(desktop: &mut DesktopState) {
+fn complete_visible_frame(desktop: &mut DesktopState, visible: bool) {
+    if visible {
+        desktop.frame_callbacks = desktop
+            .frame_callbacks
+            .saturating_add(desktop.server.complete_frame() as u64);
+    } else {
+        desktop.deferred_presents = desktop.deferred_presents.saturating_add(1);
+        desktop.should_exit = true;
+        slog!("HEXA_FRAME_DEFERRED reason=scanout-not-visible\r\n");
+    }
+}
+
+fn pace_frame(desktop: &mut DesktopState, damaged_commit: bool) {
+    if bypass_software_pacing(desktop.preferences.responsive_presentation, damaged_commit) {
+        let now = crate::hardware::timestamp();
+        desktop.frame_pacer.reset_phase(now);
+        desktop.responsive_commits = desktop.responsive_commits.saturating_add(1);
+        return;
+    }
     loop {
         let now = crate::hardware::timestamp();
         match desktop.frame_pacer.decide(now, true) {
@@ -3207,7 +3382,7 @@ fn draw_window(
     let y = rect.y as i32;
     let width = rect.width as i32;
     let height = rect.height as i32;
-    if draw_shadow && width > 24 && height > 24 {
+    if draw_shadow && preferences.window_shadows && width > 24 && height > 24 {
         framebuffer::alpha_rect(x + 8, y + 10, width, height, 0x0000_0000, 105);
     }
     if preferences.rounded_controls {
@@ -4139,6 +4314,66 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 },
             );
         }
+        SettingsCategory::Performance => {
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                0,
+                "Window shadows",
+                "Blend a soft offset behind windows during full repaints",
+                if desktop.preferences.window_shadows {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.window_shadows,
+                    available: true,
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                1,
+                "Wallpaper effects",
+                "Render the selected procedural wallpaper instead of a solid fill",
+                if desktop.preferences.wallpaper_effects {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.wallpaper_effects,
+                    available: true,
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                2,
+                "Presentation policy",
+                "Efficient pacing or lower-latency damaged commits",
+                desktop.preferences.presentation_policy_label(),
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                3,
+                "Damage tracking",
+                "Repaint only changed regions for cursors and active windows",
+                "Active",
+                SettingControl::Status { ready: true },
+            );
+        }
         SettingsCategory::Input => {
             settings_row(
                 desktop,
@@ -4798,6 +5033,39 @@ fn draw_number(x: i32, y: i32, mut value: u64, color: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn performance_settings_are_conservative_and_have_a_dedicated_category() {
+        let preferences = DesktopPreferences::from_persistent(state::PersistentPreferences::new());
+        assert!(!preferences.window_shadows);
+        assert!(!preferences.wallpaper_effects);
+        assert!(!preferences.responsive_presentation);
+        assert_eq!(preferences.presentation_policy_label(), "Efficient");
+        assert_eq!(SettingsCategory::ALL.len(), 9);
+        assert_eq!(SettingsCategory::Performance.index(), 5);
+        assert_eq!(SettingsCategory::Performance.row_count(), 4);
+    }
+
+    #[test]
+    fn persisted_performance_flags_enable_real_rendering_policies() {
+        let mut persistent = state::PersistentPreferences::new();
+        persistent.flags |= state::PREF_WINDOW_SHADOWS
+            | state::PREF_WALLPAPER_EFFECTS
+            | state::PREF_RESPONSIVE_PRESENTATION;
+        let preferences = DesktopPreferences::from_persistent(persistent);
+        assert!(preferences.window_shadows);
+        assert!(preferences.wallpaper_effects);
+        assert!(preferences.responsive_presentation);
+        assert_eq!(preferences.presentation_policy_label(), "Responsive");
+    }
+
+    #[test]
+    fn responsive_policy_bypasses_only_damaged_commit_pacing() {
+        assert!(!bypass_software_pacing(false, false));
+        assert!(!bypass_software_pacing(false, true));
+        assert!(!bypass_software_pacing(true, false));
+        assert!(bypass_software_pacing(true, true));
+    }
 
     #[test]
     fn search_url_uses_duckduckgo_html_and_percent_encoding() {
