@@ -2,6 +2,9 @@
 guest
 guest
 whoami
+sysctl kern.event.batch=8
+kqueue add signal 1
+rlimit set scratch-pages 1 2
 mkform Forbidden data
 safevideo
 displayreset

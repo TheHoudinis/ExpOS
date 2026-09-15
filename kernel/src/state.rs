@@ -52,6 +52,105 @@ const PREFERENCES_RESERVED_OFFSET: usize = 14;
 const VSYNC_DISABLED_ID: u8 = 0;
 const VSYNC_ENABLED_ID: u8 = 1;
 
+// The remaining 18 bytes in the preference record carry a tagged, compact
+// customization extension. Keeping it inside the old reservation preserves
+// the EXPOST03 slot format and lets older disks load without migration.
+const CUSTOMIZATION_TAG: [u8; 3] = *b"CX1";
+const CUSTOMIZATION_TAG_OFFSET: usize = PREFERENCES_RESERVED_OFFSET;
+const CUSTOMIZATION_DATA_OFFSET: usize = CUSTOMIZATION_TAG_OFFSET + CUSTOMIZATION_TAG.len();
+const FONT_FACE_OFFSET: usize = CUSTOMIZATION_DATA_OFFSET;
+const FONT_WEIGHT_OFFSET: usize = CUSTOMIZATION_DATA_OFFSET + 1;
+const WINDOW_CORNER_RADIUS_OFFSET: usize = CUSTOMIZATION_DATA_OFFSET + 2;
+const WINDOW_BORDER_WIDTH_OFFSET: usize = CUSTOMIZATION_DATA_OFFSET + 3;
+const TITLEBAR_DENSITY_OFFSET: usize = CUSTOMIZATION_DATA_OFFSET + 4;
+const WINDOW_LAYOUT_OFFSET: usize = CUSTOMIZATION_DATA_OFFSET + 5;
+const TASKBAR_SIZE_OFFSET: usize = CUSTOMIZATION_DATA_OFFSET + 6;
+const WINDOW_OFFSCREEN_ALLOWANCE_OFFSET: usize = CUSTOMIZATION_DATA_OFFSET + 7;
+const WINDOW_SNAP_DISTANCE_OFFSET: usize = CUSTOMIZATION_DATA_OFFSET + 8;
+const MENU_DENSITY_OFFSET: usize = CUSTOMIZATION_DATA_OFFSET + 9;
+const ANIMATION_LEVEL_OFFSET: usize = CUSTOMIZATION_DATA_OFFSET + 10;
+const UI_SCALE_OFFSET: usize = CUSTOMIZATION_DATA_OFFSET + 11;
+const SCROLL_SPEED_OFFSET: usize = CUSTOMIZATION_DATA_OFFSET + 12;
+const CUSTOMIZATION_FLAGS_OFFSET: usize = CUSTOMIZATION_DATA_OFFSET + 13;
+const WINDOW_OPACITY_OFFSET: usize = CUSTOMIZATION_DATA_OFFSET + 14;
+
+const TASKBAR_PLACEMENT_SHIFT: u8 = 0;
+const TASKBAR_ALIGNMENT_SHIFT: u8 = 2;
+const FOCUS_POLICY_SHIFT: u8 = 4;
+const TWO_BIT_FIELD_MASK: u8 = 0b11;
+
+const CUSTOM_TASKBAR_AUTOHIDE: u8 = 1 << 0;
+const CUSTOM_TASKBAR_TRANSLUCENT: u8 = 1 << 1;
+const CUSTOM_TASKBAR_LABELS: u8 = 1 << 2;
+const CUSTOM_CLOCK_SECONDS: u8 = 1 << 3;
+const CUSTOM_WINDOW_SNAP: u8 = 1 << 4;
+const CUSTOM_TOOLTIPS: u8 = 1 << 5;
+const CUSTOM_CURSOR_SHADOW: u8 = 1 << 6;
+const CUSTOM_NOTIFICATION_ANIMATIONS: u8 = 1 << 7;
+
+/// Concrete values for every numeric customization ID. Indexes are stable
+/// persisted IDs and must not be reordered after release. The baseline lives
+/// at index zero except for regular font weight, whose framebuffer wire ID is
+/// intentionally one.
+pub const FONT_FACE_NAMES: [&str; 5] = ["System", "Rounded", "Serif", "Compact", "Slanted"];
+pub const FONT_WEIGHT_NAMES: [&str; 3] = ["Light", "Regular", "Bold"];
+pub const WINDOW_CORNER_RADII_PX: [u8; 9] = [0, 2, 4, 6, 8, 10, 12, 16, 20];
+pub const WINDOW_BORDER_WIDTHS_PX: [u8; 7] = [0, 1, 2, 3, 4, 6, 8];
+pub const TITLEBAR_HEIGHTS_PX: [u8; 5] = [24, 28, 32, 36, 40];
+pub const TASKBAR_PLACEMENT_NAMES: [&str; 4] = ["Bottom", "Top", "Left", "Right"];
+pub const TASKBAR_SIZES_PX: [u8; 9] = [28, 32, 36, 40, 44, 48, 52, 60, 72];
+pub const TASKBAR_ALIGNMENT_NAMES: [&str; 3] = ["Start", "Center", "End"];
+pub const WINDOW_OFFSCREEN_ALLOWANCES_PX: [u16; 9] = [0, 8, 16, 32, 64, 96, 128, 192, 256];
+pub const WINDOW_SNAP_DISTANCES_PX: [u8; 9] = [0, 4, 8, 12, 16, 24, 32, 48, 64];
+pub const MENU_ROW_HEIGHTS_PX: [u8; 5] = [20, 24, 28, 32, 38];
+pub const ANIMATION_DURATIONS_MS: [u16; 5] = [0, 80, 120, 180, 260];
+pub const UI_SCALE_PERCENT: [u16; 7] = [100, 80, 90, 110, 125, 150, 200];
+pub const SCROLL_STEPS: [u8; 7] = [3, 1, 2, 4, 6, 8, 12];
+pub const FOCUS_POLICY_NAMES: [&str; 3] = ["Click", "Sloppy", "Pointer"];
+pub const WINDOW_OPACITY_ALPHA: [u8; 6] = [255, 244, 232, 216, 192, 160];
+
+/// Number of stable values accepted for each persisted customization control.
+pub const FONT_FACE_CHOICES: u8 = FONT_FACE_NAMES.len() as u8;
+pub const FONT_WEIGHT_CHOICES: u8 = FONT_WEIGHT_NAMES.len() as u8;
+/// Persisted weight ID used by a new or pre-extension state record.
+pub const DEFAULT_FONT_WEIGHT: u8 = 1;
+pub const WINDOW_CORNER_RADIUS_CHOICES: u8 = WINDOW_CORNER_RADII_PX.len() as u8;
+pub const WINDOW_BORDER_WIDTH_CHOICES: u8 = WINDOW_BORDER_WIDTHS_PX.len() as u8;
+pub const TITLEBAR_DENSITY_CHOICES: u8 = TITLEBAR_HEIGHTS_PX.len() as u8;
+pub const TASKBAR_PLACEMENT_CHOICES: u8 = TASKBAR_PLACEMENT_NAMES.len() as u8;
+pub const TASKBAR_SIZE_CHOICES: u8 = TASKBAR_SIZES_PX.len() as u8;
+pub const TASKBAR_ALIGNMENT_CHOICES: u8 = TASKBAR_ALIGNMENT_NAMES.len() as u8;
+pub const WINDOW_OFFSCREEN_ALLOWANCE_CHOICES: u8 = WINDOW_OFFSCREEN_ALLOWANCES_PX.len() as u8;
+pub const WINDOW_SNAP_DISTANCE_CHOICES: u8 = WINDOW_SNAP_DISTANCES_PX.len() as u8;
+pub const MENU_DENSITY_CHOICES: u8 = MENU_ROW_HEIGHTS_PX.len() as u8;
+pub const ANIMATION_LEVEL_CHOICES: u8 = ANIMATION_DURATIONS_MS.len() as u8;
+pub const UI_SCALE_CHOICES: u8 = UI_SCALE_PERCENT.len() as u8;
+pub const SCROLL_SPEED_CHOICES: u8 = SCROLL_STEPS.len() as u8;
+pub const FOCUS_POLICY_CHOICES: u8 = FOCUS_POLICY_NAMES.len() as u8;
+pub const WINDOW_OPACITY_CHOICES: u8 = WINDOW_OPACITY_ALPHA.len() as u8;
+pub const CUSTOMIZATION_BOOLEAN_CONTROLS: usize = 8;
+
+/// Total number of distinct selectable values represented by the customization
+/// extension. This counts each value of a selector and both states of every
+/// boolean control; it deliberately excludes the older display/theme fields.
+pub const CUSTOMIZATION_SELECTABLE_VALUES: usize = FONT_FACE_CHOICES as usize
+    + FONT_WEIGHT_CHOICES as usize
+    + WINDOW_CORNER_RADIUS_CHOICES as usize
+    + WINDOW_BORDER_WIDTH_CHOICES as usize
+    + TITLEBAR_DENSITY_CHOICES as usize
+    + TASKBAR_PLACEMENT_CHOICES as usize
+    + TASKBAR_SIZE_CHOICES as usize
+    + TASKBAR_ALIGNMENT_CHOICES as usize
+    + WINDOW_OFFSCREEN_ALLOWANCE_CHOICES as usize
+    + WINDOW_SNAP_DISTANCE_CHOICES as usize
+    + MENU_DENSITY_CHOICES as usize
+    + ANIMATION_LEVEL_CHOICES as usize
+    + UI_SCALE_CHOICES as usize
+    + SCROLL_SPEED_CHOICES as usize
+    + FOCUS_POLICY_CHOICES as usize
+    + WINDOW_OPACITY_CHOICES as usize
+    + CUSTOMIZATION_BOOLEAN_CONTROLS * 2;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StateError {
     Unavailable,
@@ -122,7 +221,40 @@ pub struct PersistentPreferences {
     pub flags: u16,
     pub refresh_rate: RefreshRate,
     pub vsync: bool,
-    pub reserved: [u8; 18],
+    /// Stable face ID. Zero is the normal built-in face.
+    pub font_face: u8,
+    /// Stable weight ID: 0=Light, 1=Regular, 2=Bold.
+    pub font_weight: u8,
+    /// Window decoration geometry IDs; zero selects the cheapest square/thin
+    /// baseline in each case.
+    pub window_corner_radius: u8,
+    pub window_border_width: u8,
+    pub titlebar_density: u8,
+    /// 0=bottom, 1=top, 2=left, 3=right.
+    pub taskbar_placement: u8,
+    pub taskbar_size: u8,
+    /// 0=start, 1=center, 2=end.
+    pub taskbar_alignment: u8,
+    pub taskbar_autohide: bool,
+    pub taskbar_translucent: bool,
+    pub taskbar_labels: bool,
+    pub clock_seconds: bool,
+    /// How far a movable window may extend beyond a display edge.
+    pub window_offscreen_allowance: u8,
+    pub window_snap_distance: u8,
+    pub window_snap: bool,
+    pub menu_density: u8,
+    /// Zero disables animation; higher IDs progressively add motion.
+    pub animation_level: u8,
+    pub ui_scale: u8,
+    pub scroll_speed: u8,
+    /// 0=click, 1=sloppy, 2=focus-follows-pointer.
+    pub focus_policy: u8,
+    /// Zero is opaque; higher IDs opt into increasing translucency.
+    pub window_opacity: u8,
+    pub tooltips: bool,
+    pub cursor_shadow: bool,
+    pub notification_animations: bool,
 }
 
 impl PersistentPreferences {
@@ -139,11 +271,33 @@ impl PersistentPreferences {
                 | PREF_ROUNDED_CONTROLS
                 | PREF_TASKBAR_VISIBLE
                 | PREF_STATUS_VISIBLE
-                | PREF_WINDOW_BORDERS
                 | PREF_NETWORK_ENABLED,
             refresh_rate: RefreshRate::DEFAULT,
             vsync: true,
-            reserved: [0; 18],
+            font_face: 0,
+            font_weight: DEFAULT_FONT_WEIGHT,
+            window_corner_radius: 0,
+            window_border_width: 0,
+            titlebar_density: 0,
+            taskbar_placement: 0,
+            taskbar_size: 0,
+            taskbar_alignment: 0,
+            taskbar_autohide: false,
+            taskbar_translucent: false,
+            taskbar_labels: false,
+            clock_seconds: false,
+            window_offscreen_allowance: 0,
+            window_snap_distance: 0,
+            window_snap: false,
+            menu_density: 0,
+            animation_level: 0,
+            ui_scale: 0,
+            scroll_speed: 0,
+            focus_policy: 0,
+            window_opacity: 0,
+            tooltips: false,
+            cursor_shadow: false,
+            notification_animations: false,
         }
     }
 }
@@ -339,6 +493,35 @@ pub fn print_diagnostics() {
             "efficient"
         }
     );
+    println!(
+        "customization: face={} weight={} corners={} border={} titlebar={} opacity={}",
+        preferences.font_face,
+        preferences.font_weight,
+        preferences.window_corner_radius,
+        preferences.window_border_width,
+        preferences.titlebar_density,
+        preferences.window_opacity
+    );
+    println!(
+        "taskbar: placement={} size={} alignment={} autohide={} translucent={} labels={}",
+        preferences.taskbar_placement,
+        preferences.taskbar_size,
+        preferences.taskbar_alignment,
+        preferences.taskbar_autohide,
+        preferences.taskbar_translucent,
+        preferences.taskbar_labels
+    );
+    println!(
+        "interaction: offscreen={} snap={} snap-distance={} menu={} animation={} scale={} scroll={} focus={}",
+        preferences.window_offscreen_allowance,
+        preferences.window_snap,
+        preferences.window_snap_distance,
+        preferences.menu_density,
+        preferences.animation_level,
+        preferences.ui_scale,
+        preferences.scroll_speed,
+        preferences.focus_policy
+    );
 }
 
 pub fn save_preferences(preferences: PersistentPreferences) -> Result<(), StateError> {
@@ -513,7 +696,25 @@ fn encode_preferences(value: PersistentPreferences, output: &mut [u8]) {
     } else {
         VSYNC_DISABLED_ID
     };
-    output[PREFERENCES_RESERVED_OFFSET..32].copy_from_slice(&value.reserved);
+    output[CUSTOMIZATION_TAG_OFFSET..CUSTOMIZATION_DATA_OFFSET].copy_from_slice(&CUSTOMIZATION_TAG);
+    output[FONT_FACE_OFFSET] = value.font_face;
+    output[FONT_WEIGHT_OFFSET] = value.font_weight;
+    output[WINDOW_CORNER_RADIUS_OFFSET] = value.window_corner_radius;
+    output[WINDOW_BORDER_WIDTH_OFFSET] = value.window_border_width;
+    output[TITLEBAR_DENSITY_OFFSET] = value.titlebar_density;
+    output[WINDOW_LAYOUT_OFFSET] = ((value.taskbar_placement & TWO_BIT_FIELD_MASK)
+        << TASKBAR_PLACEMENT_SHIFT)
+        | ((value.taskbar_alignment & TWO_BIT_FIELD_MASK) << TASKBAR_ALIGNMENT_SHIFT)
+        | ((value.focus_policy & TWO_BIT_FIELD_MASK) << FOCUS_POLICY_SHIFT);
+    output[TASKBAR_SIZE_OFFSET] = value.taskbar_size;
+    output[WINDOW_OFFSCREEN_ALLOWANCE_OFFSET] = value.window_offscreen_allowance;
+    output[WINDOW_SNAP_DISTANCE_OFFSET] = value.window_snap_distance;
+    output[MENU_DENSITY_OFFSET] = value.menu_density;
+    output[ANIMATION_LEVEL_OFFSET] = value.animation_level;
+    output[UI_SCALE_OFFSET] = value.ui_scale;
+    output[SCROLL_SPEED_OFFSET] = value.scroll_speed;
+    output[CUSTOMIZATION_FLAGS_OFFSET] = customization_flags(value);
+    output[WINDOW_OPACITY_OFFSET] = value.window_opacity;
 }
 
 fn decode_preferences(input: &[u8]) -> PersistentPreferences {
@@ -533,6 +734,19 @@ fn decode_preferences(input: &[u8]) -> PersistentPreferences {
     } else {
         true
     };
+    let defaults = PersistentPreferences::new();
+    let has_customization =
+        input[CUSTOMIZATION_TAG_OFFSET..CUSTOMIZATION_DATA_OFFSET] == CUSTOMIZATION_TAG;
+    let window_layout = if has_customization {
+        input[WINDOW_LAYOUT_OFFSET]
+    } else {
+        0
+    };
+    let customization_flags = if has_customization {
+        input[CUSTOMIZATION_FLAGS_OFFSET]
+    } else {
+        0
+    };
     sanitize_preferences(PersistentPreferences {
         display_mode: input[0],
         theme: input[1],
@@ -544,12 +758,128 @@ fn decode_preferences(input: &[u8]) -> PersistentPreferences {
         flags: u16::from_le_bytes([input[7], input[8]]),
         refresh_rate,
         vsync,
-        reserved: {
-            let mut reserved = [0_u8; 18];
-            reserved.copy_from_slice(&input[PREFERENCES_RESERVED_OFFSET..32]);
-            reserved
-        },
+        font_face: customization_value(
+            input,
+            has_customization,
+            FONT_FACE_OFFSET,
+            defaults.font_face,
+        ),
+        font_weight: customization_value(
+            input,
+            has_customization,
+            FONT_WEIGHT_OFFSET,
+            defaults.font_weight,
+        ),
+        window_corner_radius: customization_value(
+            input,
+            has_customization,
+            WINDOW_CORNER_RADIUS_OFFSET,
+            defaults.window_corner_radius,
+        ),
+        window_border_width: customization_value(
+            input,
+            has_customization,
+            WINDOW_BORDER_WIDTH_OFFSET,
+            defaults.window_border_width,
+        ),
+        titlebar_density: customization_value(
+            input,
+            has_customization,
+            TITLEBAR_DENSITY_OFFSET,
+            defaults.titlebar_density,
+        ),
+        taskbar_placement: (window_layout >> TASKBAR_PLACEMENT_SHIFT) & TWO_BIT_FIELD_MASK,
+        taskbar_size: customization_value(
+            input,
+            has_customization,
+            TASKBAR_SIZE_OFFSET,
+            defaults.taskbar_size,
+        ),
+        taskbar_alignment: (window_layout >> TASKBAR_ALIGNMENT_SHIFT) & TWO_BIT_FIELD_MASK,
+        taskbar_autohide: customization_flags & CUSTOM_TASKBAR_AUTOHIDE != 0,
+        taskbar_translucent: customization_flags & CUSTOM_TASKBAR_TRANSLUCENT != 0,
+        taskbar_labels: customization_flags & CUSTOM_TASKBAR_LABELS != 0,
+        clock_seconds: customization_flags & CUSTOM_CLOCK_SECONDS != 0,
+        window_offscreen_allowance: customization_value(
+            input,
+            has_customization,
+            WINDOW_OFFSCREEN_ALLOWANCE_OFFSET,
+            defaults.window_offscreen_allowance,
+        ),
+        window_snap_distance: customization_value(
+            input,
+            has_customization,
+            WINDOW_SNAP_DISTANCE_OFFSET,
+            defaults.window_snap_distance,
+        ),
+        window_snap: customization_flags & CUSTOM_WINDOW_SNAP != 0,
+        menu_density: customization_value(
+            input,
+            has_customization,
+            MENU_DENSITY_OFFSET,
+            defaults.menu_density,
+        ),
+        animation_level: customization_value(
+            input,
+            has_customization,
+            ANIMATION_LEVEL_OFFSET,
+            defaults.animation_level,
+        ),
+        ui_scale: customization_value(input, has_customization, UI_SCALE_OFFSET, defaults.ui_scale),
+        scroll_speed: customization_value(
+            input,
+            has_customization,
+            SCROLL_SPEED_OFFSET,
+            defaults.scroll_speed,
+        ),
+        focus_policy: (window_layout >> FOCUS_POLICY_SHIFT) & TWO_BIT_FIELD_MASK,
+        window_opacity: customization_value(
+            input,
+            has_customization,
+            WINDOW_OPACITY_OFFSET,
+            defaults.window_opacity,
+        ),
+        tooltips: customization_flags & CUSTOM_TOOLTIPS != 0,
+        cursor_shadow: customization_flags & CUSTOM_CURSOR_SHADOW != 0,
+        notification_animations: customization_flags & CUSTOM_NOTIFICATION_ANIMATIONS != 0,
     })
+}
+
+fn customization_value(input: &[u8], present: bool, offset: usize, default: u8) -> u8 {
+    if present {
+        input[offset]
+    } else {
+        default
+    }
+}
+
+fn customization_flags(value: PersistentPreferences) -> u8 {
+    let mut flags = 0;
+    if value.taskbar_autohide {
+        flags |= CUSTOM_TASKBAR_AUTOHIDE;
+    }
+    if value.taskbar_translucent {
+        flags |= CUSTOM_TASKBAR_TRANSLUCENT;
+    }
+    if value.taskbar_labels {
+        flags |= CUSTOM_TASKBAR_LABELS;
+    }
+    if value.clock_seconds {
+        flags |= CUSTOM_CLOCK_SECONDS;
+    }
+    if value.window_snap {
+        flags |= CUSTOM_WINDOW_SNAP;
+    }
+    if value.tooltips {
+        flags |= CUSTOM_TOOLTIPS;
+    }
+    if value.cursor_shadow {
+        flags |= CUSTOM_CURSOR_SHADOW;
+    }
+    if value.notification_animations {
+        flags |= CUSTOM_NOTIFICATION_ANIMATIONS;
+    }
+    flags
 }
 
 fn sanitize_preferences(mut value: PersistentPreferences) -> PersistentPreferences {
@@ -581,6 +911,29 @@ fn sanitize_preferences(mut value: PersistentPreferences) -> PersistentPreferenc
         1..=3 => value.pointer_speed,
         _ => 1,
     };
+    value.font_face = sanitize_choice(value.font_face, FONT_FACE_CHOICES);
+    value.font_weight =
+        sanitize_choice_or(value.font_weight, FONT_WEIGHT_CHOICES, DEFAULT_FONT_WEIGHT);
+    value.window_corner_radius =
+        sanitize_choice(value.window_corner_radius, WINDOW_CORNER_RADIUS_CHOICES);
+    value.window_border_width =
+        sanitize_choice(value.window_border_width, WINDOW_BORDER_WIDTH_CHOICES);
+    value.titlebar_density = sanitize_choice(value.titlebar_density, TITLEBAR_DENSITY_CHOICES);
+    value.taskbar_placement = sanitize_choice(value.taskbar_placement, TASKBAR_PLACEMENT_CHOICES);
+    value.taskbar_size = sanitize_choice(value.taskbar_size, TASKBAR_SIZE_CHOICES);
+    value.taskbar_alignment = sanitize_choice(value.taskbar_alignment, TASKBAR_ALIGNMENT_CHOICES);
+    value.window_offscreen_allowance = sanitize_choice(
+        value.window_offscreen_allowance,
+        WINDOW_OFFSCREEN_ALLOWANCE_CHOICES,
+    );
+    value.window_snap_distance =
+        sanitize_choice(value.window_snap_distance, WINDOW_SNAP_DISTANCE_CHOICES);
+    value.menu_density = sanitize_choice(value.menu_density, MENU_DENSITY_CHOICES);
+    value.animation_level = sanitize_choice(value.animation_level, ANIMATION_LEVEL_CHOICES);
+    value.ui_scale = sanitize_choice(value.ui_scale, UI_SCALE_CHOICES);
+    value.scroll_speed = sanitize_choice(value.scroll_speed, SCROLL_SPEED_CHOICES);
+    value.focus_policy = sanitize_choice(value.focus_policy, FOCUS_POLICY_CHOICES);
+    value.window_opacity = sanitize_choice(value.window_opacity, WINDOW_OPACITY_CHOICES);
     value.flags &= PREF_PURE_BLACK_APPS
         | PREF_ROUNDED_CONTROLS
         | PREF_TASKBAR_VISIBLE
@@ -594,6 +947,22 @@ fn sanitize_preferences(mut value: PersistentPreferences) -> PersistentPreferenc
         | PREF_WALLPAPER_EFFECTS
         | PREF_RESPONSIVE_PRESENTATION;
     value
+}
+
+const fn sanitize_choice(value: u8, choices: u8) -> u8 {
+    if value < choices {
+        value
+    } else {
+        0
+    }
+}
+
+const fn sanitize_choice_or(value: u8, choices: u8, fallback: u8) -> u8 {
+    if value < choices {
+        value
+    } else {
+        fallback
+    }
 }
 
 fn encode_account(account: StoredAccount, output: &mut [u8]) {
@@ -709,6 +1078,136 @@ mod tests {
         assert_eq!(preferences.flags & PREF_WINDOW_SHADOWS, 0);
         assert_eq!(preferences.flags & PREF_WALLPAPER_EFFECTS, 0);
         assert_eq!(preferences.flags & PREF_RESPONSIVE_PRESENTATION, 0);
+        assert_eq!(preferences.flags & PREF_WINDOW_BORDERS, 0);
+        assert_eq!(preferences.font_face, 0);
+        assert_eq!(preferences.font_weight, DEFAULT_FONT_WEIGHT);
+        assert_eq!(preferences.window_corner_radius, 0);
+        assert_eq!(preferences.window_border_width, 0);
+        assert_eq!(preferences.titlebar_density, 0);
+        assert_eq!(preferences.taskbar_placement, 0);
+        assert_eq!(preferences.taskbar_size, 0);
+        assert_eq!(preferences.taskbar_alignment, 0);
+        assert!(!preferences.taskbar_autohide);
+        assert!(!preferences.taskbar_translucent);
+        assert!(!preferences.taskbar_labels);
+        assert!(!preferences.clock_seconds);
+        assert_eq!(preferences.window_offscreen_allowance, 0);
+        assert_eq!(preferences.window_snap_distance, 0);
+        assert!(!preferences.window_snap);
+        assert_eq!(preferences.menu_density, 0);
+        assert_eq!(preferences.animation_level, 0);
+        assert_eq!(preferences.ui_scale, 0);
+        assert_eq!(preferences.scroll_speed, 0);
+        assert_eq!(preferences.focus_policy, 0);
+        assert_eq!(preferences.window_opacity, 0);
+        assert!(!preferences.tooltips);
+        assert!(!preferences.cursor_shadow);
+        assert!(!preferences.notification_animations);
+    }
+
+    #[test]
+    fn customization_surface_exposes_more_than_one_hundred_real_values() {
+        assert_eq!(CUSTOMIZATION_SELECTABLE_VALUES, 112);
+        const { assert!(CUSTOMIZATION_SELECTABLE_VALUES >= 100) };
+    }
+
+    #[test]
+    fn customization_extension_round_trips_every_control() {
+        let mut data = PersistentData::new();
+        let preferences = &mut data.preferences;
+        preferences.font_face = FONT_FACE_CHOICES - 1;
+        preferences.font_weight = FONT_WEIGHT_CHOICES - 1;
+        preferences.window_corner_radius = WINDOW_CORNER_RADIUS_CHOICES - 1;
+        preferences.window_border_width = WINDOW_BORDER_WIDTH_CHOICES - 1;
+        preferences.titlebar_density = TITLEBAR_DENSITY_CHOICES - 1;
+        preferences.taskbar_placement = TASKBAR_PLACEMENT_CHOICES - 1;
+        preferences.taskbar_size = TASKBAR_SIZE_CHOICES - 1;
+        preferences.taskbar_alignment = TASKBAR_ALIGNMENT_CHOICES - 1;
+        preferences.taskbar_autohide = true;
+        preferences.taskbar_translucent = true;
+        preferences.taskbar_labels = true;
+        preferences.clock_seconds = true;
+        preferences.window_offscreen_allowance = WINDOW_OFFSCREEN_ALLOWANCE_CHOICES - 1;
+        preferences.window_snap_distance = WINDOW_SNAP_DISTANCE_CHOICES - 1;
+        preferences.window_snap = true;
+        preferences.menu_density = MENU_DENSITY_CHOICES - 1;
+        preferences.animation_level = ANIMATION_LEVEL_CHOICES - 1;
+        preferences.ui_scale = UI_SCALE_CHOICES - 1;
+        preferences.scroll_speed = SCROLL_SPEED_CHOICES - 1;
+        preferences.focus_policy = FOCUS_POLICY_CHOICES - 1;
+        preferences.window_opacity = WINDOW_OPACITY_CHOICES - 1;
+        preferences.tooltips = true;
+        preferences.cursor_shadow = true;
+        preferences.notification_animations = true;
+
+        let mut encoded = [0_u8; SLOT_LEN];
+        encode_slot(&data, 15, &mut encoded);
+
+        let preferences_start = HEADER_LEN + 32;
+        assert_eq!(
+            &encoded[preferences_start + CUSTOMIZATION_TAG_OFFSET
+                ..preferences_start + CUSTOMIZATION_DATA_OFFSET],
+            &CUSTOMIZATION_TAG
+        );
+        let decoded = decode_slot(&encoded, 0).unwrap();
+        assert_eq!(decoded.data.preferences, data.preferences);
+    }
+
+    #[test]
+    fn legacy_expost03_preferences_receive_safe_customization_defaults() {
+        let mut data = PersistentData::new();
+        data.preferences.font_face = FONT_FACE_CHOICES - 1;
+        data.preferences.taskbar_placement = TASKBAR_PLACEMENT_CHOICES - 1;
+        data.preferences.taskbar_autohide = true;
+        data.preferences.window_offscreen_allowance = WINDOW_OFFSCREEN_ALLOWANCE_CHOICES - 1;
+        data.preferences.animation_level = ANIMATION_LEVEL_CHOICES - 1;
+        let mut encoded = [0_u8; SLOT_LEN];
+        encode_slot(&data, 16, &mut encoded);
+
+        let preferences_start = HEADER_LEN + 32;
+        encoded[preferences_start + CUSTOMIZATION_TAG_OFFSET..preferences_start + 32].fill(0);
+        refresh_slot_checksums(&mut encoded);
+
+        let decoded = decode_slot(&encoded, 1).unwrap();
+        assert_eq!(decoded.data.preferences, PersistentPreferences::new());
+    }
+
+    #[test]
+    fn invalid_customization_ids_fall_back_to_baselines() {
+        let data = PersistentData::new();
+        let mut encoded = [0_u8; SLOT_LEN];
+        encode_slot(&data, 17, &mut encoded);
+
+        let preferences_start = HEADER_LEN + 32;
+        for offset in FONT_FACE_OFFSET..=WINDOW_OPACITY_OFFSET {
+            encoded[preferences_start + offset] = 0xFF;
+        }
+        // Retain the extension tag after corrupting all extension data.
+        encoded[preferences_start + CUSTOMIZATION_TAG_OFFSET
+            ..preferences_start + CUSTOMIZATION_DATA_OFFSET]
+            .copy_from_slice(&CUSTOMIZATION_TAG);
+        refresh_slot_checksums(&mut encoded);
+
+        let decoded = decode_slot(&encoded, 0).unwrap();
+        let preferences = decoded.data.preferences;
+        assert_eq!(preferences.font_face, 0);
+        assert_eq!(preferences.font_weight, DEFAULT_FONT_WEIGHT);
+        assert_eq!(preferences.window_corner_radius, 0);
+        assert_eq!(preferences.window_border_width, 0);
+        assert_eq!(preferences.titlebar_density, 0);
+        // Placement occupies all four possible two-bit values, so 0xff masks
+        // to the valid right-edge ID while the other packed fields sanitize.
+        assert_eq!(preferences.taskbar_placement, 3);
+        assert_eq!(preferences.taskbar_size, 0);
+        assert_eq!(preferences.taskbar_alignment, 0);
+        assert_eq!(preferences.window_offscreen_allowance, 0);
+        assert_eq!(preferences.window_snap_distance, 0);
+        assert_eq!(preferences.menu_density, 0);
+        assert_eq!(preferences.animation_level, 0);
+        assert_eq!(preferences.ui_scale, 0);
+        assert_eq!(preferences.scroll_speed, 0);
+        assert_eq!(preferences.focus_policy, 0);
+        assert_eq!(preferences.window_opacity, 0);
     }
 
     #[test]

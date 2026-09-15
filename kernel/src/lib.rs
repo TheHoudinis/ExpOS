@@ -17,6 +17,7 @@ mod framebuffer;
 mod games;
 mod hardware;
 mod input;
+mod kernel_controls;
 mod network;
 mod port;
 mod radio;

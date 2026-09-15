@@ -32,26 +32,157 @@ const TERMINAL_OUTPUT_CAPACITY: usize = 112;
 const NOTES_CAPACITY: usize = 2048;
 const CURSOR_WIDTH: usize = 14;
 const CURSOR_HEIGHT: usize = 20;
-const TASKBAR_HEIGHT: i16 = 48;
-const START_X: i16 = 8;
-const TASK_ICON_X: i16 = 48;
-const TASK_ICON_STEP: i16 = 36;
-const LAUNCHER_X: i16 = 8;
 const LAUNCHER_WIDTH: u16 = 250;
 const LAUNCHER_HEIGHT: u16 = 318;
 const STABLE_FIN: Fin = Fin::from_u128(0x4449_4D00_0000_0000_0000_0000_0000_0001);
 
-fn taskbar_y() -> i16 {
-    framebuffer::height() as i16 - TASKBAR_HEIGHT
+fn taskbar_thickness(preferences: DesktopPreferences) -> i16 {
+    state::TASKBAR_SIZES_PX[preferences.taskbar_size.min(8) as usize] as i16
 }
 
-fn launcher_y() -> i16 {
-    (taskbar_y() - LAUNCHER_HEIGHT as i16 - 8).max(4)
+fn taskbar_rect(preferences: DesktopPreferences) -> Rect {
+    let width = framebuffer::width() as u16;
+    let height = framebuffer::height() as u16;
+    let thickness = taskbar_thickness(preferences) as u16;
+    match preferences.taskbar_placement {
+        TaskbarPlacement::Bottom => {
+            Rect::new(0, height.saturating_sub(thickness) as i16, width, thickness)
+        }
+        TaskbarPlacement::Top => Rect::new(0, 0, width, thickness),
+        TaskbarPlacement::Left => Rect::new(0, 0, thickness, height),
+        TaskbarPlacement::Right => {
+            Rect::new(width.saturating_sub(thickness) as i16, 0, thickness, height)
+        }
+    }
 }
 
-fn app_dimensions() -> (u16, u16) {
-    let screen_width = framebuffer::width() as u16;
-    let work_height = taskbar_y().max(80) as u16;
+fn work_area(preferences: DesktopPreferences) -> Rect {
+    let width = framebuffer::width() as u16;
+    let height = framebuffer::height() as u16;
+    if !preferences.taskbar_visible || preferences.taskbar_autohide {
+        return Rect::new(0, 0, width, height);
+    }
+    let thickness = taskbar_thickness(preferences) as u16;
+    match preferences.taskbar_placement {
+        TaskbarPlacement::Bottom => Rect::new(0, 0, width, height.saturating_sub(thickness)),
+        TaskbarPlacement::Top => {
+            Rect::new(0, thickness as i16, width, height.saturating_sub(thickness))
+        }
+        TaskbarPlacement::Left => {
+            Rect::new(thickness as i16, 0, width.saturating_sub(thickness), height)
+        }
+        TaskbarPlacement::Right => Rect::new(0, 0, width.saturating_sub(thickness), height),
+    }
+}
+
+fn launcher_rect(preferences: DesktopPreferences) -> Rect {
+    let dock = taskbar_rect(preferences);
+    let screen_width = framebuffer::width() as i16;
+    let screen_height = framebuffer::height() as i16;
+    let width = LAUNCHER_WIDTH.min(framebuffer::width() as u16 - 8);
+    let height = LAUNCHER_HEIGHT.min(framebuffer::height() as u16 - 8);
+    let (x, y) = match preferences.taskbar_placement {
+        TaskbarPlacement::Bottom => (8, (dock.y - height as i16 - 8).max(4)),
+        TaskbarPlacement::Top => (
+            8,
+            (dock.height as i16 + 8).min(screen_height - height as i16 - 4),
+        ),
+        TaskbarPlacement::Left => (
+            (dock.width as i16 + 8).min(screen_width - width as i16 - 4),
+            8,
+        ),
+        TaskbarPlacement::Right => ((dock.x - width as i16 - 8).max(4), 8),
+    };
+    Rect::new(x, y, width, height)
+}
+
+fn contains(rect: Rect, x: i16, y: i16) -> bool {
+    let right = rect.x as i32 + rect.width as i32;
+    let bottom = rect.y as i32 + rect.height as i32;
+    (rect.x as i32..right).contains(&(x as i32)) && (rect.y as i32..bottom).contains(&(y as i32))
+}
+
+fn taskbar_start_rect(preferences: DesktopPreferences) -> Rect {
+    let dock = taskbar_rect(preferences);
+    if preferences.taskbar_placement.vertical() {
+        let size = (dock.width.saturating_sub(8)).clamp(20, 32);
+        Rect::new(
+            dock.x + (dock.width as i16 - size as i16) / 2,
+            6,
+            size,
+            size,
+        )
+    } else {
+        let size = (dock.height.saturating_sub(8)).clamp(20, 32);
+        Rect::new(
+            8,
+            dock.y + (dock.height as i16 - size as i16) / 2,
+            size,
+            size,
+        )
+    }
+}
+
+fn taskbar_app_rect(preferences: DesktopPreferences, ordinal: usize, running_count: usize) -> Rect {
+    let dock = taskbar_rect(preferences);
+    let vertical = preferences.taskbar_placement.vertical();
+    let desired_extent = if preferences.taskbar_labels && !vertical {
+        100
+    } else {
+        32
+    };
+    let axis_length = if vertical {
+        dock.height as i32
+    } else {
+        dock.width as i32
+    };
+    let trailing_reserve = if !preferences.status_visible {
+        12
+    } else if vertical {
+        if preferences.clock_seconds {
+            84
+        } else {
+            66
+        }
+    } else if preferences.clock_seconds {
+        80
+    } else {
+        62
+    };
+    let available = (axis_length - 46 - trailing_reserve).max(32);
+    let item_extent =
+        desired_extent.min((available / running_count.max(1) as i32 - 4).clamp(24, desired_extent));
+    let step = item_extent + 4;
+    let total = running_count as i32 * step;
+    let start = match preferences.taskbar_alignment {
+        TaskbarAlignment::Start => 46,
+        TaskbarAlignment::Center => ((axis_length - total) / 2).max(46),
+        TaskbarAlignment::End => (axis_length - total - trailing_reserve).max(46),
+    };
+    let offset = start + ordinal as i32 * step;
+    if vertical {
+        let size = (dock.width.saturating_sub(8)).clamp(20, 32);
+        Rect::new(
+            dock.x + (dock.width as i16 - size as i16) / 2,
+            offset as i16,
+            size,
+            size,
+        )
+    } else {
+        let size = (dock.height.saturating_sub(8)).clamp(20, 32);
+        Rect::new(
+            offset as i16,
+            dock.y + (dock.height as i16 - size as i16) / 2,
+            item_extent as u16,
+            size,
+        )
+    }
+}
+
+fn app_dimensions(preferences: DesktopPreferences) -> (u16, u16) {
+    let area = work_area(preferences);
+    let screen_width = area.width;
+    let work_height = area.height.max(80);
     let width = if screen_width <= 640 {
         screen_width.saturating_sub(16)
     } else if screen_width <= 1280 {
@@ -66,7 +197,10 @@ fn app_dimensions() -> (u16, u16) {
     } else {
         800
     };
-    (width.max(480), height.max(360))
+    (
+        width.max(480).min(screen_width.saturating_sub(8)),
+        height.max(360).min(work_height.saturating_sub(8)),
+    )
 }
 
 fn settings_compact(rect: Rect) -> bool {
@@ -119,6 +253,39 @@ fn settings_row_step(rect: Rect) -> i16 {
     } else {
         62
     }
+}
+
+fn settings_category_capacity(rect: Rect) -> usize {
+    if settings_compact(rect) {
+        7
+    } else {
+        11
+    }
+}
+
+fn settings_category_view_start(rect: Rect, selected: usize) -> usize {
+    let capacity = settings_category_capacity(rect).min(SETTINGS_CATEGORY_COUNT);
+    selected
+        .saturating_sub(capacity - 1)
+        .min(SETTINGS_CATEGORY_COUNT - capacity)
+}
+
+fn settings_row_capacity(content_width: i32) -> usize {
+    if content_width < 600 {
+        5
+    } else {
+        7
+    }
+}
+
+fn settings_row_view_start(
+    category: SettingsCategory,
+    selected: usize,
+    content_width: i32,
+) -> usize {
+    let count = category.row_count();
+    let capacity = settings_row_capacity(content_width).min(count.max(1));
+    selected.saturating_sub(capacity - 1).min(count - capacity)
 }
 
 fn shift_display_mode(mode: framebuffer::DisplayMode, direction: i8) -> framebuffer::DisplayMode {
@@ -291,7 +458,30 @@ impl AppKind {
     }
 }
 
-const SETTINGS_CATEGORY_COUNT: usize = 9;
+const SETTINGS_CATEGORY_COUNT: usize = 11;
+const CUSTOMIZATION_VALUE_COUNT: usize = ThemeChoice::ALL.len()
+    + WallpaperChoice::ALL.len()
+    + 4 // accent colors
+    + 3 // backdrop tones
+    + 2 // pure-black apps
+    + 2 // rounded controls
+    + state::FONT_FACE_NAMES.len()
+    + state::FONT_WEIGHT_NAMES.len()
+    + state::WINDOW_CORNER_RADII_PX.len()
+    + state::WINDOW_BORDER_WIDTHS_PX.len()
+    + state::TITLEBAR_HEIGHTS_PX.len()
+    + state::WINDOW_OPACITY_ALPHA.len()
+    + state::WINDOW_OFFSCREEN_ALLOWANCES_PX.len()
+    + 2 // edge snapping
+    + state::WINDOW_SNAP_DISTANCES_PX.len()
+    + state::FOCUS_POLICY_NAMES.len()
+    + state::TASKBAR_PLACEMENT_NAMES.len()
+    + state::TASKBAR_SIZES_PX.len()
+    + state::TASKBAR_ALIGNMENT_NAMES.len()
+    + 2 // auto-hide
+    + 2 // translucent panel
+    + 2 // application labels
+    + 2; // clock seconds
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsCategory {
@@ -302,6 +492,8 @@ enum SettingsCategory {
     Display,
     Performance,
     Input,
+    Windows,
+    Taskbar,
     Privacy,
     About,
 }
@@ -315,6 +507,8 @@ impl SettingsCategory {
         Self::Display,
         Self::Performance,
         Self::Input,
+        Self::Windows,
+        Self::Taskbar,
         Self::Privacy,
         Self::About,
     ];
@@ -328,8 +522,10 @@ impl SettingsCategory {
             Self::Display => 4,
             Self::Performance => 5,
             Self::Input => 6,
-            Self::Privacy => 7,
-            Self::About => 8,
+            Self::Windows => 7,
+            Self::Taskbar => 8,
+            Self::Privacy => 9,
+            Self::About => 10,
         }
     }
 
@@ -342,6 +538,8 @@ impl SettingsCategory {
             Self::Display => "Display",
             Self::Performance => "Performance",
             Self::Input => "Mouse & keyboard",
+            Self::Windows => "Windows",
+            Self::Taskbar => "Taskbar",
             Self::Privacy => "Privacy",
             Self::About => "About",
         }
@@ -356,6 +554,8 @@ impl SettingsCategory {
             Self::Display => "HexaDisplay output",
             Self::Performance => "Rendering cost and responsiveness",
             Self::Input => "Pointer and keyboard",
+            Self::Windows => "Placement, decoration, and focus",
+            Self::Taskbar => "Panel placement and behavior",
             Self::Privacy => "Local data and access",
             Self::About => "ExpOS system information",
         }
@@ -364,12 +564,14 @@ impl SettingsCategory {
     const fn row_count(self) -> usize {
         match self {
             Self::System => 2,
-            Self::Appearance => 6,
+            Self::Appearance => 8,
             Self::Network => 4,
             Self::Bluetooth => 2,
             Self::Display => 6,
             Self::Performance => 4,
-            Self::Input => 4,
+            Self::Input => 5,
+            Self::Windows => 8,
+            Self::Taskbar => 7,
             Self::Privacy => 2,
             Self::About => 4,
         }
@@ -384,6 +586,109 @@ impl SettingsCategory {
         Self::ALL[index]
     }
 }
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TaskbarPlacement {
+    Bottom,
+    Top,
+    Left,
+    Right,
+}
+
+impl TaskbarPlacement {
+    const ALL: [Self; 4] = [Self::Bottom, Self::Top, Self::Left, Self::Right];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Bottom => "Bottom",
+            Self::Top => "Top",
+            Self::Left => "Left",
+            Self::Right => "Right",
+        }
+    }
+
+    const fn from_persisted(value: u8) -> Self {
+        match value {
+            1 => Self::Top,
+            2 => Self::Left,
+            3 => Self::Right,
+            _ => Self::Bottom,
+        }
+    }
+
+    fn shifted(self, direction: i8) -> Self {
+        Self::ALL[shift_index(self as u8, Self::ALL.len() as u8, direction) as usize]
+    }
+
+    const fn vertical(self) -> bool {
+        matches!(self, Self::Left | Self::Right)
+    }
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TaskbarAlignment {
+    Start,
+    Center,
+    End,
+}
+
+impl TaskbarAlignment {
+    const ALL: [Self; 3] = [Self::Start, Self::Center, Self::End];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Start => "Start",
+            Self::Center => "Center",
+            Self::End => "End",
+        }
+    }
+
+    const fn from_persisted(value: u8) -> Self {
+        match value {
+            1 => Self::Center,
+            2 => Self::End,
+            _ => Self::Start,
+        }
+    }
+
+    fn shifted(self, direction: i8) -> Self {
+        Self::ALL[shift_index(self as u8, Self::ALL.len() as u8, direction) as usize]
+    }
+}
+
+const fn shift_index(current: u8, count: u8, direction: i8) -> u8 {
+    if direction < 0 {
+        (current + count - 1) % count
+    } else {
+        (current + 1) % count
+    }
+}
+
+const CORNER_RADIUS_LABELS: [&str; 9] = [
+    "Square", "2 px", "4 px", "6 px", "8 px", "10 px", "12 px", "16 px", "20 px",
+];
+const BORDER_WIDTH_LABELS: [&str; 7] = ["Off", "1 px", "2 px", "3 px", "4 px", "6 px", "8 px"];
+const TITLEBAR_LABELS: [&str; 5] = ["Compact", "Small", "Normal", "Large", "Tall"];
+const WINDOW_OPACITY_LABELS: [&str; 6] = ["Opaque", "96%", "91%", "85%", "75%", "63%"];
+const OFFSCREEN_LABELS: [&str; 9] = [
+    "Contained",
+    "8 px",
+    "16 px",
+    "32 px",
+    "64 px",
+    "96 px",
+    "128 px",
+    "192 px",
+    "256 px",
+];
+const SNAP_DISTANCE_LABELS: [&str; 9] = [
+    "Exact", "4 px", "8 px", "12 px", "16 px", "24 px", "32 px", "48 px", "64 px",
+];
+const TASKBAR_SIZE_LABELS: [&str; 9] = [
+    "28 px", "32 px", "36 px", "40 px", "44 px", "48 px", "52 px", "60 px", "72 px",
+];
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -698,6 +1003,24 @@ struct DesktopPreferences {
     pointer_speed: u8,
     refresh_rate: state::RefreshRate,
     vsync: bool,
+    font_face: framebuffer::FontFace,
+    font_weight: framebuffer::FontWeight,
+    window_corner_radius: u8,
+    window_border_width: u8,
+    titlebar_density: u8,
+    taskbar_placement: TaskbarPlacement,
+    taskbar_size: u8,
+    taskbar_alignment: TaskbarAlignment,
+    taskbar_autohide: bool,
+    taskbar_translucent: bool,
+    taskbar_labels: bool,
+    clock_seconds: bool,
+    window_offscreen_allowance: u8,
+    window_snap_distance: u8,
+    window_snap: bool,
+    focus_policy: u8,
+    window_opacity: u8,
+    cursor_shadow: bool,
 }
 
 impl DesktopPreferences {
@@ -751,6 +1074,35 @@ impl DesktopPreferences {
         }
     }
 
+    fn window_corner_radius(self) -> i32 {
+        state::WINDOW_CORNER_RADII_PX[self.window_corner_radius.min(8) as usize] as i32
+    }
+
+    fn window_border_width(self) -> i32 {
+        state::WINDOW_BORDER_WIDTHS_PX[self.window_border_width.min(6) as usize] as i32
+    }
+
+    fn titlebar_height(self) -> i16 {
+        state::TITLEBAR_HEIGHTS_PX[self.titlebar_density.min(4) as usize] as i16
+    }
+
+    fn window_alpha(self) -> u8 {
+        state::WINDOW_OPACITY_ALPHA[self.window_opacity.min(5) as usize]
+    }
+
+    fn offscreen_pixels(self) -> i32 {
+        state::WINDOW_OFFSCREEN_ALLOWANCES_PX[self.window_offscreen_allowance.min(8) as usize]
+            as i32
+    }
+
+    fn snap_pixels(self) -> i32 {
+        state::WINDOW_SNAP_DISTANCES_PX[self.window_snap_distance.min(8) as usize] as i32
+    }
+
+    fn focus_policy_label(self) -> &'static str {
+        state::FOCUS_POLICY_NAMES[self.focus_policy.min(2) as usize]
+    }
+
     fn from_persistent(value: state::PersistentPreferences) -> Self {
         let flags = value.flags;
         Self {
@@ -763,7 +1115,8 @@ impl DesktopPreferences {
             rounded_controls: flags & state::PREF_ROUNDED_CONTROLS != 0,
             taskbar_visible: flags & state::PREF_TASKBAR_VISIBLE != 0,
             status_visible: flags & state::PREF_STATUS_VISIBLE != 0,
-            window_borders: flags & state::PREF_WINDOW_BORDERS != 0,
+            window_borders: flags & state::PREF_WINDOW_BORDERS != 0
+                && value.window_border_width != 0,
             high_contrast: flags & state::PREF_HIGH_CONTRAST != 0,
             window_shadows: flags & state::PREF_WINDOW_SHADOWS != 0,
             wallpaper_effects: flags & state::PREF_WALLPAPER_EFFECTS != 0,
@@ -771,6 +1124,26 @@ impl DesktopPreferences {
             pointer_speed: value.pointer_speed.clamp(1, 3),
             refresh_rate: value.refresh_rate,
             vsync: value.vsync,
+            font_face: framebuffer::FontFace::from_persisted(value.font_face)
+                .unwrap_or(framebuffer::FontFace::System),
+            font_weight: framebuffer::FontWeight::from_persisted(value.font_weight)
+                .unwrap_or(framebuffer::FontWeight::Regular),
+            window_corner_radius: value.window_corner_radius,
+            window_border_width: value.window_border_width,
+            titlebar_density: value.titlebar_density,
+            taskbar_placement: TaskbarPlacement::from_persisted(value.taskbar_placement),
+            taskbar_size: value.taskbar_size,
+            taskbar_alignment: TaskbarAlignment::from_persisted(value.taskbar_alignment),
+            taskbar_autohide: value.taskbar_autohide,
+            taskbar_translucent: value.taskbar_translucent,
+            taskbar_labels: value.taskbar_labels,
+            clock_seconds: value.clock_seconds,
+            window_offscreen_allowance: value.window_offscreen_allowance,
+            window_snap_distance: value.window_snap_distance,
+            window_snap: value.window_snap,
+            focus_policy: value.focus_policy,
+            window_opacity: value.window_opacity,
+            cursor_shadow: value.cursor_shadow,
         }
     }
 
@@ -787,6 +1160,24 @@ impl DesktopPreferences {
         value.pointer_speed = self.pointer_speed;
         value.refresh_rate = self.refresh_rate;
         value.vsync = self.vsync;
+        value.font_face = self.font_face.persisted();
+        value.font_weight = self.font_weight.persisted();
+        value.window_corner_radius = self.window_corner_radius;
+        value.window_border_width = self.window_border_width;
+        value.titlebar_density = self.titlebar_density;
+        value.taskbar_placement = self.taskbar_placement as u8;
+        value.taskbar_size = self.taskbar_size;
+        value.taskbar_alignment = self.taskbar_alignment as u8;
+        value.taskbar_autohide = self.taskbar_autohide;
+        value.taskbar_translucent = self.taskbar_translucent;
+        value.taskbar_labels = self.taskbar_labels;
+        value.clock_seconds = self.clock_seconds;
+        value.window_offscreen_allowance = self.window_offscreen_allowance;
+        value.window_snap_distance = self.window_snap_distance;
+        value.window_snap = self.window_snap;
+        value.focus_policy = self.focus_policy;
+        value.window_opacity = self.window_opacity;
+        value.cursor_shadow = self.cursor_shadow;
         let desktop_flags = state::PREF_PURE_BLACK_APPS
             | state::PREF_ROUNDED_CONTROLS
             | state::PREF_TASKBAR_VISIBLE
@@ -898,6 +1289,7 @@ struct PointerCursor {
     under: [u32; CURSOR_WIDTH * CURSOR_HEIGHT],
     style: CursorChoice,
     accent: u32,
+    shadow: bool,
     drawn: bool,
 }
 
@@ -909,13 +1301,14 @@ enum PointerRender {
 }
 
 impl PointerCursor {
-    fn new(style: CursorChoice, accent: u32) -> Self {
+    fn new(style: CursorChoice, accent: u32, shadow: bool) -> Self {
         Self {
             x: (framebuffer::width() / 2) as i16,
             y: (framebuffer::height() / 2) as i16,
             under: [0; CURSOR_WIDTH * CURSOR_HEIGHT],
             style,
             accent,
+            shadow,
             drawn: false,
         }
     }
@@ -924,6 +1317,11 @@ impl PointerCursor {
         self.restore();
         self.style = style;
         self.accent = accent;
+    }
+
+    fn set_shadow(&mut self, shadow: bool) {
+        self.restore();
+        self.shadow = shadow;
     }
 
     fn invalidate(&mut self) {
@@ -984,6 +1382,19 @@ impl PointerCursor {
                 );
             }
         }
+        if self.shadow {
+            for (row, bits) in SHAPE.iter().copied().enumerate().take(CURSOR_HEIGHT - 2) {
+                for column in 0..CURSOR_WIDTH - 2 {
+                    if bits & (1 << column) != 0 {
+                        framebuffer::pixel(
+                            self.x as i32 + column as i32 + 2,
+                            self.y as i32 + row as i32 + 2,
+                            0x0003_0508,
+                        );
+                    }
+                }
+            }
+        }
         for (row, bits) in SHAPE.iter().copied().enumerate() {
             for column in 0..CURSOR_WIDTH {
                 if bits & (1 << column) == 0 {
@@ -1030,6 +1441,22 @@ impl PointerCursor {
                 );
             }
         }
+        if self.shadow {
+            framebuffer::line(
+                self.x as i32 + 2,
+                self.y as i32 + 9,
+                self.x as i32 + CURSOR_WIDTH as i32 - 1,
+                self.y as i32 + 9,
+                0x0003_0508,
+            );
+            framebuffer::line(
+                self.x as i32 + 9,
+                self.y as i32 + 2,
+                self.x as i32 + 9,
+                self.y as i32 + CURSOR_HEIGHT as i32 - 1,
+                0x0003_0508,
+            );
+        }
         for offset in 0..CURSOR_WIDTH as i32 {
             if !(5..=8).contains(&offset) {
                 framebuffer::pixel(self.x as i32 + offset, self.y as i32 + 7, self.accent);
@@ -1053,6 +1480,10 @@ impl DesktopState {
     ) -> Self {
         let active = start_app.unwrap_or(AppKind::Terminal);
         let preferences = DesktopPreferences::from_persistent(state::preferences());
+        framebuffer::set_font_style(framebuffer::FontStyle::new(
+            preferences.font_face,
+            preferences.font_weight,
+        ));
         let frame_pacer = FramePacer::new(timing_config(preferences), crate::hardware::timestamp());
         let mut server = DisplayServer::new();
         let mut broker = CapabilityBroker::new();
@@ -1081,24 +1512,15 @@ impl DesktopState {
                 ),
             )
             .expect("desktop background surface");
+        let dock_rect = taskbar_rect(preferences);
         let panel = server
-            .create_surface(
-                DISPLAY_FIN,
-                "Panel",
-                SurfaceRole::Panel,
-                Rect::new(
-                    0,
-                    taskbar_y(),
-                    framebuffer::width() as u16,
-                    TASKBAR_HEIGHT as u16,
-                ),
-            )
+            .create_surface(DISPLAY_FIN, "Panel", SurfaceRole::Panel, dock_rect)
             .expect("desktop panel surface");
 
         let mut app_surfaces = [0; APP_COUNT];
         let mut app_handles = [0; APP_COUNT];
         for (index, app) in AppKind::ALL.iter().copied().enumerate() {
-            let rect = default_rect(app);
+            let rect = default_rect(app, preferences);
             let surface = server
                 .create_surface(app.owner(), app.title(), SurfaceRole::Window, rect)
                 .expect("built-in application surface");
@@ -1157,7 +1579,7 @@ impl DesktopState {
                 DISPLAY_FIN,
                 "Applications",
                 SurfaceRole::Popup,
-                Rect::new(LAUNCHER_X, launcher_y(), LAUNCHER_WIDTH, LAUNCHER_HEIGHT),
+                launcher_rect(preferences),
             )
             .expect("desktop launcher surface");
         let _ = server.attach(
@@ -1177,10 +1599,14 @@ impl DesktopState {
                 2,
                 DISPLAY_FIN,
                 framebuffer::width() as u16,
-                TASKBAR_HEIGHT as u16,
+                framebuffer::height() as u16,
             ),
         );
-        let _ = server.set_visible(DISPLAY_FIN, panel, preferences.taskbar_visible);
+        let _ = server.set_visible(
+            DISPLAY_FIN,
+            panel,
+            preferences.taskbar_visible && !preferences.taskbar_autohide,
+        );
         let _ = server.attach(
             DISPLAY_FIN,
             launcher_surface,
@@ -1235,7 +1661,11 @@ impl DesktopState {
             notes_len: 0,
             games: crate::games::GameHub::new(),
             session,
-            cursor: PointerCursor::new(preferences.cursor, preferences.accent.color()),
+            cursor: PointerCursor::new(
+                preferences.cursor,
+                preferences.accent.color(),
+                preferences.cursor_shadow,
+            ),
             dragging: None,
             should_exit: false,
             frame_pacer,
@@ -1289,12 +1719,71 @@ impl DesktopState {
         );
     }
 
-    fn work_area_bottom(&self) -> i16 {
-        if self.preferences.taskbar_visible {
-            taskbar_y()
-        } else {
-            framebuffer::height() as i16
+    fn usable_area(&self) -> Rect {
+        work_area(self.preferences)
+    }
+
+    fn fullscreen_rect(&self) -> Rect {
+        let area = self.usable_area();
+        Rect::new(
+            area.x.saturating_add(8),
+            area.y.saturating_add(8),
+            area.width.saturating_sub(16).max(1),
+            area.height.saturating_sub(16).max(1),
+        )
+    }
+
+    fn pointer_reveals_taskbar(&self) -> bool {
+        let edge = 3;
+        contains(taskbar_rect(self.preferences), self.cursor.x, self.cursor.y)
+            || match self.preferences.taskbar_placement {
+                TaskbarPlacement::Bottom => self.cursor.y >= framebuffer::height() as i16 - edge,
+                TaskbarPlacement::Top => self.cursor.y < edge,
+                TaskbarPlacement::Left => self.cursor.x < edge,
+                TaskbarPlacement::Right => self.cursor.x >= framebuffer::width() as i16 - edge,
+            }
+    }
+
+    fn taskbar_should_show(&self) -> bool {
+        self.preferences.taskbar_visible
+            && (!self.preferences.taskbar_autohide
+                || self.launcher_open
+                || self.pointer_reveals_taskbar())
+    }
+
+    fn sync_taskbar_visibility(&mut self) -> bool {
+        let visible = self.taskbar_should_show();
+        let changed = self
+            .server
+            .surface(self.panel_surface)
+            .is_some_and(|surface| surface.current.visible != visible);
+        if changed {
+            let _ = self
+                .server
+                .set_visible(DISPLAY_FIN, self.panel_surface, visible);
+            let _ = self.server.commit(DISPLAY_FIN, self.panel_surface);
         }
+        changed
+    }
+
+    fn sync_desktop_geometry(&mut self) {
+        let _ = self.server.set_geometry(
+            DISPLAY_FIN,
+            self.panel_surface,
+            taskbar_rect(self.preferences),
+        );
+        let _ = self.server.commit(DISPLAY_FIN, self.panel_surface);
+        let _ = self.server.set_geometry(
+            DISPLAY_FIN,
+            self.launcher_surface,
+            launcher_rect(self.preferences),
+        );
+        let _ = self.server.commit(DISPLAY_FIN, self.launcher_surface);
+        self.sync_taskbar_visibility();
+        if self.fullscreen {
+            self.set_app_geometry(self.active, self.fullscreen_rect());
+        }
+        self.full_redraw_requested = true;
     }
 
     fn route_key(&mut self, key: u8) {
@@ -1311,6 +1800,7 @@ impl DesktopState {
         let motion_x = pointer.dx.saturating_mul(speed);
         let motion_y = pointer.dy.saturating_mul(speed);
         let cursor_damage = self.cursor.move_by(motion_x, motion_y);
+        let taskbar_changed = self.sync_taskbar_visibility();
         self.route_pointer(pointer);
         if pointer.released & 1 != 0 {
             self.dragging = None;
@@ -1323,7 +1813,10 @@ impl DesktopState {
             return PointerRender::Full;
         }
         if pointer.pressed & 1 != 0 {
-            return if self.pointer_press(self.cursor.x, self.cursor.y) {
+            return if self.pointer_press(self.cursor.x, self.cursor.y)
+                || taskbar_changed
+                || self.full_redraw_requested
+            {
                 PointerRender::Full
             } else if let Some(damage) = cursor_damage {
                 PointerRender::Cursor(damage)
@@ -1331,7 +1824,11 @@ impl DesktopState {
                 PointerRender::None
             };
         }
-        cursor_damage.map_or(PointerRender::None, PointerRender::Cursor)
+        if taskbar_changed || self.full_redraw_requested {
+            PointerRender::Full
+        } else {
+            cursor_damage.map_or(PointerRender::None, PointerRender::Cursor)
+        }
     }
 
     fn route_pointer(&mut self, pointer: PointerEvent) {
@@ -1345,6 +1842,16 @@ impl DesktopState {
         else {
             return;
         };
+        let pointer_focus = match self.preferences.focus_policy {
+            1 => pointer.buttons == 0 && self.dragging.is_none(),
+            2 => self.dragging.is_none(),
+            _ => false,
+        };
+        if pointer_focus && app != self.active {
+            self.active = app;
+            let _ = self.server.focus(surface_id);
+            self.full_redraw_requested = true;
+        }
         if self.authorized(app, Operations::INPUT) {
             let _ = self.server.route_pointer(
                 self.cursor.x,
@@ -1357,18 +1864,23 @@ impl DesktopState {
     }
 
     fn pointer_press(&mut self, x: i16, y: i16) -> bool {
-        if self.preferences.taskbar_visible && y >= taskbar_y() {
-            if (START_X..START_X + 32).contains(&x) {
+        let dock = taskbar_rect(self.preferences);
+        if self.taskbar_should_show() && contains(dock, x, y) {
+            if contains(taskbar_start_rect(self.preferences), x, y) {
                 self.toggle_launcher();
                 return true;
             }
-            let mut running_index = 0_i16;
+            let running_count = self.app_open.iter().filter(|open| **open).count();
+            let mut running_index = 0_usize;
             for app in AppKind::ALL {
                 if !self.app_open[app.index()] {
                     continue;
                 }
-                let left = TASK_ICON_X + running_index * TASK_ICON_STEP;
-                if (left..left + 32).contains(&x) {
+                if contains(
+                    taskbar_app_rect(self.preferences, running_index, running_count),
+                    x,
+                    y,
+                ) {
                     if app == self.active && !self.app_minimized[app.index()] {
                         self.minimize_active();
                     } else {
@@ -1381,13 +1893,12 @@ impl DesktopState {
             return false;
         }
         if self.launcher_open {
-            if (LAUNCHER_X..LAUNCHER_X + LAUNCHER_WIDTH as i16).contains(&x)
-                && (launcher_y()..launcher_y() + LAUNCHER_HEIGHT as i16).contains(&y)
-            {
+            let launcher = launcher_rect(self.preferences);
+            if contains(launcher, x, y) {
                 for (index, app) in AppKind::ALL.iter().copied().enumerate() {
-                    let left = LAUNCHER_X + 8;
-                    let top = launcher_y() + 48 + index as i16 * 32;
-                    if (left..left + LAUNCHER_WIDTH as i16 - 16).contains(&x)
+                    let left = launcher.x + 8;
+                    let top = launcher.y + 48 + index as i16 * 32;
+                    if (left..left + launcher.width as i16 - 16).contains(&x)
                         && (top..top + 28).contains(&y)
                     {
                         self.focus_existing(app);
@@ -1422,7 +1933,7 @@ impl DesktopState {
             return true;
         };
         let right = rect.x.saturating_add_unsigned(rect.width);
-        if y < rect.y + 36 {
+        if y < rect.y + self.preferences.titlebar_height() {
             if x >= right - 42 {
                 self.close_active();
             } else if x >= right - 84 {
@@ -1432,7 +1943,7 @@ impl DesktopState {
             } else {
                 if self.fullscreen {
                     self.fullscreen = false;
-                    self.set_app_geometry(app, default_rect(app));
+                    self.set_app_geometry(app, default_rect(app, self.preferences));
                 }
                 self.dragging = Some(app);
             }
@@ -1459,10 +1970,11 @@ impl DesktopState {
         let Some(rect) = self.server.surface(id).map(|surface| surface.current.rect) else {
             return;
         };
-        let max_x = (framebuffer::width() as i32 - rect.width as i32).max(0);
-        let max_y = (self.work_area_bottom() as i32 - rect.height as i32).max(0);
-        let next_x = (rect.x as i32 + dx as i32).clamp(0, max_x) as i16;
-        let next_y = (rect.y as i32 + dy as i32).clamp(0, max_y) as i16;
+        let (next_x, next_y) = self.constrain_window_position(
+            rect,
+            rect.x as i32 + dx as i32,
+            rect.y as i32 + dy as i32,
+        );
         let _ = self.server.set_position(owner, id, next_x, next_y);
         let _ = self.server.commit(owner, id);
     }
@@ -1499,7 +2011,7 @@ impl DesktopState {
         self.fullscreen = false;
         self.close_launcher();
         if was_closed {
-            self.set_app_geometry(next, default_rect(next));
+            self.set_app_geometry(next, default_rect(next, self.preferences));
             if self.app_ever_opened[next.index()] {
                 slog!("HEXA_APP_REOPENED {}\r\n", next.title());
             } else {
@@ -1564,7 +2076,7 @@ impl DesktopState {
             return;
         }
         if self.fullscreen {
-            self.set_app_geometry(self.active, default_rect(self.active));
+            self.set_app_geometry(self.active, default_rect(self.active, self.preferences));
         }
         self.app_minimized[self.active.index()] = true;
         self.fullscreen = false;
@@ -1587,11 +2099,10 @@ impl DesktopState {
         }
         self.fullscreen = !self.fullscreen;
         self.sync_visibility();
-        let bottom = self.work_area_bottom();
         let rect = if self.fullscreen {
-            Rect::new(10, 10, framebuffer::width() as u16 - 20, bottom as u16 - 20)
+            self.fullscreen_rect()
         } else {
-            default_rect(self.active)
+            default_rect(self.active, self.preferences)
         };
         self.set_app_geometry(self.active, rect);
         let _ = self.server.focus(self.active_surface());
@@ -1601,7 +2112,7 @@ impl DesktopState {
         if self.fullscreen {
             let app = self.active;
             self.fullscreen = false;
-            self.set_app_geometry(app, default_rect(app));
+            self.set_app_geometry(app, default_rect(app, self.preferences));
         }
     }
 
@@ -1619,6 +2130,7 @@ impl DesktopState {
             .set_visible(DISPLAY_FIN, self.launcher_surface, self.launcher_open);
         let _ = self.server.commit(DISPLAY_FIN, self.launcher_surface);
         if self.launcher_open {
+            self.sync_taskbar_visibility();
             let _ = self.server.focus(self.launcher_surface);
         } else if self.has_active_window() {
             let _ = self.server.focus(self.active_surface());
@@ -1632,6 +2144,7 @@ impl DesktopState {
                 .server
                 .set_visible(DISPLAY_FIN, self.launcher_surface, false);
             let _ = self.server.commit(DISPLAY_FIN, self.launcher_surface);
+            self.sync_taskbar_visibility();
         }
     }
 
@@ -1644,12 +2157,83 @@ impl DesktopState {
         let Some(rect) = self.server.surface(id).map(|surface| surface.current.rect) else {
             return;
         };
-        let max_x = (framebuffer::width() as i32 - rect.width as i32 - 8).max(8);
-        let max_y = (self.work_area_bottom() as i32 - rect.height as i32).max(8);
-        let x = (rect.x as i32 + dx as i32).clamp(8, max_x) as i16;
-        let y = (rect.y as i32 + dy as i32).clamp(8, max_y) as i16;
+        let (x, y) = self.constrain_window_position(
+            rect,
+            rect.x as i32 + dx as i32,
+            rect.y as i32 + dy as i32,
+        );
         let _ = self.server.set_position(owner, id, x, y);
         let _ = self.server.commit(owner, id);
+    }
+
+    fn constrain_window_position(&self, rect: Rect, mut x: i32, mut y: i32) -> (i16, i16) {
+        let area = self.usable_area();
+        let left = area.x as i32;
+        let top = area.y as i32;
+        let right = left + area.width as i32;
+        let bottom = top + area.height as i32;
+        let allowance = self.preferences.offscreen_pixels();
+        // The rightmost 126 px are window controls. Preserve a wider visible
+        // titlebar segment so a far-left window always remains mouse-draggable.
+        let horizontal_overflow = allowance.min((rect.width as i32 - 160).max(0));
+        let vertical_overflow =
+            allowance.min((rect.height as i32 - self.preferences.titlebar_height() as i32).max(0));
+
+        if self.preferences.window_snap {
+            let snap = self.preferences.snap_pixels();
+            let right_edge = right - rect.width as i32;
+            let bottom_edge = bottom - rect.height as i32;
+            let old_x = rect.x as i32;
+            let old_y = rect.y as i32;
+            let toward_left = (old_x > left && x < old_x) || (old_x < left && x > old_x);
+            let toward_right =
+                (old_x < right_edge && x > old_x) || (old_x > right_edge && x < old_x);
+            let toward_top = (old_y > top && y < old_y) || (old_y < top && y > old_y);
+            let toward_bottom =
+                (old_y < bottom_edge && y > old_y) || (old_y > bottom_edge && y < old_y);
+            if (x - left).abs() <= snap && toward_left {
+                x = left;
+            } else if (x - right_edge).abs() <= snap && toward_right {
+                x = right_edge;
+            }
+            if (y - top).abs() <= snap && toward_top {
+                y = top;
+            } else if (y - bottom_edge).abs() <= snap && toward_bottom {
+                y = bottom_edge;
+            }
+        }
+
+        let min_x = left - horizontal_overflow;
+        let max_x = (right - rect.width as i32 + horizontal_overflow).max(min_x);
+        let min_y =
+            top - vertical_overflow.min((self.preferences.titlebar_height() as i32 - 8).max(0));
+        let max_y = (bottom - rect.height as i32 + vertical_overflow).max(min_y);
+        (x.clamp(min_x, max_x) as i16, y.clamp(min_y, max_y) as i16)
+    }
+
+    fn reconstrain_windows(&mut self) {
+        for app in AppKind::ALL {
+            if self.fullscreen && app == self.active {
+                continue;
+            }
+            let id = self.app_surfaces[app.index()];
+            let Some(rect) = self.server.surface(id).map(|surface| surface.current.rect) else {
+                continue;
+            };
+            let (x, y) = self.constrain_window_position(rect, rect.x as i32, rect.y as i32);
+            let _ = self.server.set_position(app.owner(), id, x, y);
+            let _ = self.server.commit(app.owner(), id);
+        }
+    }
+
+    fn reset_window_layout(&mut self) {
+        self.fullscreen = false;
+        for app in AppKind::ALL {
+            self.set_app_geometry(app, default_rect(app, self.preferences));
+        }
+        self.sync_visibility();
+        self.full_redraw_requested = true;
+        slog!("HEXA_WINDOW_LAYOUT_RESET count={}\r\n", APP_COUNT);
     }
 
     fn set_app_geometry(&mut self, app: AppKind, rect: Rect) {
@@ -1683,7 +2267,7 @@ impl DesktopState {
                 )
             })
             .unwrap_or_else(|| {
-                let (width, height) = app_dimensions();
+                let (width, height) = app_dimensions(self.preferences);
                 Rect::new(0, 0, width, height)
             });
         let _ = self.server.damage(BROWSER_FIN, surface, damage_rect);
@@ -1941,10 +2525,14 @@ impl DesktopState {
         let row_top = settings_row_top(rect);
         let row_step = settings_row_step(rect);
         let row_height = settings_row_height(rect);
+        let category_start = settings_category_view_start(rect, self.settings_category.index());
         if (12..sidebar_width).contains(&local_x) && local_y >= category_top {
-            let index = ((local_y - category_top) / category_step) as usize;
+            let slot = ((local_y - category_top) / category_step) as usize;
+            let index = category_start + slot;
             if let Some(category) = SettingsCategory::ALL.get(index).copied() {
-                if local_y < category_top + index as i16 * category_step + category_step - 4 {
+                if slot < settings_category_capacity(rect)
+                    && local_y < category_top + slot as i16 * category_step + category_step - 4
+                {
                     self.select_settings_category(category);
                     return true;
                 }
@@ -1952,12 +2540,25 @@ impl DesktopState {
         }
 
         if local_x >= sidebar_width + 24 && local_x < rect.width as i16 - 20 && local_y >= row_top {
-            let row = ((local_y - row_top) / row_step) as usize;
+            let content_width = rect.width as i32 - sidebar_width as i32 - 50;
+            let row_start =
+                settings_row_view_start(self.settings_category, self.settings_row, content_width);
+            let slot = ((local_y - row_top) / row_step) as usize;
+            let row = row_start + slot;
             if row < self.settings_category.row_count()
-                && local_y < row_top + row as i16 * row_step + row_height
+                && slot < settings_row_capacity(content_width)
+                && local_y < row_top + slot as i16 * row_step + row_height
             {
                 self.settings_row = row;
-                self.activate_setting(1);
+                // The left chevron occupies the first 28 px of every Choice
+                // control. Toggles and actions ignore the direction value.
+                let choice_left = rect.width as i16 - 196;
+                let direction = if (choice_left..choice_left + 28).contains(&local_x) {
+                    -1
+                } else {
+                    1
+                };
+                self.activate_setting(direction);
                 return true;
             }
         }
@@ -1978,7 +2579,9 @@ impl DesktopState {
             }
             b'1'..=b'9' => {
                 let index = (key - b'1') as usize;
-                self.select_settings_category(SettingsCategory::ALL[index]);
+                if let Some(category) = SettingsCategory::ALL.get(index).copied() {
+                    self.select_settings_category(category);
+                }
             }
             b'\n' | b' ' | b'+' | b'=' => self.activate_setting(1),
             b'-' => self.activate_setting(-1),
@@ -2058,21 +2661,8 @@ impl DesktopState {
                 self.full_redraw_requested = true;
                 self.preferences.taskbar_visible = !self.preferences.taskbar_visible;
                 let visible = self.preferences.taskbar_visible;
-                let _ = self
-                    .server
-                    .set_visible(DISPLAY_FIN, self.panel_surface, visible);
-                let _ = self.server.commit(DISPLAY_FIN, self.panel_surface);
-                if self.fullscreen {
-                    self.set_app_geometry(
-                        self.active,
-                        Rect::new(
-                            10,
-                            10,
-                            framebuffer::width() as u16 - 20,
-                            self.work_area_bottom() as u16 - 20,
-                        ),
-                    );
-                }
+                self.sync_desktop_geometry();
+                self.reconstrain_windows();
                 slog!(
                     "HEXA_SETTING_CHANGED key=taskbar value={}\r\n",
                     if visible { "on" } else { "off" }
@@ -2156,6 +2746,44 @@ impl DesktopState {
                 );
                 self.settings_notice = "Control shape updated.";
             }
+            (SettingsCategory::Appearance, 6) => {
+                self.full_redraw_requested = true;
+                let id = shift_index(
+                    self.preferences.font_face.persisted(),
+                    state::FONT_FACE_CHOICES,
+                    direction,
+                );
+                self.preferences.font_face = framebuffer::FontFace::from_persisted(id)
+                    .unwrap_or(framebuffer::FontFace::System);
+                framebuffer::set_font_style(framebuffer::FontStyle::new(
+                    self.preferences.font_face,
+                    self.preferences.font_weight,
+                ));
+                slog!(
+                    "HEXA_SETTING_CHANGED key=font-face value={}\r\n",
+                    state::FONT_FACE_NAMES[id as usize]
+                );
+                self.settings_notice = "Interface font face updated.";
+            }
+            (SettingsCategory::Appearance, 7) => {
+                self.full_redraw_requested = true;
+                let id = shift_index(
+                    self.preferences.font_weight.persisted(),
+                    state::FONT_WEIGHT_CHOICES,
+                    direction,
+                );
+                self.preferences.font_weight = framebuffer::FontWeight::from_persisted(id)
+                    .unwrap_or(framebuffer::FontWeight::Regular);
+                framebuffer::set_font_style(framebuffer::FontStyle::new(
+                    self.preferences.font_face,
+                    self.preferences.font_weight,
+                ));
+                slog!(
+                    "HEXA_SETTING_CHANGED key=font-weight value={}\r\n",
+                    state::FONT_WEIGHT_NAMES[id as usize]
+                );
+                self.settings_notice = "Interface font weight updated.";
+            }
             (SettingsCategory::Network, 0) => {
                 self.full_redraw_requested = true;
                 self.change_network_policy();
@@ -2199,6 +2827,9 @@ impl DesktopState {
             (SettingsCategory::Display, 4) => {
                 self.full_redraw_requested = true;
                 self.preferences.window_borders = !self.preferences.window_borders;
+                if self.preferences.window_borders && self.preferences.window_border_width == 0 {
+                    self.preferences.window_border_width = 1;
+                }
                 slog!(
                     "HEXA_SETTING_CHANGED key=window-borders value={}\r\n",
                     if self.preferences.window_borders {
@@ -2289,6 +2920,212 @@ impl DesktopState {
                     self.preferences.cursor.label()
                 );
                 self.settings_notice = "Cursor theme updated.";
+            }
+            (SettingsCategory::Input, 4) => {
+                self.preferences.cursor_shadow = !self.preferences.cursor_shadow;
+                self.cursor.set_shadow(self.preferences.cursor_shadow);
+                self.full_redraw_requested = true;
+                slog!(
+                    "HEXA_SETTING_CHANGED key=cursor-shadow value={}\r\n",
+                    if self.preferences.cursor_shadow {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                );
+                self.settings_notice = "Cursor shadow updated.";
+            }
+            (SettingsCategory::Windows, 0) => {
+                self.preferences.window_corner_radius = shift_index(
+                    self.preferences.window_corner_radius,
+                    state::WINDOW_CORNER_RADIUS_CHOICES,
+                    direction,
+                );
+                self.full_redraw_requested = true;
+                slog!(
+                    "HEXA_SETTING_CHANGED key=window-radius value={}\r\n",
+                    CORNER_RADIUS_LABELS[self.preferences.window_corner_radius as usize]
+                );
+                self.settings_notice = "Window corner geometry updated.";
+            }
+            (SettingsCategory::Windows, 1) => {
+                self.preferences.window_border_width = shift_index(
+                    self.preferences.window_border_width,
+                    state::WINDOW_BORDER_WIDTH_CHOICES,
+                    direction,
+                );
+                self.preferences.window_borders = self.preferences.window_border_width != 0;
+                self.full_redraw_requested = true;
+                slog!(
+                    "HEXA_SETTING_CHANGED key=window-border-width value={}\r\n",
+                    BORDER_WIDTH_LABELS[self.preferences.window_border_width as usize]
+                );
+                self.settings_notice = "Window border width updated.";
+            }
+            (SettingsCategory::Windows, 2) => {
+                self.preferences.titlebar_density = shift_index(
+                    self.preferences.titlebar_density,
+                    state::TITLEBAR_DENSITY_CHOICES,
+                    direction,
+                );
+                self.reconstrain_windows();
+                self.full_redraw_requested = true;
+                slog!(
+                    "HEXA_SETTING_CHANGED key=titlebar-size value={}\r\n",
+                    TITLEBAR_LABELS[self.preferences.titlebar_density as usize]
+                );
+                self.settings_notice = "Titlebar density updated.";
+            }
+            (SettingsCategory::Windows, 3) => {
+                self.preferences.window_opacity = shift_index(
+                    self.preferences.window_opacity,
+                    state::WINDOW_OPACITY_CHOICES,
+                    direction,
+                );
+                self.full_redraw_requested = true;
+                slog!(
+                    "HEXA_SETTING_CHANGED key=window-opacity value={}\r\n",
+                    WINDOW_OPACITY_LABELS[self.preferences.window_opacity as usize]
+                );
+                self.settings_notice = "Window translucency updated.";
+            }
+            (SettingsCategory::Windows, 4) => {
+                self.preferences.window_offscreen_allowance = shift_index(
+                    self.preferences.window_offscreen_allowance,
+                    state::WINDOW_OFFSCREEN_ALLOWANCE_CHOICES,
+                    direction,
+                );
+                self.reconstrain_windows();
+                self.full_redraw_requested = true;
+                slog!(
+                    "HEXA_SETTING_CHANGED key=offscreen-allowance value={}\r\n",
+                    OFFSCREEN_LABELS[self.preferences.window_offscreen_allowance as usize]
+                );
+                self.settings_notice = "Window edge travel updated.";
+            }
+            (SettingsCategory::Windows, 5) => {
+                self.preferences.window_snap = !self.preferences.window_snap;
+                slog!(
+                    "HEXA_SETTING_CHANGED key=window-snap value={}\r\n",
+                    if self.preferences.window_snap {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                );
+                self.settings_notice = "Window edge snapping updated.";
+            }
+            (SettingsCategory::Windows, 6) => {
+                self.preferences.window_snap_distance = shift_index(
+                    self.preferences.window_snap_distance,
+                    state::WINDOW_SNAP_DISTANCE_CHOICES,
+                    direction,
+                );
+                slog!(
+                    "HEXA_SETTING_CHANGED key=snap-distance value={}\r\n",
+                    SNAP_DISTANCE_LABELS[self.preferences.window_snap_distance as usize]
+                );
+                self.settings_notice = "Window snap distance updated.";
+            }
+            (SettingsCategory::Windows, 7) => {
+                self.preferences.focus_policy = shift_index(
+                    self.preferences.focus_policy,
+                    state::FOCUS_POLICY_CHOICES,
+                    direction,
+                );
+                slog!(
+                    "HEXA_SETTING_CHANGED key=focus-policy value={}\r\n",
+                    self.preferences.focus_policy_label()
+                );
+                self.settings_notice = "Window focus policy updated.";
+            }
+            (SettingsCategory::Taskbar, 0) => {
+                self.preferences.taskbar_placement =
+                    self.preferences.taskbar_placement.shifted(direction);
+                self.sync_desktop_geometry();
+                self.reconstrain_windows();
+                slog!(
+                    "HEXA_SETTING_CHANGED key=taskbar-placement value={}\r\n",
+                    self.preferences.taskbar_placement.label()
+                );
+                self.settings_notice = "Taskbar edge updated.";
+            }
+            (SettingsCategory::Taskbar, 1) => {
+                self.preferences.taskbar_size = shift_index(
+                    self.preferences.taskbar_size,
+                    state::TASKBAR_SIZE_CHOICES,
+                    direction,
+                );
+                self.sync_desktop_geometry();
+                self.reconstrain_windows();
+                slog!(
+                    "HEXA_SETTING_CHANGED key=taskbar-size value={}\r\n",
+                    TASKBAR_SIZE_LABELS[self.preferences.taskbar_size as usize]
+                );
+                self.settings_notice = "Taskbar size updated.";
+            }
+            (SettingsCategory::Taskbar, 2) => {
+                self.preferences.taskbar_alignment =
+                    self.preferences.taskbar_alignment.shifted(direction);
+                self.full_redraw_requested = true;
+                slog!(
+                    "HEXA_SETTING_CHANGED key=taskbar-alignment value={}\r\n",
+                    self.preferences.taskbar_alignment.label()
+                );
+                self.settings_notice = "Running-app alignment updated.";
+            }
+            (SettingsCategory::Taskbar, 3) => {
+                self.preferences.taskbar_autohide = !self.preferences.taskbar_autohide;
+                self.sync_desktop_geometry();
+                self.reconstrain_windows();
+                slog!(
+                    "HEXA_SETTING_CHANGED key=taskbar-autohide value={}\r\n",
+                    if self.preferences.taskbar_autohide {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                );
+                self.settings_notice = "Taskbar auto-hide updated; touch its edge to reveal.";
+            }
+            (SettingsCategory::Taskbar, 4) => {
+                self.preferences.taskbar_translucent = !self.preferences.taskbar_translucent;
+                self.full_redraw_requested = true;
+                slog!(
+                    "HEXA_SETTING_CHANGED key=taskbar-translucent value={}\r\n",
+                    if self.preferences.taskbar_translucent {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                );
+                self.settings_notice = "Taskbar translucency updated.";
+            }
+            (SettingsCategory::Taskbar, 5) => {
+                self.preferences.taskbar_labels = !self.preferences.taskbar_labels;
+                self.full_redraw_requested = true;
+                slog!(
+                    "HEXA_SETTING_CHANGED key=taskbar-labels value={}\r\n",
+                    if self.preferences.taskbar_labels {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                );
+                self.settings_notice = "Taskbar application labels updated.";
+            }
+            (SettingsCategory::Taskbar, 6) => {
+                self.preferences.clock_seconds = !self.preferences.clock_seconds;
+                self.full_redraw_requested = true;
+                slog!(
+                    "HEXA_SETTING_CHANGED key=clock-seconds value={}\r\n",
+                    if self.preferences.clock_seconds {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                );
+                self.settings_notice = "Taskbar clock precision updated.";
             }
             (SettingsCategory::Privacy, 0) => {
                 self.browser_line.fill(0);
@@ -2408,11 +3245,30 @@ impl DesktopState {
 
     fn terminal_print_help(&mut self) {
         self.terminal_push("ExpOS terminal commands:");
-        self.terminal_push("  help clear status version hostname pwd whoami id uname uptime");
+        self.terminal_push(
+            "  help clear status version hostname pwd whoami id uname uptime neofetch",
+        );
         self.terminal_push("  users display resolution network netstat storage theme history");
-        self.terminal_push("  apps ls ps echo <text>");
+        self.terminal_push("  apps ls ps echo <text> windowreset");
         self.terminal_push("  open <app> close exit shell");
         self.terminal_push("Use Up/Down for command history.");
+    }
+
+    fn terminal_print_neofetch(&mut self) {
+        self.terminal_push("        .--------.   .--------.");
+        self.terminal_push("      .'          '.'          '.");
+        self.terminal_push("     /     OOO           OOO     \\");
+        self.terminal_push("    |     O   O         O   O     |");
+        self.terminal_push("    |     O   O         O   O     |");
+        self.terminal_push("     \\     OOO    .-.    OOO     /");
+        self.terminal_push("      '._         '---'        _.'");
+        self.terminal_push("         '---------------'");
+        self.terminal_push_parts(&["OS: ExpOS ", env!("CARGO_PKG_VERSION")]);
+        self.terminal_push("Kernel: x86_64 Rust no_std");
+        self.terminal_push("Model: Form-native / Dimension-oriented");
+        let current = framebuffer::current_mode();
+        self.terminal_push_parts(&["Display: ", current.label(), " XRGB8888"]);
+        self.terminal_push_parts(&["Authority: ", self.session.authority_name()]);
     }
 
     fn terminal_print_status(&mut self) {
@@ -2563,10 +3419,32 @@ impl DesktopState {
     }
 
     fn terminal_print_theme(&mut self) {
+        self.terminal_push_number(
+            "working Appearance/Windows/Taskbar choices: ",
+            CUSTOMIZATION_VALUE_COUNT as u64,
+            "",
+        );
+        self.terminal_push_number(
+            "state-schema choices (including reserved): ",
+            state::CUSTOMIZATION_SELECTABLE_VALUES as u64,
+            "",
+        );
         self.terminal_push_parts(&["theme: ", self.preferences.theme.label()]);
         self.terminal_push_parts(&["wallpaper: ", self.preferences.wallpaper.label()]);
         self.terminal_push_parts(&["cursor: ", self.preferences.cursor.label()]);
         self.terminal_push_parts(&["accent: ", self.preferences.accent.label()]);
+        self.terminal_push_parts(&[
+            "font: ",
+            state::FONT_FACE_NAMES[self.preferences.font_face.persisted() as usize],
+            " ",
+            state::FONT_WEIGHT_NAMES[self.preferences.font_weight.persisted() as usize],
+        ]);
+        self.terminal_push_parts(&[
+            "taskbar: ",
+            self.preferences.taskbar_placement.label(),
+            " / ",
+            self.preferences.taskbar_alignment.label(),
+        ]);
         self.terminal_push_parts(&[
             "wallpaper effects: ",
             if self.preferences.wallpaper_effects {
@@ -2630,6 +3508,8 @@ impl DesktopState {
             self.terminal_push("ExpOS hexa-kernel x86_64");
         } else if name.eq_ignore_ascii_case(b"uptime") {
             self.terminal_push_number("monotonic ticks: ", crate::hardware::timestamp(), "");
+        } else if name.eq_ignore_ascii_case(b"neofetch") || name.eq_ignore_ascii_case(b"sysinfo") {
+            self.terminal_print_neofetch();
         } else if name.eq_ignore_ascii_case(b"users") {
             self.terminal_print_users();
         } else if name.eq_ignore_ascii_case(b"display") || name.eq_ignore_ascii_case(b"resolution")
@@ -2649,6 +3529,11 @@ impl DesktopState {
             self.terminal_print_running_apps();
         } else if name.eq_ignore_ascii_case(b"echo") {
             self.terminal_push_bytes(arguments);
+        } else if name.eq_ignore_ascii_case(b"windowreset")
+            || name.eq_ignore_ascii_case(b"resetwindows")
+        {
+            self.reset_window_layout();
+            self.terminal_push("All application windows returned to their default positions.");
         } else if name.eq_ignore_ascii_case(b"open") {
             if let Some(app) = parse_app(arguments) {
                 self.terminal_push_parts(&["Opening ", app.label(), "."]);
@@ -2826,6 +3711,25 @@ fn run_session(
         desktop.preferences.cursor.label(),
         desktop.preferences.accent.label()
     );
+    slog!(
+        "HEXA_CUSTOMIZATION font={} weight={} radius={} border={} titlebar={} opacity={} offscreen={} snap={} focus={} taskbar={} size={} align={} autohide={} translucent={} labels={} seconds={}\r\n",
+        state::FONT_FACE_NAMES[desktop.preferences.font_face.persisted() as usize],
+        state::FONT_WEIGHT_NAMES[desktop.preferences.font_weight.persisted() as usize],
+        CORNER_RADIUS_LABELS[desktop.preferences.window_corner_radius as usize],
+        BORDER_WIDTH_LABELS[desktop.preferences.window_border_width as usize],
+        TITLEBAR_LABELS[desktop.preferences.titlebar_density as usize],
+        WINDOW_OPACITY_LABELS[desktop.preferences.window_opacity as usize],
+        OFFSCREEN_LABELS[desktop.preferences.window_offscreen_allowance as usize],
+        desktop.preferences.window_snap,
+        desktop.preferences.focus_policy_label(),
+        desktop.preferences.taskbar_placement.label(),
+        TASKBAR_SIZE_LABELS[desktop.preferences.taskbar_size as usize],
+        desktop.preferences.taskbar_alignment.label(),
+        desktop.preferences.taskbar_autohide,
+        desktop.preferences.taskbar_translucent,
+        desktop.preferences.taskbar_labels,
+        desktop.preferences.clock_seconds,
+    );
     let clock = crate::hardware::clock_info();
     slog!(
         "HEXA_PRESENTATION_READY rate={} vsync={} pageflip={} clock_hz={} source={}\r\n",
@@ -2842,10 +3746,31 @@ fn run_session(
         desktop.preferences.wallpaper_effects
     );
 
+    let mut rendered_clock = crate::hardware::rtc_time();
+    let clock_poll_ticks = clock.tsc_hz.max(1);
+    let mut next_clock_poll = crate::hardware::timestamp().saturating_add(clock_poll_ticks);
+
     while !desktop.should_exit {
         let Some(event) = input.poll_event() else {
             let now = crate::hardware::timestamp();
-            if desktop.active == AppKind::Games
+            let clock_changed = if now >= next_clock_poll {
+                next_clock_poll = now.saturating_add(clock_poll_ticks);
+                let current_clock = crate::hardware::rtc_time();
+                let changed = if desktop.preferences.clock_seconds {
+                    current_clock != rendered_clock
+                } else {
+                    current_clock.hour != rendered_clock.hour
+                        || current_clock.minute != rendered_clock.minute
+                };
+                rendered_clock = current_clock;
+                changed
+            } else {
+                false
+            };
+            if clock_changed && desktop.preferences.status_visible && desktop.taskbar_should_show()
+            {
+                render(&mut desktop);
+            } else if desktop.active == AppKind::Games
                 && desktop.app_is_visible(AppKind::Games)
                 && desktop.games.tick(now)
             {
@@ -3129,13 +4054,20 @@ fn buffer(id: u32, owner: Fin, width: u16, height: u16) -> BufferHandle {
     }
 }
 
-fn default_rect(app: AppKind) -> Rect {
+fn default_rect(app: AppKind, preferences: DesktopPreferences) -> Rect {
     let offset = (app.index() % 4) as i16;
-    let (app_width, app_height) = app_dimensions();
-    let centered_x = ((framebuffer::width() as i32 - app_width as i32) / 2).max(4) as i16;
-    let centered_y = ((taskbar_y() as i32 - app_height as i32) / 2).max(4) as i16;
-    let max_x = (framebuffer::width() as i16 - app_width as i16).max(4);
-    let max_y = (taskbar_y() - app_height as i16).max(4);
+    let area = work_area(preferences);
+    let (app_width, app_height) = app_dimensions(preferences);
+    let centered_x = area.x
+        + ((area.width as i32 - app_width as i32) / 2)
+            .max(4)
+            .min(i16::MAX as i32) as i16;
+    let centered_y = area.y
+        + ((area.height as i32 - app_height as i32) / 2)
+            .max(4)
+            .min(i16::MAX as i32) as i16;
+    let max_x = (area.x + area.width as i16 - app_width as i16).max(area.x + 4);
+    let max_y = (area.y + area.height as i16 - app_height as i16).max(area.y + 4);
     Rect::new(
         (centered_x + offset * 18).min(max_x),
         (centered_y + offset * 8).min(max_y),
@@ -3237,6 +4169,7 @@ fn draw_wallpaper(preferences: DesktopPreferences) {
 }
 
 fn render(desktop: &mut DesktopState) {
+    desktop.full_redraw_requested = false;
     desktop.cursor.invalidate();
     draw_wallpaper(desktop.preferences);
 
@@ -3248,7 +4181,7 @@ fn render(desktop: &mut DesktopState) {
     if desktop.app_is_visible(desktop.active) {
         draw_app(desktop, desktop.active, true, true);
     }
-    if desktop.preferences.taskbar_visible {
+    if desktop.taskbar_should_show() {
         draw_dock(desktop);
     }
     if desktop.launcher_open {
@@ -3259,6 +4192,14 @@ fn render(desktop: &mut DesktopState) {
 }
 
 fn render_active_window(desktop: &mut DesktopState) {
+    // Translucent surfaces depend on every layer below them. Reblending only the
+    // active rectangle would gradually change its color on each damaged commit.
+    // A requested composition change (open/close/reset/focus) likewise needs the
+    // wallpaper, z-order and taskbar to be rebuilt as one coherent scene.
+    if desktop.full_redraw_requested || desktop.preferences.window_alpha() < u8::MAX {
+        render(desktop);
+        return;
+    }
     desktop.cursor.restore();
     let mut damage = [desktop.cursor.damage_region(); 2];
     let mut damage_count = 1;
@@ -3268,7 +4209,7 @@ fn render_active_window(desktop: &mut DesktopState) {
             .surface(desktop.active_surface())
             .map(|surface| surface.current.rect)
             .unwrap_or_else(|| {
-                let (width, height) = app_dimensions();
+                let (width, height) = app_dimensions(desktop.preferences);
                 Rect::new(8, 8, width, height)
             });
         damage[damage_count] = framebuffer::DamageRegion::new(
@@ -3348,7 +4289,7 @@ fn draw_app(desktop: &DesktopState, app: AppKind, focused: bool, draw_shadow: bo
         .surface(desktop.app_surfaces[app.index()])
         .map(|surface| surface.current.rect)
         .unwrap_or_else(|| {
-            let (width, height) = app_dimensions();
+            let (width, height) = app_dimensions(desktop.preferences);
             Rect::new(8, 8, width, height)
         });
     draw_window(rect, app.label(), focused, desktop.preferences, draw_shadow);
@@ -3369,6 +4310,7 @@ fn draw_app(desktop: &DesktopState, app: AppKind, focused: bool, draw_shadow: bo
             AppKind::Notes => draw_notes(rect, desktop),
         }
     }
+    draw_window_border(rect, focused, desktop.preferences);
 }
 
 fn draw_window(
@@ -3385,57 +4327,134 @@ fn draw_window(
     if draw_shadow && preferences.window_shadows && width > 24 && height > 24 {
         framebuffer::alpha_rect(x + 8, y + 10, width, height, 0x0000_0000, 105);
     }
-    if preferences.rounded_controls {
-        framebuffer::rounded_rect(x, y, width, height, 10, preferences.window_color());
+    let radius = if preferences.rounded_controls {
+        preferences.window_corner_radius()
+    } else {
+        0
+    };
+    let alpha = preferences.window_alpha();
+    if alpha < u8::MAX && radius > 0 {
+        framebuffer::alpha_rounded_rect(
+            x,
+            y,
+            width,
+            height,
+            radius,
+            preferences.window_color(),
+            alpha,
+        );
+    } else if alpha < u8::MAX {
+        framebuffer::alpha_rect(x, y, width, height, preferences.window_color(), alpha);
+    } else if radius > 0 {
+        framebuffer::rounded_rect(x, y, width, height, radius, preferences.window_color());
     } else {
         framebuffer::rect(x, y, width, height, preferences.window_color());
-    }
-    if preferences.window_borders {
-        framebuffer::outline(x, y, width, height, preferences.border_color(focused));
     }
     if focused {
         framebuffer::rect(x + 1, y + 1, width - 2, 2, preferences.accent.color());
     }
-    if preferences.rounded_controls {
-        framebuffer::rounded_rect(x + 1, y + 3, width - 2, 29, 8, preferences.chrome_color());
-        framebuffer::rect(x + 1, y + 18, width - 2, 14, preferences.chrome_color());
+    let titlebar_height = preferences.titlebar_height() as i32;
+    if alpha < u8::MAX && radius > 0 {
+        framebuffer::alpha_rounded_rect(
+            x + 1,
+            y + 3,
+            width - 2,
+            titlebar_height - 3,
+            radius.min((titlebar_height - 3) / 2),
+            preferences.chrome_color(),
+            alpha,
+        );
+        framebuffer::alpha_rect(
+            x + 1,
+            y + titlebar_height / 2,
+            width - 2,
+            titlebar_height / 2,
+            preferences.chrome_color(),
+            alpha,
+        );
+    } else if alpha < u8::MAX {
+        framebuffer::alpha_rect(
+            x + 1,
+            y + 3,
+            width - 2,
+            titlebar_height - 3,
+            preferences.chrome_color(),
+            alpha,
+        );
+    } else if radius > 0 {
+        framebuffer::rounded_rect(
+            x + 1,
+            y + 3,
+            width - 2,
+            titlebar_height - 3,
+            radius.min((titlebar_height - 3) / 2),
+            preferences.chrome_color(),
+        );
+        framebuffer::rect(
+            x + 1,
+            y + titlebar_height / 2,
+            width - 2,
+            titlebar_height / 2,
+            preferences.chrome_color(),
+        );
     } else {
-        framebuffer::rect(x + 1, y + 3, width - 2, 29, preferences.chrome_color());
+        framebuffer::rect(
+            x + 1,
+            y + 3,
+            width - 2,
+            titlebar_height - 3,
+            preferences.chrome_color(),
+        );
     }
-    framebuffer::text(x + 12, y + 13, title, color::INK, 1);
+    let text_y = y + ((titlebar_height - 8) / 2).max(5);
+    framebuffer::text(x + 12, text_y, title, color::INK, 1);
     framebuffer::line(
         x + width - 126,
         y + 3,
         x + width - 126,
-        y + 31,
+        y + titlebar_height - 1,
         color::BORDER,
     );
-    framebuffer::line(x + width - 84, y + 3, x + width - 84, y + 31, color::BORDER);
-    framebuffer::line(x + width - 42, y + 3, x + width - 42, y + 31, color::BORDER);
+    framebuffer::line(
+        x + width - 84,
+        y + 3,
+        x + width - 84,
+        y + titlebar_height - 1,
+        color::BORDER,
+    );
+    framebuffer::line(
+        x + width - 42,
+        y + 3,
+        x + width - 42,
+        y + titlebar_height - 1,
+        color::BORDER,
+    );
+    let button_y = y + 5;
+    let button_height = (titlebar_height - 9).max(14);
     settings_rect(
         preferences,
         x + width - 120,
-        y + 7,
+        button_y,
         32,
-        21,
+        button_height,
         5,
         preferences.card_color(),
     );
     settings_rect(
         preferences,
         x + width - 79,
-        y + 7,
+        button_y,
         32,
-        21,
+        button_height,
         5,
         preferences.card_color(),
     );
     settings_rect(
         preferences,
         x + width - 38,
-        y + 7,
+        button_y,
         30,
-        21,
+        button_height,
         5,
         if focused {
             0x0066_3038
@@ -3443,9 +4462,94 @@ fn draw_window(
             preferences.card_color()
         },
     );
-    framebuffer::text(x + width - 109, y + 13, "-", color::MUTED, 1);
-    framebuffer::outline(x + width - 69, y + 12, 12, 8, color::MUTED);
-    framebuffer::text(x + width - 28, y + 13, "x", color::INK, 1);
+    framebuffer::text(x + width - 109, text_y, "-", color::MUTED, 1);
+    framebuffer::outline(x + width - 69, text_y - 1, 12, 8, color::MUTED);
+    framebuffer::text(x + width - 28, text_y, "x", color::INK, 1);
+}
+
+fn draw_window_border(rect: Rect, focused: bool, preferences: DesktopPreferences) {
+    if !preferences.window_borders {
+        return;
+    }
+    let width = rect.width as i32;
+    let height = rect.height as i32;
+    let radius = if preferences.rounded_controls {
+        preferences.window_corner_radius()
+    } else {
+        0
+    };
+    for inset in 0..preferences.window_border_width() {
+        if width <= inset * 2 || height <= inset * 2 {
+            break;
+        }
+        framebuffer::rounded_outline(
+            rect.x as i32 + inset,
+            rect.y as i32 + inset,
+            width - inset * 2,
+            height - inset * 2,
+            (radius - inset).max(0),
+            preferences.border_color(focused),
+        );
+    }
+}
+
+/// Fill a rectangular app region while clipping its pixels to the configured
+/// outer window shape. This keeps app bodies from repainting rounded corners.
+#[allow(clippy::too_many_arguments)]
+fn fill_window_region(
+    rect: Rect,
+    preferences: DesktopPreferences,
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+    value: u32,
+) {
+    let outer_width = rect.width as i32;
+    let outer_height = rect.height as i32;
+    let radius = if preferences.rounded_controls {
+        preferences
+            .window_corner_radius()
+            .max(0)
+            .min(outer_width / 2)
+            .min(outer_height / 2)
+    } else {
+        0
+    };
+    let first_row = top.max(0);
+    let last_row = top.saturating_add(height).min(outer_height);
+    let region_left = left.max(0);
+    let region_right = left.saturating_add(width).min(outer_width);
+    for row in first_row..last_row {
+        let corner_row = if row < radius {
+            row
+        } else if row >= outer_height - radius {
+            outer_height - row - 1
+        } else {
+            radius
+        };
+        let shape_inset = if corner_row < radius {
+            let dy = radius - corner_row;
+            let mut dx = 0;
+            while (dx + 1) * (dx + 1) + dy * dy <= radius * radius {
+                dx += 1;
+            }
+            radius - dx
+        } else {
+            0
+        };
+        let row_left = region_left.max(shape_inset);
+        let row_right = region_right.min(outer_width - shape_inset);
+        if row_right > row_left {
+            framebuffer::rect(
+                rect.x as i32 + row_left,
+                rect.y as i32 + row,
+                row_right - row_left,
+                1,
+                value,
+            );
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -3699,15 +4803,18 @@ fn draw_terminal(rect: Rect, desktop: &DesktopState) {
     let y = rect.y as i32;
     let width = rect.width as i32;
     let height = rect.height as i32;
-    framebuffer::rect(
-        x + 1,
-        y + 32,
+    let titlebar_height = desktop.preferences.titlebar_height() as i32;
+    fill_window_region(
+        rect,
+        desktop.preferences,
+        1,
+        titlebar_height,
         width - 2,
-        height - 33,
+        height - titlebar_height - 1,
         desktop.preferences.theme.terminal(),
     );
     let prompt_y = y + height - 34;
-    let output_top = y + 48;
+    let output_top = y + titlebar_height + 16;
     let line_height = 14;
     let visible_lines = ((prompt_y - output_top - 8) / line_height).max(0) as usize;
     let lines = visible_lines.min(desktop.terminal_output_count);
@@ -3918,17 +5025,20 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
     let accent = desktop.preferences.accent.color();
     let connectivity = radio::snapshot();
     let can_configure_radios = desktop.settings_radio_handle.is_some();
+    let titlebar_height = desktop.preferences.titlebar_height() as i32;
 
-    framebuffer::rect(
-        x + 1,
-        y + 32,
+    fill_window_region(
+        rect,
+        desktop.preferences,
+        1,
+        titlebar_height,
         sidebar_width,
-        height - 33,
+        height - titlebar_height - 1,
         desktop.preferences.chrome_color(),
     );
     framebuffer::line(
         x + sidebar_width,
-        y + 32,
+        y + titlebar_height,
         x + sidebar_width,
         y + height - 1,
         desktop.preferences.border_color(false),
@@ -3941,8 +5051,15 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
         if compact { 1 } else { 2 },
     );
 
-    for category in SettingsCategory::ALL {
-        let row_y = y + category_top + category.index() as i32 * category_step;
+    let category_start = settings_category_view_start(rect, desktop.settings_category.index());
+    let category_end =
+        (category_start + settings_category_capacity(rect)).min(SETTINGS_CATEGORY_COUNT);
+    for category in SettingsCategory::ALL[category_start..category_end]
+        .iter()
+        .copied()
+    {
+        let slot = category.index() - category_start;
+        let row_y = y + category_top + slot as i32 * category_step;
         let selected = category == desktop.settings_category;
         if selected {
             settings_rect(
@@ -3963,6 +5080,12 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
             if selected { color::WHITE } else { color::MUTED },
             1,
         );
+    }
+    if category_start > 0 {
+        framebuffer::text(x + sidebar_width - 24, y + 48, "^", accent, 1);
+    }
+    if category_end < SETTINGS_CATEGORY_COUNT {
+        framebuffer::text(x + sidebar_width - 24, y + height - 18, "+", accent, 1);
     }
 
     let content_x = x + sidebar_width + 28;
@@ -4103,6 +5226,28 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                     on: desktop.preferences.rounded_controls,
                     available: true,
                 },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                6,
+                "Font face",
+                "Change the built-in allocation-free bitmap rasterizer",
+                state::FONT_FACE_NAMES[desktop.preferences.font_face.persisted() as usize],
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                7,
+                "Font weight",
+                "Light, regular, or bold strokes without changing layout",
+                state::FONT_WEIGHT_NAMES[desktop.preferences.font_weight.persisted() as usize],
+                SettingControl::Choice,
             );
         }
         SettingsCategory::Network => {
@@ -4419,6 +5564,228 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 "Ready",
                 SettingControl::Status { ready: true },
             );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                4,
+                "Cursor shadow",
+                "Add a low-cost two-pixel pointer shadow",
+                if desktop.preferences.cursor_shadow {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.cursor_shadow,
+                    available: true,
+                },
+            );
+        }
+        SettingsCategory::Windows => {
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                0,
+                "Corner radius",
+                "Square through strongly rounded window geometry",
+                CORNER_RADIUS_LABELS[desktop.preferences.window_corner_radius as usize],
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                1,
+                "Border width",
+                "Independent window outline thickness",
+                BORDER_WIDTH_LABELS[desktop.preferences.window_border_width as usize],
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                2,
+                "Titlebar size",
+                "Compact through tall draggable window chrome",
+                TITLEBAR_LABELS[desktop.preferences.titlebar_density as usize],
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                3,
+                "Backdrop opacity",
+                "Blend the window backdrop and titlebar over the desktop",
+                WINDOW_OPACITY_LABELS[desktop.preferences.window_opacity as usize],
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                4,
+                "Off-screen travel",
+                "Allow windows beyond an edge while retaining recovery space",
+                OFFSCREEN_LABELS[desktop.preferences.window_offscreen_allowance as usize],
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                5,
+                "Edge snapping",
+                "Snap dragged windows to the current work area",
+                if desktop.preferences.window_snap {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.window_snap,
+                    available: true,
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                6,
+                "Snap distance",
+                "Choose the edge attraction distance",
+                SNAP_DISTANCE_LABELS[desktop.preferences.window_snap_distance as usize],
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                7,
+                "Focus policy",
+                "Click focus, calm hover, or continuous pointer focus",
+                desktop.preferences.focus_policy_label(),
+                SettingControl::Choice,
+            );
+        }
+        SettingsCategory::Taskbar => {
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                0,
+                "Placement",
+                "Attach the taskbar to any display edge",
+                desktop.preferences.taskbar_placement.label(),
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                1,
+                "Size",
+                "Panel thickness from compact to touch friendly",
+                TASKBAR_SIZE_LABELS[desktop.preferences.taskbar_size as usize],
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                2,
+                "App alignment",
+                "Place running applications at start, center, or end",
+                desktop.preferences.taskbar_alignment.label(),
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                3,
+                "Auto-hide",
+                "Reveal the taskbar by touching its configured edge",
+                if desktop.preferences.taskbar_autohide {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.taskbar_autohide,
+                    available: true,
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                4,
+                "Translucent panel",
+                "Blend the panel with the wallpaper",
+                if desktop.preferences.taskbar_translucent {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.taskbar_translucent,
+                    available: true,
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                5,
+                "Application labels",
+                "Show names alongside icons on horizontal panels",
+                if desktop.preferences.taskbar_labels {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.taskbar_labels,
+                    available: true,
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                6,
+                "Clock seconds",
+                "Show seconds in the hardware RTC taskbar clock",
+                if desktop.preferences.clock_seconds {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.clock_seconds,
+                    available: true,
+                },
+            );
         }
         SettingsCategory::Privacy => {
             settings_row(
@@ -4536,7 +5903,14 @@ fn settings_row(
     let row_top = if compact { 88 } else { 112 };
     let row_step = if compact { 47 } else { 62 };
     let row_height = if compact { 42 } else { 54 };
-    let y = window_y + row_top + index as i32 * row_step;
+    let view_start =
+        settings_row_view_start(desktop.settings_category, desktop.settings_row, width);
+    let view_end = view_start + settings_row_capacity(width);
+    if index < view_start || index >= view_end {
+        return;
+    }
+    let slot = index - view_start;
+    let y = window_y + row_top + slot as i32 * row_step;
     let selected = desktop.settings_row == index;
     let accent = desktop.preferences.accent.color();
     settings_rect(
@@ -4772,84 +6146,174 @@ fn metric(x: i32, y: i32, width: i32, label: &str, value: &str, accent: u32) {
 }
 
 fn draw_dock(desktop: &DesktopState) {
-    let y = taskbar_y() as i32;
+    let dock = taskbar_rect(desktop.preferences);
+    let x = dock.x as i32;
+    let y = dock.y as i32;
+    let width = dock.width as i32;
+    let height = dock.height as i32;
     let accent = desktop.preferences.accent.color();
-    framebuffer::alpha_rect(
-        0,
-        y,
-        framebuffer::width() as i32,
-        TASKBAR_HEIGHT as i32,
-        desktop.preferences.panel_color(),
-        244,
-    );
-    framebuffer::rect(
-        0,
-        y,
-        framebuffer::width() as i32,
-        1,
-        desktop.preferences.border_color(false),
-    );
+    if desktop.preferences.taskbar_translucent {
+        framebuffer::alpha_rect(x, y, width, height, desktop.preferences.panel_color(), 204);
+    } else {
+        framebuffer::rect(x, y, width, height, desktop.preferences.panel_color());
+    }
+    framebuffer::outline(x, y, width, height, desktop.preferences.border_color(false));
     let start_color = if desktop.launcher_open {
         0x0032_2654
     } else {
         0x0017_1B25
     };
+    let start = taskbar_start_rect(desktop.preferences);
     settings_rect(
         desktop.preferences,
-        START_X as i32,
-        y + 7,
-        32,
-        34,
+        start.x as i32,
+        start.y as i32,
+        start.width as i32,
+        start.height as i32,
         7,
         start_color,
     );
-    settings_rect(desktop.preferences, 16, y + 15, 16, 16, 4, accent);
-    framebuffer::text(20, y + 19, "E", color::WHITE, 1);
-    let mut running_index = 0_i32;
+    let logo_x = start.x as i32 + (start.width as i32 - 16) / 2;
+    let logo_y = start.y as i32 + (start.height as i32 - 16) / 2;
+    settings_rect(desktop.preferences, logo_x, logo_y, 16, 16, 4, accent);
+    framebuffer::text(logo_x + 4, logo_y + 4, "E", color::WHITE, 1);
+
+    let running_count = desktop.app_open.iter().filter(|open| **open).count();
+    let mut running_index = 0_usize;
     for app in AppKind::ALL {
         if !desktop.app_open[app.index()] {
             continue;
         }
-        let x = TASK_ICON_X as i32 + running_index * TASK_ICON_STEP as i32;
+        let item = taskbar_app_rect(desktop.preferences, running_index, running_count);
+        let item_x = item.x as i32;
+        let item_y = item.y as i32;
         if app == desktop.active && desktop.app_is_visible(app) {
-            settings_rect(desktop.preferences, x, y + 7, 32, 34, 7, 0x0024_292F);
+            settings_rect(
+                desktop.preferences,
+                item_x,
+                item_y,
+                item.width as i32,
+                item.height as i32,
+                7,
+                0x0024_292F,
+            );
         }
-        settings_rect(desktop.preferences, x + 8, y + 15, 18, 18, 4, app.accent());
-        framebuffer::text(x + 13, y + 19, app.shortcut(), color::WHITE, 1);
-        framebuffer::rect(
-            x + 8,
-            y + 40,
-            18,
-            2,
-            if desktop.app_minimized[app.index()] {
-                color::MUTED
-            } else {
-                accent
-            },
-        );
+        let icon_x = item_x + 5;
+        let icon_y = item_y + (item.height as i32 - 18) / 2;
+        settings_rect(desktop.preferences, icon_x, icon_y, 18, 18, 4, app.accent());
+        framebuffer::text(icon_x + 5, icon_y + 4, app.shortcut(), color::WHITE, 1);
+        if desktop.preferences.taskbar_labels
+            && !desktop.preferences.taskbar_placement.vertical()
+            && item.width >= 48
+        {
+            let capacity =
+                ((item.width as i32 - 34) / framebuffer::text_advance(1)).max(0) as usize;
+            let label = app.label();
+            if capacity > 0 {
+                framebuffer::text(
+                    item_x + 30,
+                    item_y + (item.height as i32 - 8) / 2,
+                    &label[..label.len().min(capacity)],
+                    color::INK,
+                    1,
+                );
+            }
+        }
+        let indicator_color = if desktop.app_minimized[app.index()] {
+            color::MUTED
+        } else {
+            accent
+        };
+        if desktop.preferences.taskbar_placement.vertical() {
+            framebuffer::rect(
+                item_x,
+                item_y + 4,
+                2,
+                item.height as i32 - 8,
+                indicator_color,
+            );
+        } else {
+            framebuffer::rect(
+                item_x + 5,
+                item_y + item.height as i32 - 2,
+                18,
+                2,
+                indicator_color,
+            );
+        }
         running_index += 1;
     }
     if desktop.preferences.status_visible {
         let connectivity = radio::snapshot();
-        framebuffer::rect(
-            framebuffer::width() as i32 - 22,
-            y + 21,
-            7,
-            7,
-            if connectivity.network_enabled && connectivity.ethernet.connected() {
-                accent
+        let status_color = if connectivity.network_enabled && connectivity.ethernet.connected() {
+            accent
+        } else {
+            color::MUTED
+        };
+        let clock = crate::hardware::rtc_time();
+        if desktop.preferences.taskbar_placement.vertical() {
+            let clock_y = y + height
+                - if desktop.preferences.clock_seconds {
+                    64
+                } else {
+                    46
+                };
+            draw_two_digits(x + (width - 12) / 2, clock_y, clock.hour, color::INK);
+            draw_two_digits(x + (width - 12) / 2, clock_y + 16, clock.minute, color::INK);
+            if desktop.preferences.clock_seconds {
+                draw_two_digits(
+                    x + (width - 12) / 2,
+                    clock_y + 32,
+                    clock.second,
+                    color::MUTED,
+                );
+            }
+            framebuffer::rect(x + (width - 7) / 2, clock_y - 13, 7, 7, status_color);
+        } else {
+            let clock_width = if desktop.preferences.clock_seconds {
+                48
             } else {
-                color::MUTED
-            },
-        );
+                30
+            };
+            let clock_x = x + width - clock_width - 12;
+            let clock_y = y + (height - 8) / 2;
+            draw_clock(clock_x, clock_y, clock, desktop.preferences.clock_seconds);
+            framebuffer::rect(clock_x - 15, clock_y, 7, 7, status_color);
+        }
     }
 }
 
+fn draw_two_digits(x: i32, y: i32, value: u8, color: u32) {
+    let bytes = [b'0' + value / 10, b'0' + value % 10];
+    let text = core::str::from_utf8(&bytes).unwrap_or("??");
+    framebuffer::text(x, y, text, color, 1);
+}
+
+fn draw_clock(x: i32, y: i32, time: crate::hardware::RtcTime, seconds: bool) {
+    let mut bytes = [b'0'; 8];
+    bytes[0] = b'0' + time.hour / 10;
+    bytes[1] = b'0' + time.hour % 10;
+    bytes[2] = b':';
+    bytes[3] = b'0' + time.minute / 10;
+    bytes[4] = b'0' + time.minute % 10;
+    let length = if seconds {
+        bytes[5] = b':';
+        bytes[6] = b'0' + time.second / 10;
+        bytes[7] = b'0' + time.second % 10;
+        8
+    } else {
+        5
+    };
+    let text = core::str::from_utf8(&bytes[..length]).unwrap_or("--:--");
+    framebuffer::text(x, y, text, color::INK, 1);
+}
+
 fn draw_launcher(desktop: &DesktopState) {
-    let x = LAUNCHER_X as i32;
-    let y = launcher_y() as i32;
-    let width = LAUNCHER_WIDTH as i32;
-    let height = LAUNCHER_HEIGHT as i32;
+    let launcher = launcher_rect(desktop.preferences);
+    let x = launcher.x as i32;
+    let y = launcher.y as i32;
+    let width = launcher.width as i32;
+    let height = launcher.height as i32;
     framebuffer::rounded_rect(x, y, width, height, 9, desktop.preferences.panel_color());
     framebuffer::outline(x, y, width, height, desktop.preferences.border_color(false));
     framebuffer::text(x + 16, y + 17, "Applications", color::INK, 1);
@@ -5041,9 +6505,31 @@ mod tests {
         assert!(!preferences.wallpaper_effects);
         assert!(!preferences.responsive_presentation);
         assert_eq!(preferences.presentation_policy_label(), "Efficient");
-        assert_eq!(SettingsCategory::ALL.len(), 9);
+        assert_eq!(SettingsCategory::ALL.len(), 11);
         assert_eq!(SettingsCategory::Performance.index(), 5);
         assert_eq!(SettingsCategory::Performance.row_count(), 4);
+    }
+
+    #[test]
+    fn customization_pages_expose_more_than_one_hundred_real_values() {
+        assert_eq!(CUSTOMIZATION_VALUE_COUNT, 106);
+        const { assert!(CUSTOMIZATION_VALUE_COUNT >= 100) };
+        const { assert!(state::CUSTOMIZATION_SELECTABLE_VALUES >= 100) };
+        assert_eq!(SettingsCategory::Appearance.row_count(), 8);
+        assert_eq!(SettingsCategory::Windows.row_count(), 8);
+        assert_eq!(SettingsCategory::Taskbar.row_count(), 7);
+    }
+
+    #[test]
+    fn compact_settings_keep_selected_categories_and_rows_visible() {
+        let compact = Rect::new(0, 0, 480, 360);
+        assert_eq!(settings_category_capacity(compact), 7);
+        assert_eq!(settings_category_view_start(compact, 10), 4);
+        assert_eq!(settings_row_capacity(272), 5);
+        assert_eq!(
+            settings_row_view_start(SettingsCategory::Windows, 7, 272),
+            3
+        );
     }
 
     #[test]

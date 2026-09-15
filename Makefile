@@ -53,6 +53,18 @@ check: $(ISO)
 	grep -q "HEXA_PASSWORD_CHANGED artist" $(BUILD)/serial.log
 	grep -q "HEXA_USER_DELETED artist" $(BUILD)/serial.log
 	grep -q "KERNEL FEATURE MATRIX" $(BUILD)/serial.log
+	grep -Fq ".--------.   .--------." $(BUILD)/serial.log
+	grep -q "kern.event.batch=4 (u64, operator-write)" $(BUILD)/serial.log
+	grep -q "HEXA_SYSCTL_CHANGED node=kern.event.batch value=8" $(BUILD)/serial.log
+	grep -q "watch added: signal 7" $(BUILD)/serial.log
+	grep -q "signal 7 ready with data=42" $(BUILD)/serial.log
+	grep -Eq "[[:space:]]7[[:space:]]+signal[[:space:]]+42" $(BUILD)/serial.log
+	grep -q "watch added: resource 2" $(BUILD)/serial.log
+	grep -q "HEXA_RLIMIT_CHANGED resource=scratch-pages soft=2 hard=4" $(BUILD)/serial.log
+	grep -q "rlimit: scratch-pages: resource soft limit reached" $(BUILD)/serial.log
+	grep -q "rlimit: event-watches: resource usage is managed by its owning subsystem" $(BUILD)/serial.log
+	grep -q "DIESE denied: register an event watch requires Execute capability" $(BUILD)/serial.log
+	grep -Eq "[[:space:]]2[[:space:]]+resource[[:space:]]+3" $(BUILD)/serial.log
 	grep -q "TSC frequency: .* Hz" $(BUILD)/serial.log
 	grep -q "clock source:" $(BUILD)/serial.log
 	grep -q "EXPOS DIAGNOSTIC REPORT" $(BUILD)/serial.log
@@ -116,6 +128,23 @@ display-check: $(ISO)
 	grep -q "HEXA_SETTING_CHANGED key=window-shadows value=on" $(BUILD)/display-serial.log
 	grep -q "HEXA_SETTING_CHANGED key=wallpaper-effects value=on" $(BUILD)/display-serial.log
 	grep -q "HEXA_SETTING_CHANGED key=presentation-policy value=Responsive" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=font-face value=Rounded" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=font-weight value=Bold" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=window-radius value=2 px" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=window-border-width value=1 px" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=titlebar-size value=Small" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=window-opacity value=96%" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=offscreen-allowance value=8 px" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=window-snap value=on" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=snap-distance value=4 px" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=focus-policy value=Sloppy" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=taskbar-placement value=Top" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=taskbar-size value=32 px" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=taskbar-alignment value=Center" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=taskbar-autohide value=on" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=taskbar-translucent value=on" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=taskbar-labels value=on" $(BUILD)/display-serial.log
+	grep -q "HEXA_SETTING_CHANGED key=clock-seconds value=on" $(BUILD)/display-serial.log
 	grep -q "HEXA_DISPLAY_MODE width=640 height=480 bpp=32 stride=2560 bytes=1228800 preset=480p" $(BUILD)/display-serial.log
 	grep -q "HEXA_SETTING_CHANGED key=taskbar value=off" $(BUILD)/display-serial.log
 	grep -q "HEXA_SETTING_CHANGED key=network value=off" $(BUILD)/display-serial.log
@@ -123,10 +152,13 @@ display-check: $(ISO)
 	grep -q "HEXA_SETTING_DENIED key=bluetooth error=BusUnsupported" $(BUILD)/display-serial.log
 	grep -q "HEXA_APP_OPENED TERMINAL" $(BUILD)/display-serial.log
 	grep -q "HEXA_TERMINAL_COMMAND name=help" $(BUILD)/display-serial.log
+	grep -q "HEXA_TERMINAL_COMMAND name=neofetch" $(BUILD)/display-serial.log
 	grep -q "HEXA_TERMINAL_COMMAND name=status" $(BUILD)/display-serial.log
 	grep -q "HEXA_TERMINAL_COMMAND name=storage" $(BUILD)/display-serial.log
 	grep -q "HEXA_TERMINAL_COMMAND name=theme" $(BUILD)/display-serial.log
 	grep -q "HEXA_TERMINAL_COMMAND name=ps" $(BUILD)/display-serial.log
+	grep -q "HEXA_TERMINAL_COMMAND name=windowreset" $(BUILD)/display-serial.log
+	grep -q "HEXA_WINDOW_LAYOUT_RESET count=8" $(BUILD)/display-serial.log
 	grep -q "HEXA_APP_CLOSED TERMINAL" $(BUILD)/display-serial.log
 	grep -q "HEXA_APP_REOPENED TERMINAL" $(BUILD)/display-serial.log
 	grep -Eq "HEXA_PRESENTATION_STATS frames=[1-9][0-9]* missed=[0-9]+ idle=[0-9]+ vblank_timeouts=0 responsive_commits=[1-9][0-9]*" $(BUILD)/display-serial.log
@@ -146,6 +178,9 @@ session-check: $(ISO)
 	set +e; timeout 30 $(QEMU) -drive file=$(BUILD)/guest-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-guest-input.txt > $(BUILD)/guest-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
 	grep -q "HEXA_LOGIN_OK user=guest" $(BUILD)/guest-serial.log
 	grep -q "guest (Guest authority)" $(BUILD)/guest-serial.log
+	grep -q "DIESE denied: change a kernel tunable requires Operator capability" $(BUILD)/guest-serial.log
+	grep -q "DIESE denied: register an event watch requires Execute capability" $(BUILD)/guest-serial.log
+	grep -q "DIESE denied: change a resource ceiling requires Operator capability" $(BUILD)/guest-serial.log
 	grep -q "DIESE denied 'mkform' for Guest authority" $(BUILD)/guest-serial.log
 	grep -q "DIESE denied 'safevideo' for Guest authority" $(BUILD)/guest-serial.log
 	grep -q "DIESE denied 'displayreset' for Guest authority" $(BUILD)/guest-serial.log
@@ -226,6 +261,7 @@ persistence-check: $(ISO)
 	grep -q "HEXA_SETTING_CHANGED key=window-shadows value=on" $(BUILD)/persistence-write.log
 	grep -q "HEXA_SETTING_CHANGED key=wallpaper-effects value=on" $(BUILD)/persistence-write.log
 	grep -q "HEXA_SETTING_CHANGED key=presentation-policy value=Responsive" $(BUILD)/persistence-write.log
+	grep -q "HEXA_SETTING_CHANGED key=taskbar-placement value=Top" $(BUILD)/persistence-write.log
 	grep -q "HEXA_STATE_COMMIT generation=" $(BUILD)/persistence-write.log
 	! grep -q "violetmemory" $(BUILD)/persistence-write.log
 	! LC_ALL=C grep -a -q "violetmemory" $(BUILD)/persistence-state.img
@@ -240,6 +276,7 @@ persistence-check: $(ISO)
 	! grep -q "HEXA_SAFE_VIDEO_APPLIED" $(BUILD)/persistence-read.log
 	grep -q "HEXA_DISPLAY_MODE width=640 height=480 bpp=32 stride=2560 bytes=1228800 preset=480p" $(BUILD)/persistence-read.log
 	grep -q "HEXA_DESKTOP_PREFS theme=Graphite" $(BUILD)/persistence-read.log
+	grep -q "HEXA_CUSTOMIZATION font=System weight=Regular .*taskbar=Top size=28 px align=Start" $(BUILD)/persistence-read.log
 	grep -q "HEXA_PRESENTATION_READY rate=144 Hz vsync=false pageflip=true" $(BUILD)/persistence-read.log
 	grep -q "HEXA_RENDER_POLICY mode=Responsive damage=true shadows=true wallpaper_effects=true" $(BUILD)/persistence-read.log
 	grep -Eq "HEXA_RENDER_STATS full=[1-9][0-9]* damaged=[0-9]+ callbacks=[1-9][0-9]* surface_frames=[1-9][0-9]* pointer_merged=[0-9]+ submitted_regions=[1-9][0-9]* copied_regions=[1-9][0-9]* copied_pixels=[1-9][0-9]* collapses=[0-9]+" $(BUILD)/persistence-read.log

@@ -50,6 +50,98 @@ const VBLANK_POLL_LIMIT: usize = 250_000;
 /// bounding rectangle instead of allocating or losing pixels.
 const MAX_DAMAGE_REGIONS: usize = 32;
 
+const FONT_FACE_MASK: u8 = 0b0000_0111;
+const FONT_WEIGHT_SHIFT: u8 = 3;
+const FONT_WEIGHT_MASK: u8 = 0b0001_1000;
+const DEFAULT_FONT_STYLE: u8 =
+    FontFace::System as u8 | ((FontWeight::Regular as u8) << FONT_WEIGHT_SHIFT);
+
+/// A compact, built-in bitmap face used by all graphical text.
+///
+/// The discriminants are stable because desktop preferences persist them.
+/// Every face remains inside the same 8x8 cell, so changing the face cannot
+/// invalidate existing layouts or push a terminal column beyond 480p.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FontFace {
+    /// The original IBM-style HexaOS bitmap face.
+    #[default]
+    System = 0,
+    /// Softened cap and baseline terminals.
+    Rounded = 1,
+    /// Expanded top and baseline terminals.
+    Serif = 2,
+    /// A narrow six-pixel drawing centered in the standard cell.
+    Compact = 3,
+    /// A sheared, italic-like drawing.
+    Slanted = 4,
+}
+
+impl FontFace {
+    pub const fn persisted(self) -> u8 {
+        self as u8
+    }
+
+    pub const fn from_persisted(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::System),
+            1 => Some(Self::Rounded),
+            2 => Some(Self::Serif),
+            3 => Some(Self::Compact),
+            4 => Some(Self::Slanted),
+            _ => None,
+        }
+    }
+}
+
+/// Stroke weight applied after the selected face transformation.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FontWeight {
+    Light = 0,
+    #[default]
+    Regular = 1,
+    Bold = 2,
+}
+
+impl FontWeight {
+    pub const fn persisted(self) -> u8 {
+        self as u8
+    }
+
+    pub const fn from_persisted(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Light),
+            1 => Some(Self::Regular),
+            2 => Some(Self::Bold),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FontStyle {
+    pub face: FontFace,
+    pub weight: FontWeight,
+}
+
+impl FontStyle {
+    pub const fn new(face: FontFace, weight: FontWeight) -> Self {
+        Self { face, weight }
+    }
+
+    const fn encoded(self) -> u8 {
+        self.face.persisted() | (self.weight.persisted() << FONT_WEIGHT_SHIFT)
+    }
+
+    fn decode(value: u8) -> Self {
+        let face = FontFace::from_persisted(value & FONT_FACE_MASK).unwrap_or_default();
+        let weight = FontWeight::from_persisted((value & FONT_WEIGHT_MASK) >> FONT_WEIGHT_SHIFT)
+            .unwrap_or_default();
+        Self { face, weight }
+    }
+}
+
 /// A user-selectable progressive display mode.
 ///
 /// The discriminants are stable because settings persistence may store them.
@@ -152,6 +244,7 @@ const _: () = assert!(DisplayMode::P720.double_buffer_bytes() <= LFB_APERTURE_BY
 const _: () = assert!(DisplayMode::P1080.double_buffer_bytes() <= LFB_APERTURE_BYTES);
 
 static REQUESTED_MODE: AtomicU8 = AtomicU8::new(DisplayMode::P480 as u8);
+static ACTIVE_FONT_STYLE: AtomicU8 = AtomicU8::new(DEFAULT_FONT_STYLE);
 static ACTIVE_DISPLAY_MODE: AtomicU8 = AtomicU8::new(NO_ACTIVE_MODE);
 static PAGE_FLIP_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static DRAW_Y: AtomicU16 = AtomicU16::new(0);
@@ -514,6 +607,18 @@ pub fn stride_bytes() -> usize {
 
 pub fn scanout_bytes() -> usize {
     current_mode().scanout_bytes()
+}
+
+/// Return the font style used by subsequent [`text`] and [`glyph`] calls.
+pub fn font_style() -> FontStyle {
+    FontStyle::decode(ACTIVE_FONT_STYLE.load(Ordering::Acquire))
+}
+
+/// Atomically change both face and stroke weight for subsequent drawing.
+/// Existing pixels are not redrawn; the compositor decides which surfaces to
+/// damage after applying a preference.
+pub fn set_font_style(style: FontStyle) {
+    ACTIVE_FONT_STYLE.store(style.encoded(), Ordering::Release);
 }
 
 pub fn presentation_stats() -> PresentationStats {
@@ -1052,6 +1157,93 @@ pub fn alpha_rect(x: i32, y: i32, width: i32, height: i32, value: u32, alpha: u8
     }
 }
 
+/// Blend a rounded rectangle without allocating an intermediate surface.
+pub fn alpha_rounded_rect(
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    radius: i32,
+    value: u32,
+    alpha: u8,
+) {
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    let radius = radius.max(0).min(width / 2).min(height / 2);
+    if radius == 0 {
+        alpha_rect(x, y, width, height, value, alpha);
+        return;
+    }
+    for row in 0..height {
+        let corner_row = if row < radius {
+            row
+        } else if row >= height - radius {
+            height - row - 1
+        } else {
+            radius
+        };
+        let inset = if corner_row < radius {
+            let dy = radius - corner_row;
+            let mut dx = 0;
+            while (dx + 1) * (dx + 1) + dy * dy <= radius * radius {
+                dx += 1;
+            }
+            radius - dx
+        } else {
+            0
+        };
+        if width > inset * 2 {
+            alpha_rect(x + inset, y + row, width - inset * 2, 1, value, alpha);
+        }
+    }
+}
+
+/// Draw a one-pixel rounded outline. The row geometry matches
+/// `rounded_rect`, so concentric calls can build thicker borders without
+/// squaring off the selected window radius.
+pub fn rounded_outline(x: i32, y: i32, width: i32, height: i32, radius: i32, value: u32) {
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    let radius = radius.max(0).min(width / 2).min(height / 2);
+    if radius == 0 {
+        outline(x, y, width, height, value);
+        return;
+    }
+    for row in 0..height {
+        let corner_row = if row < radius {
+            row
+        } else if row >= height - radius {
+            height - row - 1
+        } else {
+            radius
+        };
+        let inset = if corner_row < radius {
+            let dy = radius - corner_row;
+            let mut dx = 0;
+            while (dx + 1) * (dx + 1) + dy * dy <= radius * radius {
+                dx += 1;
+            }
+            radius - dx
+        } else {
+            0
+        };
+        let row_width = width - inset * 2;
+        if row_width <= 0 {
+            continue;
+        }
+        if row == 0 || row == height - 1 {
+            rect(x + inset, y + row, row_width, 1, value);
+        } else {
+            pixel(x + inset, y + row, value);
+            if row_width > 1 {
+                pixel(x + inset + row_width - 1, y + row, value);
+            }
+        }
+    }
+}
+
 pub fn line(mut x0: i32, mut y0: i32, x1: i32, y1: i32, value: u32) {
     let dx = (x1 - x0).abs();
     let sx = if x0 < x1 { 1 } else { -1 };
@@ -1113,6 +1305,7 @@ const fn text_line_height(scale: i32) -> i32 {
 pub fn text(mut x: i32, mut y: i32, value: &str, color: u32, scale: i32) {
     let origin = x;
     let advance = text_advance(scale);
+    let style = font_style();
     for byte in value.bytes() {
         match byte {
             b'\n' => {
@@ -1121,7 +1314,7 @@ pub fn text(mut x: i32, mut y: i32, value: &str, color: u32, scale: i32) {
             }
             b'\t' => x += advance * 4,
             _ => {
-                glyph(x, y, byte, color, scale);
+                glyph_with_style(x, y, byte, color, scale, style);
                 x += advance;
             }
         }
@@ -1129,7 +1322,11 @@ pub fn text(mut x: i32, mut y: i32, value: &str, color: u32, scale: i32) {
 }
 
 pub fn glyph(x: i32, y: i32, byte: u8, color: u32, scale: i32) {
-    let rows = glyph_rows(byte);
+    glyph_with_style(x, y, byte, color, scale, font_style());
+}
+
+fn glyph_with_style(x: i32, y: i32, byte: u8, color: u32, scale: i32, style: FontStyle) {
+    let rows = styled_glyph_rows(byte, style);
     let (pixel_width, pixel_height) = match scale {
         i32::MIN..=1 => (1, 1),
         2 => (1, 2),
@@ -1236,8 +1433,9 @@ unsafe fn load_text_font() {
         port::outb(0x3CF, 0x04);
 
         let font_plane = 0xA0000 as *mut u8;
+        let style = font_style();
         for character in 0..=u8::MAX {
-            let rows = glyph_rows(character);
+            let rows = styled_glyph_rows(character, style);
             let glyph = font_plane.add(character as usize * 32);
             for scanline in 0..32 {
                 let value = if scanline < 16 {
@@ -1377,9 +1575,119 @@ fn glyph_rows(byte: u8) -> [u8; 8] {
     }
 }
 
+fn styled_glyph_rows(byte: u8, style: FontStyle) -> [u8; 8] {
+    let mut rows = glyph_rows(byte);
+    apply_font_face(&mut rows, style.face);
+    for row in &mut rows {
+        *row = apply_font_weight(*row, style.weight);
+    }
+    rows
+}
+
+fn apply_font_face(rows: &mut [u8; 8], face: FontFace) {
+    match face {
+        FontFace::System => {}
+        FontFace::Rounded => {
+            if let Some((top, bottom)) = glyph_extents(rows) {
+                rows[top] = trim_terminal_pixels(rows[top]);
+                if bottom != top {
+                    rows[bottom] = trim_terminal_pixels(rows[bottom]);
+                }
+            }
+        }
+        FontFace::Serif => {
+            if let Some((top, bottom)) = glyph_extents(rows) {
+                rows[top] = expand_row(rows[top]);
+                rows[bottom] = expand_row(rows[bottom]);
+            }
+        }
+        FontFace::Compact => {
+            for row in rows {
+                *row = compact_row(*row);
+            }
+        }
+        FontFace::Slanted => {
+            for (index, row) in rows.iter_mut().enumerate() {
+                *row = match index {
+                    0..=2 => *row >> 1,
+                    3..=4 => *row,
+                    _ => *row << 1,
+                };
+            }
+        }
+    }
+}
+
+fn glyph_extents(rows: &[u8; 8]) -> Option<(usize, usize)> {
+    let top = rows.iter().position(|row| *row != 0)?;
+    let bottom = rows.iter().rposition(|row| *row != 0)?;
+    Some((top, bottom))
+}
+
+fn trim_terminal_pixels(row: u8) -> u8 {
+    if row.count_ones() < 4 {
+        return row;
+    }
+    let first = row.trailing_zeros() as u8;
+    let last = 7 - row.leading_zeros() as u8;
+    row & !(1_u8 << first) & !(1_u8 << last)
+}
+
+fn expand_row(row: u8) -> u8 {
+    row | (row << 1) | (row >> 1)
+}
+
+fn compact_row(row: u8) -> u8 {
+    let mut compact = 0_u8;
+    for source in 0..8 {
+        if row & (1_u8 << source) != 0 {
+            let target = 1 + source * 6 / 8;
+            compact |= 1_u8 << target;
+        }
+    }
+    compact
+}
+
+fn apply_font_weight(row: u8, weight: FontWeight) -> u8 {
+    match weight {
+        FontWeight::Light => lighten_row(row),
+        FontWeight::Regular => row,
+        FontWeight::Bold => row | (row << 1),
+    }
+}
+
+fn lighten_row(row: u8) -> u8 {
+    let mut result = row;
+    let mut column = 0_u8;
+    while column < 8 {
+        if row & (1_u8 << column) == 0 {
+            column += 1;
+            continue;
+        }
+        let start = column;
+        while column < 8 && row & (1_u8 << column) != 0 {
+            column += 1;
+        }
+        if column - start >= 3 {
+            result &= !(1_u8 << (column - 1));
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const FONT_FACES: [FontFace; 5] = [
+        FontFace::System,
+        FontFace::Rounded,
+        FontFace::Serif,
+        FontFace::Compact,
+        FontFace::Slanted,
+    ];
+    const FONT_WEIGHTS: [FontWeight; 3] =
+        [FontWeight::Light, FontWeight::Regular, FontWeight::Bold];
 
     #[test]
     fn progressive_modes_have_expected_geometry() {
@@ -1388,6 +1696,82 @@ mod tests {
         assert_eq!(DisplayMode::P720.dimensions(), (1280, 720));
         assert_eq!(DisplayMode::P1080.dimensions(), (1920, 1080));
         assert_eq!(DisplayMode::ALL.len(), 3);
+    }
+
+    #[test]
+    fn font_style_ids_and_defaults_are_stable() {
+        assert_eq!(FontFace::default(), FontFace::System);
+        assert_eq!(FontWeight::default(), FontWeight::Regular);
+        assert_eq!(
+            FontStyle::default(),
+            FontStyle::new(FontFace::System, FontWeight::Regular)
+        );
+        for (id, face) in FONT_FACES.iter().copied().enumerate() {
+            assert_eq!(face.persisted(), id as u8);
+            assert_eq!(FontFace::from_persisted(id as u8), Some(face));
+        }
+        for (id, weight) in FONT_WEIGHTS.iter().copied().enumerate() {
+            assert_eq!(weight.persisted(), id as u8);
+            assert_eq!(FontWeight::from_persisted(id as u8), Some(weight));
+        }
+        assert_eq!(FontFace::from_persisted(5), None);
+        assert_eq!(FontWeight::from_persisted(3), None);
+        assert_eq!(FontStyle::decode(u8::MAX), FontStyle::default());
+        assert_eq!(
+            styled_glyph_rows(b'A', FontStyle::default()),
+            glyph_rows(b'A')
+        );
+    }
+
+    #[test]
+    fn every_font_face_changes_real_glyph_pixels() {
+        let regular = FontWeight::Regular;
+        let mut drawings = [[0_u8; 8]; FONT_FACES.len()];
+        for (index, face) in FONT_FACES.iter().copied().enumerate() {
+            drawings[index] = styled_glyph_rows(b'A', FontStyle::new(face, regular));
+            assert!(drawings[index].iter().any(|row| *row != 0));
+        }
+        for left in 0..drawings.len() {
+            for right in left + 1..drawings.len() {
+                assert_ne!(drawings[left], drawings[right]);
+            }
+        }
+    }
+
+    #[test]
+    fn font_weights_change_stroke_pixel_count() {
+        let lit_pixels = |rows: [u8; 8]| {
+            rows.iter()
+                .fold(0_u32, |total, row| total + row.count_ones())
+        };
+        let light = lit_pixels(styled_glyph_rows(
+            b'E',
+            FontStyle::new(FontFace::System, FontWeight::Light),
+        ));
+        let regular = lit_pixels(styled_glyph_rows(
+            b'E',
+            FontStyle::new(FontFace::System, FontWeight::Regular),
+        ));
+        let bold = lit_pixels(styled_glyph_rows(
+            b'E',
+            FontStyle::new(FontFace::System, FontWeight::Bold),
+        ));
+        assert!(light < regular);
+        assert!(regular < bold);
+    }
+
+    #[test]
+    fn font_faces_keep_the_original_bounded_cell_metrics() {
+        for face in FONT_FACES {
+            for weight in FONT_WEIGHTS {
+                let rows = styled_glyph_rows(b'W', FontStyle::new(face, weight));
+                assert_eq!(rows.len(), 8);
+            }
+        }
+        assert_eq!(640 / text_advance(1), 80);
+        assert!(80 * text_advance(1) <= DisplayMode::P480.width() as i32);
+        assert!(26 * text_line_height(2) <= DisplayMode::P480.height() as i32);
+        assert!(27 * text_line_height(2) > DisplayMode::P480.height() as i32);
     }
 
     #[test]

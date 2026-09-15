@@ -27,6 +27,35 @@ pub struct ClockInfo {
     pub invariant: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RtcTime {
+    pub hour: u8,
+    pub minute: u8,
+    pub second: u8,
+}
+
+/// Read the hardware real-time clock for lightweight desktop presentation.
+/// Calendar ownership remains in the hardware service; the compositor only
+/// receives already-normalized 24-hour fields.
+pub fn rtc_time() -> RtcTime {
+    let second = read_cmos(0x00);
+    let minute = read_cmos(0x02);
+    let hour = read_cmos(0x04);
+    let status_b = read_cmos(0x0B);
+    let convert = |value| {
+        if status_b & 0x04 == 0 {
+            bcd(value)
+        } else {
+            value
+        }
+    };
+    RtcTime {
+        hour: convert(hour & 0x7F).min(23),
+        minute: convert(minute).min(59),
+        second: convert(second).min(59),
+    }
+}
+
 /// Allocation-free PCI identity used by early kernel services.  Keeping this
 /// scanner in the hardware layer lets drivers report detected-but-unsupported
 /// devices without each service inventing a second PCI walk.

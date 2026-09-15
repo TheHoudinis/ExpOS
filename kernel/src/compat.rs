@@ -133,6 +133,14 @@ fn factor(args: &str) {
 }
 
 fn neofetch() {
+    println!("        .--------.   .--------.");
+    println!("      .'          '.'          '.");
+    println!("     /     OOO           OOO     \\");
+    println!("    |     O   O         O   O     |");
+    println!("    |     O   O         O   O     |");
+    println!("     \\     OOO    .-.    OOO     /");
+    println!("      '._         '---'        _.'");
+    println!("         '---------------'       ");
     println!("OS: ExpOS v{}", env!("CARGO_PKG_VERSION"));
     println!("Kernel: x86_64 Rust no_std");
     println!("Model: Form-native / Dimension-oriented");

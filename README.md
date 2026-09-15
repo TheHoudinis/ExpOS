@@ -6,6 +6,9 @@ ExpOS is the Form-native HexaOS rebuild described by
 - an x86_64 Multiboot2 kernel with VGA, serial, PS/2 keyboard and mouse input;
 - FIN identity, Dimensions, PIMP/DIESE policy, capability-scoped Form Handles,
   typed relationships and transactional HexaFS metadata;
+- bounded Form-native kernel controls: typed tunables, signal/timer/resource
+  readiness watches, and session-local resource accounting with DIESE-gated
+  mutation;
 - HexaDisplay, a runtime-selectable 640x480, 1280x720 or 1920x1080 software
   compositor with Form-owned surfaces, atomic commits, presentation-complete
   frame events, bounded damage-region scanout, double-buffered Bochs/QEMU
@@ -14,11 +17,12 @@ ExpOS is the Form-native HexaOS rebuild described by
 - a flat dark desktop with an application menu and taskbar, no default or
   pinned applications, and movable, closable, minimizable and maximizable
   windows;
-- an interactive Settings control center for appearance, display, performance,
-  input, network, Wi-Fi, Bluetooth, privacy and system behavior, including six
-  themes, seven procedural wallpapers and four cursor themes;
-- readable case-sensitive 8x8 framebuffer text and an expanded 8x16 VGA
-  console font;
+- an interactive Settings control center for appearance, windows, taskbar,
+  display, performance, input, network, Wi-Fi, Bluetooth, privacy and system
+  behavior, including six themes, seven procedural wallpapers, four cursor
+  themes, five font faces and three real font weights;
+- readable case-sensitive 8x8 framebuffer text with runtime face/weight
+  rasterization and an expanded 8x16 VGA console font;
 - Ayo v3 package installation, verification, ownership, rollback and recovery;
 - a capability-gated RTL8139 network path with Ethernet, ARP, static IPv4,
   ICMP, UDP, DNS A lookup, one bounded TCP client and HTTP/1.0 GET over plain
@@ -114,25 +118,47 @@ presentation policy, frame-pacing and scanout counters. The console
 `displayinfo` command summarizes the selected presentation target and
 VSync/page-flip state; `displaydiag` also reports submitted and copied damage,
 damage-collapse, page-flip-failure and bounded vertical-retrace-timeout
-counters. `timers` reports the TSC clock source used by the frame pacer. In Browser, click
-the address field or press `/`, type an `http://` or `https://` URL, and press
-Enter. Text without a scheme is treated as a search query and sent to
-DuckDuckGo's non-JavaScript HTML search; prefix a query with `?` for the same
-behavior.
+counters. `timers` reports the TSC clock source used by the frame pacer.
+`neofetch` works in both graphical and console terminals and draws the ExpOS
+two-eye mark before the current system/session facts. Graphical `windowreset`
+returns every application window to its default recoverable position. In
+Browser, click the address field or press `/`, type an `http://` or `https://`
+URL, and press Enter. Text without a scheme is treated as a search query and
+sent to DuckDuckGo's non-JavaScript HTML search; prefix a query with `?` for the
+same behavior.
 
-Settings controls are clickable and keyboard-accessible. Appearance, taskbar,
-status-area, border, contrast, pointer-speed, theme, wallpaper and cursor
-changes take effect immediately and persist. Resolution can be selected as
-480p (640x480), 720p (1280x720) or 1080p (1920x1080); it is saved immediately
-and applied when the desktop is reopened. A fresh state image defaults to 480p
-and 60 Hz. Presentation pacing can be selected as 60, 75, 120 or 144 Hz and
-VSync can be enabled or disabled; both settings also persist. These rates are
-compositor frame targets, not physical monitor modes or a claim that QEMU
-changed the host display's refresh rate. With VSync enabled, HexaDisplay
-performs a bounded VGA vertical-retrace wait before its Bochs framebuffer page
-flip; a timeout is recorded instead of hanging the kernel. The Network switch
-is enforced by the native packet path through a requester-bound Configure
-Handle; it is not a painted UI flag.
+Settings controls are clickable and keyboard-accessible. Its category and row
+viewports follow the selection, so all eleven pages and long Windows/Appearance
+lists remain usable at 480p. Appearance, taskbar, status-area, border,
+contrast, pointer-speed, theme, wallpaper, cursor and font changes take effect
+immediately and persist. Five allocation-free bitmap faces and Light, Regular
+and Bold stroke weights preserve the existing text layout while visibly
+changing glyph rendering.
+
+The Windows page controls corner radius, border width, titlebar height, backdrop
+and titlebar opacity, bounded off-screen travel, edge snapping, snap distance and
+click/sloppy/pointer focus. Off-screen travel is configurable from contained to
+256 px; movement remains bounded so a recovery strip or titlebar stays
+reachable. The Taskbar page controls bottom/top/left/right placement, nine
+panel sizes, start/center/end app alignment, edge-reveal auto-hide,
+translucency, horizontal app labels and hardware-RTC seconds. The cursor shadow
+is independently switchable. Across Appearance, Windows and Taskbar, 106
+selectable values are directly wired to rendering, geometry or interaction.
+The compact persistent-state extension validates 112 accepted states across
+its selectors and booleans, including 28 reserved interaction states that are
+stored but not advertised as working desktop controls. These counts overlap and
+are not additive.
+
+Resolution can be selected as 480p (640x480), 720p (1280x720) or 1080p
+(1920x1080); it is saved immediately and applied when the desktop is reopened.
+A fresh state image defaults to 480p and 60 Hz. Presentation pacing can be
+selected as 60, 75, 120 or 144 Hz and VSync can be enabled or disabled; both
+settings also persist. These rates are compositor frame targets, not physical
+monitor modes or a claim that QEMU changed the host display's refresh rate.
+With VSync enabled, HexaDisplay performs a bounded VGA vertical-retrace wait
+before its Bochs framebuffer page flip; a timeout is recorded instead of
+hanging the kernel. The Network switch is enforced by the native packet path
+through a requester-bound Configure Handle; it is not a painted UI flag.
 
 Open **Settings > Performance** to choose the renderer's cost/latency tradeoff.
 Window shadows and procedural wallpaper effects are independent toggles.
@@ -219,8 +245,43 @@ package scripts or install links.
 ## Console
 
 The command environment includes Form, Dimension, relationship, capability,
-account, display, package, hardware and network commands. Run `help` for the
-current list. Password-bearing commands are excluded from history.
+account, display, package, hardware, network and bounded kernel-control
+commands. Run `help` for the current list. Password-bearing commands are
+excluded from history.
+
+The new kernel-control interfaces borrow proven concepts from FreeBSD, but are
+original Form-native implementations: they do not copy FreeBSD code or expose
+its ABI. `sysctl` reads typed named nodes and lets an Operator change the three
+validated writable event controls. `kqueue`/`kevent` registers fixed-capacity
+signal, timer and resource watches, then returns sequenced readiness records.
+`rlimit` accounts event watches, IPC bytes, scratch pages and Form operations
+against validated soft/hard/ceiling tuples. Event-watch accounting is wired to
+the queue; the other ledgers are explicit runtime-local reservations, not yet
+global subsystem limits. DIESE authorizes mutations through the revocable
+bootstrap Handle: Configure is reserved for Operator, Execute is available to
+Power and Operator, and Guest receives read-only access.
+
+```text
+sysctl -a
+sysctl kern.event.batch=8
+kqueue add signal 7
+kqueue signal 7 42
+kqueue poll
+kqueue add timer 9 1000 1000
+kqueue add resource scratch-pages
+rlimit list
+rlimit set scratch-pages 2 64
+rlimit charge scratch-pages 3
+kqueue poll
+rlimit charge scratch-pages 2
+rlimit release scratch-pages 2
+```
+
+The watch and ready rings each hold at most 16 entries, dispatch batch size is
+bounded to 1-16, duplicate watches are rejected, and optional coalescing
+accumulates missed timer expirations. These controls are runtime diagnostics
+and accounting primitives, not FreeBSD compatibility, a preemptive scheduler,
+or persistent system configuration.
 
 Accounts and Settings preferences are persisted through the dedicated state
 disk. General Form contents and PIMP changes remain in memory until native
@@ -237,6 +298,7 @@ make run-alpha
 
 No fallback component is treated as a native v8 interface until it has a
 Form/FIN/Dimension and capability-safe boundary.
+The feature pass described above does not modify `legacy/alpha32/`.
 
 ## Repository map
 

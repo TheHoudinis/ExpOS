@@ -12,5 +12,6 @@ j
 6
 j
 j
+9
 q
 shutdown

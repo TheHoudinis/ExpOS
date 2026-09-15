@@ -26,6 +26,17 @@ timers
 features
 lspci
 mem
+sysctl kern.event.batch
+sysctl kern.event.batch=8
+kqueue add signal 7
+rlimit release event-watches 1
+kqueue signal 7 42
+kqueue poll
+kqueue add resource scratch-pages
+rlimit set scratch-pages 2 4
+rlimit charge scratch-pages 3
+kqueue poll
+rlimit list
 displaydiag
 stateinfo
 diag
@@ -59,4 +70,6 @@ handlecheck 3 Root execute
 pimp Browser network=restricted
 neofetch
 history
+revoke 1
+kqueue add signal 99
 shutdown

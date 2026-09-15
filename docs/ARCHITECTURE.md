@@ -45,6 +45,9 @@ firmware / GRUB (temporary)
 9. A bounded primary-master ATA PIO driver loads a dedicated ExpOS state image.
    Accounts and desktop preferences are recovered from the newest valid of two
    CRC-protected journal slots and mutations alternate slots by generation.
+10. A fixed-capacity kernel-control service exposes typed tunables, readiness
+    watches and resource ledgers to the console. DIESE checks the session's
+    revocable bootstrap Handle before every mutation.
 
 ## Trust boundaries
 
@@ -63,6 +66,28 @@ firmware / GRUB (temporary)
   raw, tar or tar.gz artifacts beneath an explicit user-owned root. Downloads,
   extraction, owned-file receipts, state publication, uninstall and recovery
   share an atomic transaction; scripts, symlinks and path traversal are denied.
+- The kernel-control service translates three established FreeBSD design ideas
+  into original Form-native data structures; it does not reuse FreeBSD source,
+  system-call numbers, layouts or ABI. The sysctl-style registry contains nine
+  typed nodes with explicit read-only or Operator-write access and validates
+  boolean and bounded integer input. The kqueue-style service has fixed rings
+  for 16 watches and 16 ready records, `(identifier, filter)` identity,
+  monotonic event sequences, configurable 1-16 dispatch batches and optional
+  coalescing. Signal, one-shot/periodic timer and resource-denial filters are
+  implemented. Missed periodic expirations accumulate rather than silently
+  disappearing. The rlimit-style ledger tracks event watches, IPC bytes,
+  scratch pages and Form operations; each record enforces
+  `used <= soft <= hard <= ceiling`, charges against the soft limit, records
+  denials and can raise resource-readiness events. Event watches use this ledger
+  internally; IPC bytes, scratch pages and Form operations are explicit
+  runtime-local reservations and are not yet enforced across those subsystems.
+  Reads are available to every authenticated authority. Tunable and limit
+  changes require a Configure-capable bootstrap Handle issued only to Operator;
+  watch/signal/poll and charge/release require its Execute right. Revoking that
+  Handle removes mutation access.
+  The tables fail closed at capacity and remain runtime-local. They are not a
+  scheduler, an interrupt notification backend or a FreeBSD compatibility
+  subsystem.
 - HexaDisplay uses a Wayland-like ownership model without copying Wayland's
   Unix socket/file-descriptor ABI: clients own surfaces and Buffer Handles,
   mutate pending state, report surface-local damage, and publish atomically
@@ -99,12 +124,27 @@ firmware / GRUB (temporary)
   supported values rather than being clamped upward.
 - The desktop creates separate Browser, Terminal, Forms, Packages,
   Settings, System, Games and Notes surfaces, plus Root, taskbar and launcher
-  surfaces. Its flat dark shell provides a compact application menu and bottom
-  taskbar without copied third-party assets, promotional copy or instruction
-  footers. It starts with no open or pinned apps and supports focus, dragging,
-  minimize, maximize, close and reopen. Settings offers six renderer-defined
-  themes (including Aurora and Rose), seven procedural wallpapers (including
-  Aurora and Mesh), four cursor themes and the three display presets. Its
+  surfaces. Its flat dark shell provides a compact application menu and
+  edge-configurable taskbar without copied third-party assets, promotional copy
+  or instruction footers. It starts with no open or pinned apps and supports
+  focus, dragging, minimize, maximize, close and reopen. Windows can remain
+  contained or move a selected distance beyond the work area while retaining a
+  bounded recovery region; optional snapping and three focus policies alter the
+  real geometry/input path. `windowreset` in the graphical Terminal restores
+  every application surface to its default geometry. Settings offers six
+  renderer-defined themes (including Aurora and Rose), seven procedural
+  wallpapers (including Aurora and Mesh), four cursor themes, five bitmap font
+  faces, three independently rasterized font weights and the three display
+  presets. Font selections apply globally without changing the fixed glyph
+  advance. Window radius, border width and backdrop/titlebar opacity feed the
+  actual compositor drawing, while titlebar height also changes drag/control hit-test
+  geometry; cursor shadow is an independent low-cost rendering option. The
+  taskbar can occupy any edge, use
+  one of nine thicknesses, align running apps at start/center/end, auto-hide and
+  reveal at that edge, blend translucently, show horizontal labels, and include
+  RTC seconds. The eleven-category Settings UI computes compact category/row
+  viewports so the selected item remains visible at 480p. Appearance, Windows
+  and Taskbar expose 106 directly working selectable values. Its
   Display page also selects a 60, 75, 120 or 144 Hz compositor presentation
   target and optional VSync. These are software-pacing targets, not negotiated
   physical monitor modes. The Performance page independently controls window
@@ -113,9 +153,9 @@ firmware / GRUB (temporary)
   only for damaged commits, while full redraws stay paced and VSync remains an
   independent presentation constraint. All three optional features persist and
   default off or Efficient so a fresh state starts on the least expensive path.
-  The graphical Terminal keeps bounded scrollback and
-  command history and exposes identity, system, display, network and
-  application commands.
+  The graphical Terminal keeps bounded scrollback and command history, exposes
+  identity, system, display, network and application commands, draws the same
+  two-eye `neofetch` art as the console, and provides window-layout recovery.
   Each application receives a child Handle containing
   only Display and Input rights; the compositor checks it before visibility,
   geometry, commit or key routing. Leaving graphics restores the VGA mode 3
@@ -163,9 +203,18 @@ firmware / GRUB (temporary)
   fields and CRC-32 over its header and payload; boot selects the newest valid
   slot, preserving the previous generation across an interrupted or corrupt
   write. Settings persist display mode, theme, wallpaper, cursor, accent,
-  backdrop, pointer speed, presentation rate, VSync, shadows, wallpaper effects,
-  presentation policy and desktop/connectivity flags. Older compatible records
-  default to 60 Hz with VSync enabled and use the low-cost renderer policy. Form
+  backdrop, pointer speed, presentation rate, VSync, shadows, wallpaper
+  effects, presentation policy and desktop/connectivity flags. A tagged compact
+  extension in the existing preference reservation persists and sanitizes 112
+  accepted states for font face/weight; window radius, border, titlebar,
+  opacity, off-screen allowance, snap and focus; taskbar edge, size, alignment,
+  auto-hide, translucency, labels and clock precision; plus 28 reserved
+  interaction states that are stored but not claimed as working controls. This
+  count represents accepted selector states and both states of booleans, not
+  112 independent rows. Older compatible records receive
+  conservative extension defaults; they default to 60 Hz with VSync enabled and
+  use the low-cost renderer policy. Fresh state remains 480p/60 Hz with effects,
+  translucency, animations, cursor shadow and off-screen travel disabled. Form
   records, notes and PIMP revisions are outside this store and remain volatile.
 - Network is a Driver Form protected by requester-bound Network Handles and
   PIMP policy. Its current polling RTL8139 path implements Ethernet, ARP,
@@ -233,16 +282,19 @@ not a substitute for the HexaFS block driver, persistent Form graph or FIN
 index.
 
 Alpha.12 includes the runtime-selectable 480p/720p/1080p empty-start desktop,
-normal case-sensitive text, Notes, a richer graphical Terminal, six themes,
-seven procedural wallpapers, four cursor themes, double-buffered presentation
+normal case-sensitive text, Notes, a richer graphical Terminal with two-eye
+`neofetch` and window recovery, six themes, seven procedural wallpapers, four
+cursor themes, five font faces, three real weights, all-edge taskbar and bounded
+off-screen window controls, double-buffered presentation
 with atomic surface commits, presentation-bound frame completion, bounded
 damage coalescing and page synchronization, persistent 60/75/120/144 Hz
 software pacing, opt-in responsive damaged commits and optional VSync, a
 bounded native HTML/CSS/JavaScript Browser with
 DuckDuckGo non-JavaScript HTML search, dual graphical and console login
 selection, durable accounts/preferences, Ayo v3 artifact transactions, and
-capability-gated native RTL8139/ARP/IPv4/ICMP/UDP/DNS/TCP/HTTP/TLS networking.
-The Diamond II build is
+capability-gated native RTL8139/ARP/IPv4/ICMP/UDP/DNS/TCP/HTTP/TLS networking,
+plus bounded Form-native tunable/event/resource controls inspired by—but not
+compatible with—FreeBSD interfaces. The Diamond II build is
 also exposed through `make run-alpha`, providing a runnable migration fallback
 for networking, scheduling, ATA persistence and the games not yet redesigned
 around v8 semantics.

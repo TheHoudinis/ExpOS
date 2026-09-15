@@ -1,5 +1,9 @@
 use crate::{
     input::{Input, KEY_DOWN, KEY_UP},
+    kernel_controls::{
+        EventFilter, EventWatch, KernelControls, ReadyEvent, Resource, ResourceLimit,
+        TunableAccess, TunableNode, TunableValue, MAX_READY_EVENTS,
+    },
     port, print, println,
     session::Session,
     slog, vga,
@@ -103,6 +107,7 @@ struct Shell {
     next_dimension_fin: u32,
     journal_sequence: u32,
     network_policy: NetworkPolicy,
+    kernel_controls: KernelControls,
 }
 
 impl Shell {
@@ -127,10 +132,12 @@ impl Shell {
         }
         forms[5] = Some(network_form);
         let mut broker = CapabilityBroker::new();
-        let boot_operations = if session.authority() == Authority::Guest {
-            Operations::READ
-        } else {
-            Operations::READ.union(Operations::EXECUTE)
+        let boot_operations = match session.authority() {
+            Authority::Operator => Operations::READ
+                .union(Operations::EXECUTE)
+                .union(Operations::CONFIGURE),
+            Authority::Power => Operations::READ.union(Operations::EXECUTE),
+            Authority::Guest => Operations::READ,
         };
         let boot_handle = broker
             .issue_for(
@@ -260,6 +267,7 @@ impl Shell {
             next_dimension_fin: 2,
             journal_sequence: report.journal_sequence,
             network_policy: NetworkPolicy::Restricted,
+            kernel_controls: KernelControls::new(),
         }
     }
 
@@ -377,6 +385,27 @@ impl Shell {
                     MAX_FORMS, MAX_HANDLES, MAX_DIMENSIONS
                 );
                 println!("input backends: PS/2 mouse/keyboard + COM1 polling");
+                let event_stats = self.kernel_controls.events().stats();
+                println!(
+                    "kernel events: watches={} ready={} delivered={} dropped={} coalesced={}",
+                    event_stats.watches,
+                    event_stats.pending,
+                    event_stats.delivered,
+                    event_stats.dropped,
+                    event_stats.coalesced
+                );
+                true
+            }
+            "sysctl" => {
+                self.sysctl(args);
+                true
+            }
+            "kqueue" | "kevent" => {
+                self.kqueue(args);
+                true
+            }
+            "rlimit" => {
+                self.rlimit(args);
                 true
             }
             "ifconfig" => {
@@ -404,6 +433,7 @@ impl Shell {
                 println!("[ok] Root Form + Stable Dimension");
                 println!("[ok] PIMP/DIESE + Handle #1 + HexaFS journal #1");
                 println!("[ok] Ayo Package Form + typed relationship graph");
+                println!("[ok] bounded tunables, event queue, and resource limits");
                 println!("[ok] interactive command environment");
                 true
             }
@@ -592,6 +622,7 @@ impl Shell {
                 let requested_mode = crate::session::choose_boot_mode(input);
                 let login = crate::session::login(input, requested_mode);
                 self.session = login.session;
+                self.kernel_controls = KernelControls::new();
                 if login.mode == crate::session::BootMode::Graphical {
                     crate::desktop::run_with_network(
                         input,
@@ -778,6 +809,7 @@ impl Shell {
             "  date clock timers cpuinfo features kernelcaps lspci neofetch sysinfo mem free env uptime ps"
         );
         println!("  kstat dmesg bootlog ifconfig netstat ping <IPv4-address> [count]");
+        println!("  sysctl [-a|<node>|<node> <value>]  kqueue <action>  rlimit <action>");
         println!("  dns <host>  fetch <http[s]://host[:port]/path>  mode");
         println!("  calc len hex reverse tolower toupper factor rand sleep true false");
     }
@@ -809,6 +841,400 @@ impl Shell {
             None if crate::state::persistent_available() => println!("saved state: blank disk"),
             None => println!("saved state: unavailable"),
         }
+    }
+
+    fn sysctl(&mut self, arguments: &str) {
+        let mut words = arguments.split_whitespace();
+        let Some(first) = words.next() else {
+            self.print_all_tunables();
+            return;
+        };
+        if first == "-a" || first == "list" {
+            self.print_all_tunables();
+            return;
+        }
+        let assignment = first.split_once('=');
+        let (name, value) = match assignment {
+            Some((name, value)) => (name, Some(value)),
+            None => (first, words.next()),
+        };
+        let Some(value) = value else {
+            match self.kernel_controls.tunables().get(name) {
+                Ok(node) => print_tunable(node),
+                Err(error) => println!("sysctl: {}: {}", name, error.message()),
+            }
+            return;
+        };
+        if words.next().is_some() || name.is_empty() || value.is_empty() {
+            println!("usage: sysctl [-a|<node>|<node> <value>|<node>=<value>]");
+            return;
+        }
+        if !self.kernel_control_allowed(true, "change a kernel tunable") {
+            return;
+        }
+        match self.kernel_controls.set_tunable(name, value) {
+            Ok(node) => {
+                print_tunable(node);
+                slog!("HEXA_SYSCTL_CHANGED node={} value={}\r\n", name, value);
+            }
+            Err(error) => println!("sysctl: {}: {}", name, error.message()),
+        }
+    }
+
+    fn print_all_tunables(&self) {
+        println!("FORM-NATIVE KERNEL TUNABLES");
+        self.kernel_controls.tunables().visit(print_tunable);
+    }
+
+    fn kqueue(&mut self, arguments: &str) {
+        let mut words = arguments.split_whitespace();
+        match words.next() {
+            None => {
+                println!("IDENTIFIER FILTER    STATE     DETAIL");
+                let now = crate::hardware::timestamp();
+                let mut count = 0;
+                self.kernel_controls.events().visit_watches(|watch| {
+                    let detail = match watch.filter {
+                        EventFilter::Timer if watch.enabled => watch.deadline.saturating_sub(now),
+                        EventFilter::Timer => 0,
+                        _ => watch.interval,
+                    };
+                    println!(
+                        "{:<10} {:<9} {:<9} {}",
+                        watch.identifier,
+                        watch.filter.name(),
+                        if watch.enabled { "enabled" } else { "expired" },
+                        detail
+                    );
+                    count += 1;
+                });
+                if count == 0 {
+                    println!("(no watches)");
+                }
+            }
+            Some("list") => {
+                if words.next().is_some() {
+                    print_kqueue_usage();
+                    return;
+                }
+                println!("IDENTIFIER FILTER    STATE     DETAIL");
+                let now = crate::hardware::timestamp();
+                let mut count = 0;
+                self.kernel_controls.events().visit_watches(|watch| {
+                    let detail = match watch.filter {
+                        EventFilter::Timer if watch.enabled => watch.deadline.saturating_sub(now),
+                        EventFilter::Timer => 0,
+                        _ => watch.interval,
+                    };
+                    println!(
+                        "{:<10} {:<9} {:<9} {}",
+                        watch.identifier,
+                        watch.filter.name(),
+                        if watch.enabled { "enabled" } else { "expired" },
+                        detail
+                    );
+                    count += 1;
+                });
+                if count == 0 {
+                    println!("(no watches)");
+                }
+            }
+            Some("stats") => {
+                if words.next().is_some() {
+                    print_kqueue_usage();
+                    return;
+                }
+                let stats = self.kernel_controls.events().stats();
+                println!(
+                    "watches={} pending={} delivered={} dropped={} coalesced={}",
+                    stats.watches, stats.pending, stats.delivered, stats.dropped, stats.coalesced
+                );
+            }
+            Some("add") => {
+                if !self.kernel_control_allowed(false, "register an event watch") {
+                    return;
+                }
+                let (Some(filter), Some(target)) = (words.next(), words.next()) else {
+                    print_kqueue_usage();
+                    return;
+                };
+                let watch = match filter {
+                    "signal" => parse_u32(target).map(EventWatch::signal),
+                    "timer" => {
+                        let Some(identifier) = parse_u32(target) else {
+                            println!("kqueue: identifier must be a u32");
+                            return;
+                        };
+                        let Some(delay_ms) = words.next().and_then(parse_positive_u64) else {
+                            println!("usage: kqueue add timer <id> <delay-ms> [interval-ms]");
+                            return;
+                        };
+                        let interval_ms = match words.next() {
+                            Some(value) => match parse_positive_u64(value) {
+                                Some(value) => value,
+                                None => {
+                                    println!("kqueue: interval must be a positive integer");
+                                    return;
+                                }
+                            },
+                            None => 0,
+                        };
+                        let now = crate::hardware::timestamp();
+                        let delay_ticks = milliseconds_to_ticks(delay_ms);
+                        let Some(deadline) = now.checked_add(delay_ticks) else {
+                            println!("kqueue: delay exceeds the monotonic clock range");
+                            return;
+                        };
+                        Some(EventWatch::timer(
+                            identifier,
+                            deadline,
+                            milliseconds_to_ticks(interval_ms),
+                        ))
+                    }
+                    "resource" => Resource::parse(target).map(EventWatch::resource),
+                    _ => None,
+                };
+                let Some(watch) = watch else {
+                    println!("kqueue: invalid filter, identifier, or resource");
+                    print_kqueue_usage();
+                    return;
+                };
+                if words.next().is_some() {
+                    print_kqueue_usage();
+                    return;
+                }
+                match self.kernel_controls.register_watch(watch) {
+                    Ok(()) => {
+                        println!("watch added: {} {}", watch.filter.name(), watch.identifier);
+                        if self.kernel_controls.tracing_enabled() {
+                            slog!(
+                                "HEXA_KEVENT_WATCH filter={} id={}\r\n",
+                                watch.filter.name(),
+                                watch.identifier
+                            );
+                        }
+                    }
+                    Err(error) => println!("kqueue: {}", error.message()),
+                }
+            }
+            Some("delete") | Some("del") => {
+                if !self.kernel_control_allowed(false, "remove an event watch") {
+                    return;
+                }
+                let (Some(filter), Some(target)) = (words.next(), words.next()) else {
+                    print_kqueue_usage();
+                    return;
+                };
+                let parsed = match filter {
+                    "signal" => parse_u32(target).map(|id| (id, EventFilter::Signal)),
+                    "timer" => parse_u32(target).map(|id| (id, EventFilter::Timer)),
+                    "resource" => Resource::parse(target)
+                        .map(|resource| (resource as u32, EventFilter::Resource)),
+                    _ => None,
+                };
+                let Some((identifier, filter)) = parsed else {
+                    println!("kqueue: invalid filter, identifier, or resource");
+                    return;
+                };
+                if words.next().is_some() {
+                    print_kqueue_usage();
+                    return;
+                }
+                match self.kernel_controls.unregister_watch(identifier, filter) {
+                    Ok(()) => println!("watch removed: {} {}", filter.name(), identifier),
+                    Err(error) => println!("kqueue: {}", error.message()),
+                }
+            }
+            Some("signal") => {
+                if !self.kernel_control_allowed(false, "signal an event watch") {
+                    return;
+                }
+                let Some(identifier) = words.next().and_then(parse_u32) else {
+                    println!("usage: kqueue signal <id> [data]");
+                    return;
+                };
+                let data = match words.next() {
+                    Some(value) => match value.parse::<u64>() {
+                        Ok(value) => value,
+                        Err(_) => {
+                            println!("kqueue: data must be a u64");
+                            return;
+                        }
+                    },
+                    None => 1,
+                };
+                if words.next().is_some() {
+                    print_kqueue_usage();
+                    return;
+                }
+                match self.kernel_controls.signal(identifier, data) {
+                    Ok(()) => println!("signal {} ready with data={}", identifier, data),
+                    Err(error) => println!("kqueue: {}", error.message()),
+                }
+            }
+            Some("poll") => {
+                if !self.kernel_control_allowed(false, "consume ready events") {
+                    return;
+                }
+                if words.next().is_some() {
+                    print_kqueue_usage();
+                    return;
+                }
+                let mut ready = [ReadyEvent {
+                    identifier: 0,
+                    filter: EventFilter::Signal,
+                    data: 0,
+                    sequence: 0,
+                }; MAX_READY_EVENTS];
+                let count = self
+                    .kernel_controls
+                    .poll(crate::hardware::timestamp(), &mut ready);
+                if count == 0 {
+                    println!("no ready events");
+                } else {
+                    println!("SEQUENCE IDENTIFIER FILTER    DATA");
+                    for event in ready.iter().take(count) {
+                        println!(
+                            "{:<8} {:<10} {:<9} {}",
+                            event.sequence,
+                            event.identifier,
+                            event.filter.name(),
+                            event.data
+                        );
+                    }
+                }
+            }
+            Some(_) => print_kqueue_usage(),
+        }
+    }
+
+    fn rlimit(&mut self, arguments: &str) {
+        let mut words = arguments.split_whitespace();
+        match words.next() {
+            None => self.print_limits(),
+            Some("list") => {
+                if words.next().is_some() {
+                    print_rlimit_usage();
+                    return;
+                }
+                self.print_limits();
+            }
+            Some("show") => {
+                let Some(resource) = words.next().and_then(Resource::parse) else {
+                    println!("usage: rlimit show <resource>");
+                    return;
+                };
+                if words.next().is_some() {
+                    println!("usage: rlimit show <resource>");
+                    return;
+                }
+                print_limit(self.kernel_controls.resources().get(resource));
+            }
+            Some("set") => {
+                if !self.kernel_control_allowed(true, "change a resource ceiling") {
+                    return;
+                }
+                let (Some(resource), Some(soft), Some(hard)) = (
+                    words.next().and_then(Resource::parse),
+                    words.next().and_then(parse_u64),
+                    words.next().and_then(parse_u64),
+                ) else {
+                    println!("usage: rlimit set <resource> <soft> <hard>");
+                    return;
+                };
+                if words.next().is_some() {
+                    println!("usage: rlimit set <resource> <soft> <hard>");
+                    return;
+                }
+                match self.kernel_controls.set_limit(resource, soft, hard) {
+                    Ok(limit) => {
+                        print_limit(limit);
+                        slog!(
+                            "HEXA_RLIMIT_CHANGED resource={} soft={} hard={}\r\n",
+                            resource.name(),
+                            soft,
+                            hard
+                        );
+                    }
+                    Err(error) => println!("rlimit: {}", error.message()),
+                }
+            }
+            Some("charge") => {
+                if !self.kernel_control_allowed(false, "reserve a kernel resource") {
+                    return;
+                }
+                let (Some(resource), Some(amount)) = (
+                    words.next().and_then(Resource::parse),
+                    words.next().and_then(parse_u64),
+                ) else {
+                    println!("usage: rlimit charge <resource> <amount>");
+                    return;
+                };
+                if words.next().is_some() {
+                    println!("usage: rlimit charge <resource> <amount>");
+                    return;
+                }
+                match self.kernel_controls.charge(resource, amount) {
+                    Ok(used) => println!("{}: used={}", resource.name(), used),
+                    Err(error) => println!("rlimit: {}: {}", resource.name(), error.message()),
+                }
+            }
+            Some("release") => {
+                if !self.kernel_control_allowed(false, "release a kernel resource") {
+                    return;
+                }
+                let (Some(resource), Some(amount)) = (
+                    words.next().and_then(Resource::parse),
+                    words.next().and_then(parse_u64),
+                ) else {
+                    println!("usage: rlimit release <resource> <amount>");
+                    return;
+                };
+                if words.next().is_some() {
+                    println!("usage: rlimit release <resource> <amount>");
+                    return;
+                }
+                match self.kernel_controls.release(resource, amount) {
+                    Ok(used) => println!("{}: used={}", resource.name(), used),
+                    Err(error) => println!("rlimit: {}: {}", resource.name(), error.message()),
+                }
+            }
+            Some(_) => print_rlimit_usage(),
+        }
+    }
+
+    fn print_limits(&self) {
+        println!("RESOURCE          USED SOFT HARD CEILING DENIED");
+        self.kernel_controls.resources().visit(print_limit);
+    }
+
+    fn kernel_control_allowed(&self, operator_only: bool, action: &str) -> bool {
+        let operation = if operator_only {
+            Operations::CONFIGURE
+        } else {
+            Operations::EXECUTE
+        };
+        let allowed = self.handles[0].is_some_and(|handle| {
+            self.broker
+                .authorize_requester(
+                    handle.id,
+                    self.report.root_fin,
+                    self.report.root_fin,
+                    self.report.stable_fin,
+                    operation,
+                    crate::hardware::timestamp(),
+                )
+                .is_ok()
+        });
+        if !allowed {
+            println!(
+                "DIESE denied: {} requires {} capability.",
+                action,
+                if operator_only { "Operator" } else { "Execute" }
+            );
+            slog!("HEXA_KERNEL_CONTROL_DENIED action={}\r\n", action);
+        }
+        allowed
     }
 
     fn ping(&self, arguments: &str) {
@@ -1788,6 +2214,87 @@ fn split_first(args: &str) -> Option<(&str, &str)> {
     Some((&args[..split], args[split..].trim_start()))
 }
 
+fn print_tunable(node: TunableNode) {
+    let access = match node.access {
+        TunableAccess::ReadOnly => "read-only",
+        TunableAccess::OperatorWrite => "operator-write",
+    };
+    match node.value {
+        TunableValue::Bool(value) => println!(
+            "{}={} ({}, {})",
+            node.name,
+            if value { "true" } else { "false" },
+            node.value.kind_name(),
+            access
+        ),
+        TunableValue::Unsigned(value) => println!(
+            "{}={} ({}, {})",
+            node.name,
+            value,
+            node.value.kind_name(),
+            access
+        ),
+        TunableValue::Text(value) => println!(
+            "{}={} ({}, {})",
+            node.name,
+            value,
+            node.value.kind_name(),
+            access
+        ),
+    }
+}
+
+fn print_limit(limit: ResourceLimit) {
+    println!(
+        "{:<17} {:>4} {:>4} {:>4} {:>7} {:>6}",
+        limit.resource.name(),
+        limit.used,
+        limit.soft,
+        limit.hard,
+        limit.ceiling,
+        limit.denials
+    );
+}
+
+fn print_kqueue_usage() {
+    println!("kqueue list|stats|poll");
+    println!("kqueue add|delete signal <id>");
+    println!("kqueue add timer <id> <delay-ms> [interval-ms]");
+    println!("kqueue delete timer <id>");
+    println!("kqueue add|delete resource <resource>");
+    println!("kqueue signal <id> [data]");
+}
+
+fn print_rlimit_usage() {
+    println!("rlimit list|show <resource>");
+    println!("rlimit set <resource> <soft> <hard>");
+    println!("rlimit charge|release <resource> <amount>");
+}
+
+fn parse_u32(raw: &str) -> Option<u32> {
+    raw.parse::<u32>().ok()
+}
+
+fn parse_u64(raw: &str) -> Option<u64> {
+    raw.parse::<u64>().ok()
+}
+
+fn parse_positive_u64(raw: &str) -> Option<u64> {
+    parse_u64(raw).filter(|value| *value != 0)
+}
+
+fn milliseconds_to_ticks(milliseconds: u64) -> u64 {
+    milliseconds_to_ticks_at(crate::hardware::clock_info().tsc_hz, milliseconds)
+}
+
+fn milliseconds_to_ticks_at(ticks_per_second: u64, milliseconds: u64) -> u64 {
+    if milliseconds == 0 {
+        return 0;
+    }
+    let ticks = ticks_per_second as u128 * milliseconds as u128 / 1_000;
+    ticks.clamp(1, u64::MAX as u128) as u64
+}
+
 fn is_shell_command(name: &str) -> bool {
     matches!(
         name,
@@ -1817,6 +2324,10 @@ fn is_shell_command(name: &str) -> bool {
             | "uptime"
             | "ps"
             | "kstat"
+            | "sysctl"
+            | "kqueue"
+            | "kevent"
+            | "rlimit"
             | "ifconfig"
             | "netstat"
             | "ping"
@@ -2075,7 +2586,8 @@ const fn lifecycle_name(lifecycle: Lifecycle) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_mutating_command, is_operator_command, is_shell_command, should_mask_shell_input,
+        is_mutating_command, is_operator_command, is_shell_command, milliseconds_to_ticks,
+        milliseconds_to_ticks_at, parse_positive_u64, should_mask_shell_input,
     };
 
     #[test]
@@ -2102,6 +2614,31 @@ mod tests {
             assert!(is_shell_command(command), "missing command: {command}");
         }
         assert!(!is_shell_command("not-a-command"));
+    }
+
+    #[test]
+    fn command_registry_includes_native_kernel_controls() {
+        for command in ["sysctl", "kqueue", "kevent", "rlimit"] {
+            assert!(is_shell_command(command), "missing command: {command}");
+            assert!(
+                !is_mutating_command(command),
+                "subcommand authorization must remain fine-grained: {command}"
+            );
+            assert!(!is_operator_command(command));
+        }
+    }
+
+    #[test]
+    fn event_timer_arguments_are_positive_and_clock_scaled() {
+        assert_eq!(parse_positive_u64("0"), None);
+        assert_eq!(parse_positive_u64("25"), Some(25));
+        assert_eq!(parse_positive_u64("invalid"), None);
+        assert!(milliseconds_to_ticks(1) > 0);
+        assert!(milliseconds_to_ticks(20) >= milliseconds_to_ticks(10));
+        assert_eq!(milliseconds_to_ticks_at(1, 1), 1);
+        assert_eq!(milliseconds_to_ticks_at(999, 1), 1);
+        assert_eq!(milliseconds_to_ticks_at(1_000, 1), 1);
+        assert_eq!(milliseconds_to_ticks_at(1_000, 0), 0);
     }
 
     #[test]
