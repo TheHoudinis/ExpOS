@@ -31,7 +31,7 @@ pub fn execute(command: &str, args: &str) -> bool {
             println!("ARCH=x86_64");
             println!("AUTHORITY=Operator");
             println!("DIMENSION=Stable");
-            println!("SHELL=Hexa-Form-CLI");
+            println!("SHELL=Exp-Form-CLI");
         }
         "true" => {}
         "false" => println!("false"),

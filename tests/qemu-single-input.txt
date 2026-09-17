@@ -1,0 +1,15 @@
+3
+guest
+guest
+operator
+expos
+status
+bootmode
+desktop
+ping 10.0.2.2
+login
+guest
+guest
+operator
+expos
+shutdown

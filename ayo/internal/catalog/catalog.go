@@ -17,9 +17,9 @@ import (
 	"strings"
 	"time"
 
-	"hexaos.dev/ayo/internal/artifact"
-	"hexaos.dev/ayo/internal/manager"
-	"hexaos.dev/ayo/internal/model"
+	"expos.dev/ayo/internal/artifact"
+	"expos.dev/ayo/internal/manager"
+	"expos.dev/ayo/internal/model"
 )
 
 const maxCatalogBytes = 2 << 20
@@ -47,27 +47,27 @@ type Catalog struct {
 
 func Builtin() Catalog {
 	catalog := Catalog{Schema: 2, Name: "ExpOS Prism Forms", GeneratedAt: time.Date(2026, 9, 9, 0, 0, 0, 0, time.UTC), Packages: []Package{
-		{Name: "CoreTools", Version: "1.0.0", Summary: "Form-native diagnostics and repair tools", Capabilities: []string{"inspect", "repair"}, ProvidedForms: []string{"Diagnostics"}, Compatibility: []string{"hexaos>=8.0.0"}},
+		{Name: "CoreTools", Version: "1.0.0", Summary: "Form-native diagnostics and repair tools", Capabilities: []string{"inspect", "repair"}, ProvidedForms: []string{"Diagnostics"}, Compatibility: []string{"expos>=8.0.0"}},
 		{Name: "Network", Version: "2.1.0", Summary: "Network service Form and socket capability", Capabilities: []string{"network", "socket"}, ProvidedForms: []string{"NetworkService"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
 		{Name: "Terminal", Version: "1.2.0", Summary: "Interactive command Interface Form", Capabilities: []string{"execute", "render"}, ProvidedForms: []string{"TerminalInterface"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
-		{Name: "Browser", Version: "1.0.0", Summary: "Web Interface Form for the Network service", Capabilities: []string{"network", "render"}, ProvidedForms: []string{"BrowserInterface"}, Dependencies: []string{"Network@>=2.0.0", "Terminal@>=1.0.0", "HexaDisplay@>=1.0.0"}},
-		{Name: "HexaEdit", Version: "0.8.0", Summary: "Revision-aware Data Form editor", Capabilities: []string{"read", "configure"}, ProvidedForms: []string{"EditorInterface"}, Dependencies: []string{"Terminal@>=1.0.0"}},
+		{Name: "Browser", Version: "1.0.0", Summary: "Web Interface Form for the Network service", Capabilities: []string{"network", "render"}, ProvidedForms: []string{"BrowserInterface"}, Dependencies: []string{"Network@>=2.0.0", "Terminal@>=1.0.0", "ExpDisplay@>=1.0.0"}},
+		{Name: "ExpEdit", Version: "0.8.0", Summary: "Revision-aware Data Form editor", Capabilities: []string{"read", "configure"}, ProvidedForms: []string{"EditorInterface"}, Dependencies: []string{"Terminal@>=1.0.0"}},
 		{Name: "SystemScope", Version: "1.0.0", Summary: "Live Forms, Handles, and relationship viewer", Capabilities: []string{"inspect", "relate"}, ProvidedForms: []string{"SystemScopeInterface"}, Dependencies: []string{"Terminal@>=1.0.0"}},
-		{Name: "HexaDisplay", Version: "1.0.0", Summary: "Native surface composition and input service", Capabilities: []string{"render", "relate"}, ProvidedForms: []string{"DisplayService"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
-		{Name: "RenderKit", Version: "1.0.0", Summary: "Dark UI gradients alpha blending rounded shapes and lines", Capabilities: []string{"render"}, ProvidedForms: []string{"GraphicsPrimitives"}, Dependencies: []string{"HexaDisplay@>=1.0.0"}},
-		{Name: "MouseKit", Version: "1.0.0", Summary: "PS2 pointer packets cursor and surface hit testing", Capabilities: []string{"input", "inspect"}, ProvidedForms: []string{"PointerService"}, Dependencies: []string{"InputKit@>=1.0.0", "HexaDisplay@>=1.0.0"}},
+		{Name: "ExpDisplay", Version: "1.0.0", Summary: "Native surface composition and input service", Capabilities: []string{"render", "relate"}, ProvidedForms: []string{"DisplayService"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
+		{Name: "RenderKit", Version: "1.0.0", Summary: "Dark UI gradients alpha blending rounded shapes and lines", Capabilities: []string{"render"}, ProvidedForms: []string{"GraphicsPrimitives"}, Dependencies: []string{"ExpDisplay@>=1.0.0"}},
+		{Name: "MouseKit", Version: "1.0.0", Summary: "PS2 pointer packets cursor and surface hit testing", Capabilities: []string{"input", "inspect"}, ProvidedForms: []string{"PointerService"}, Dependencies: []string{"InputKit@>=1.0.0", "ExpDisplay@>=1.0.0"}},
 		{Name: "SessionManager", Version: "1.0.0", Summary: "Login identity and capability authority sessions", Capabilities: []string{"inspect", "configure"}, ProvidedForms: []string{"SessionService"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
-		{Name: "GoSDK", Version: "1.0.0", Summary: "HexaOS Go ABI bindings and Form test emulator", Capabilities: []string{"execute", "relate"}, ProvidedForms: []string{"GoABIClient"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
-		{Name: "PrismDE", Version: "1.2.0", Summary: "Dark pointer-driven capability-native desktop environment", Capabilities: []string{"render", "input", "configure"}, ProvidedForms: []string{"PrismDesktop"}, Dependencies: []string{"HexaDisplay@>=1.0.0", "RenderKit@>=1.0.0", "Terminal@>=1.2.0", "MouseKit@>=1.0.0", "SessionManager@>=1.0.0"}},
+		{Name: "GoSDK", Version: "1.0.0", Summary: "ExpOS Go ABI bindings and Form test emulator", Capabilities: []string{"execute", "relate"}, ProvidedForms: []string{"GoABIClient"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
+		{Name: "PrismDE", Version: "1.2.0", Summary: "Dark pointer-driven capability-native desktop environment", Capabilities: []string{"render", "input", "configure"}, ProvidedForms: []string{"PrismDesktop"}, Dependencies: []string{"ExpDisplay@>=1.0.0", "RenderKit@>=1.0.0", "Terminal@>=1.2.0", "MouseKit@>=1.0.0", "SessionManager@>=1.0.0"}},
 		{Name: "PrismTheme", Version: "1.1.0", Summary: "Black Prism desktop palette and original chrome", Capabilities: []string{"render"}, ProvidedForms: []string{"PrismPalette"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
 		{Name: "InputKit", Version: "1.0.0", Summary: "PS2 and serial key event adapters", Capabilities: []string{"input", "inspect"}, ProvidedForms: []string{"InputService"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
-		{Name: "GameHub", Version: "1.0.0", Summary: "Native arcade launcher and game runtime", Capabilities: []string{"render", "input", "execute"}, ProvidedForms: []string{"GameHubInterface"}, Dependencies: []string{"HexaDisplay@>=1.0.0", "InputKit@>=1.0.0"}},
+		{Name: "GameHub", Version: "1.0.0", Summary: "Native arcade launcher and game runtime", Capabilities: []string{"render", "input", "execute"}, ProvidedForms: []string{"GameHubInterface"}, Dependencies: []string{"ExpDisplay@>=1.0.0", "InputKit@>=1.0.0"}},
 		{Name: "Snake", Version: "1.0.0", Summary: "Signal Garden native snake game", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"SnakeGame"}, Dependencies: []string{"GameHub@>=1.0.0"}},
 		{Name: "Pong", Version: "1.0.0", Summary: "Form Duel native pong game", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"PongGame"}, Dependencies: []string{"GameHub@>=1.0.0"}},
 		{Name: "VirtioBlock", Version: "0.4.0", Summary: "Experimental virtio block Driver Form", Capabilities: []string{"read", "write", "inspect"}, ProvidedForms: []string{"BlockDriver"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
 		{Name: "AudioKit", Version: "0.3.0", Summary: "Experimental audio service interfaces", Capabilities: []string{"read", "configure"}, ProvidedForms: []string{"AudioService"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
-		{Name: "TextLab", Version: "1.0.0", Summary: "Form-native notes and text workspace", Capabilities: []string{"read", "configure"}, ProvidedForms: []string{"TextLabInterface"}, Dependencies: []string{"HexaEdit@>=0.8.0", "PrismDE@>=1.0.0"}},
-		{Name: "DeveloperKit", Version: "1.0.0", Summary: "Go SDK terminal and editor development deck", Capabilities: []string{"execute", "read", "configure"}, ProvidedForms: []string{"DeveloperWorkspace"}, Dependencies: []string{"GoSDK@>=1.0.0", "HexaEdit@>=0.8.0", "PrismDE@>=1.0.0"}},
+		{Name: "TextLab", Version: "1.0.0", Summary: "Form-native notes and text workspace", Capabilities: []string{"read", "configure"}, ProvidedForms: []string{"TextLabInterface"}, Dependencies: []string{"ExpEdit@>=0.8.0", "PrismDE@>=1.0.0"}},
+		{Name: "DeveloperKit", Version: "1.0.0", Summary: "Go SDK terminal and editor development deck", Capabilities: []string{"execute", "read", "configure"}, ProvidedForms: []string{"DeveloperWorkspace"}, Dependencies: []string{"GoSDK@>=1.0.0", "ExpEdit@>=0.8.0", "PrismDE@>=1.0.0"}},
 	}}
 	for index := range catalog.Packages {
 		pkg := &catalog.Packages[index]

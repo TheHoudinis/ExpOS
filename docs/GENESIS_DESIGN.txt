@@ -1,0 +1,819 @@
+USER-SUPPLIED DESIGN CONTEXT
+Imported 2026-09-16; branding updated to ExpOS.
+This document records design context and open proposals, not implementation status.
+
+ExpOS — Installer / Genesis Engine / CFC Design Conversation Summary
+for Another AI =====================================================
+
+PURPOSE
+
+This file summarizes the design discussion about how ExpOS should be
+installed, how a new ExpOS system comes into existence, and how the
+installer relates to the Central Finite Curve (CFC), ExpFS, Forms,
+FINs, Dimensions, DIESE, PIMP, ASL, identities, encryption, recovery,
+and booting.
+
+The intent is to preserve the user’s ideas and the architectural
+decisions reached in the conversation so another AI can continue the
+work without redesigning the concepts from scratch.
+
+1. ORIGINAL INSTALLER VISION — “THE ALIEN DREAM”
+
+The original fictional scenario was:
+
+Dave downloads expos-installer.hex, flashes it to USB with a special
+flasher, and boots it.
+
+The installation experience deliberately does NOT resemble
+Linux/BSD/Windows installers: - No fdisk. - No terminal. - No
+blue/text-mode partition menu. - No requirement for the user to
+understand partitions, MBR/GPT, mount points, or filesystems. - A sleek
+minimalist graphical interface. - The installer scans the hardware and
+assigns Base Form identities automatically.
+
+Example installer language: “Scanning hardware architecture… assigning
+Base Form Identities.”
+
+The original concept was that ExpFS abstracts the physical disk as
+persistent storage rather than exposing sectors and partitions to normal
+users.
+
+Example Basic-install questions originally envisioned: 1. Name your
+Primary Dimension. 2. Preferred System Mode. 3. Initial PIMP constraint.
+
+Example: Primary Dimension: Work Preferred System Mode: Desktop
+(Standard) Initial PIMP constraint: security: strict=no
+
+DIESE validates the requested PIMP constraint and can respond with an
+explanation such as: “Accepted. Fallback drivers will be virtualized.”
+
+The envisioned finish: - Root Form becomes active. - Hardware/driver
+Forms are resolved. - A User Form is created. - The machine reboots
+directly into a working desktop. - Driver handling should be
+automatic. - Hardware capability isolation should reduce problems such
+as graphics-driver instability. - ExpFS/CFC recovery should allow very
+fast rollback to earlier system states.
+
+The desired emotional reaction is: “Where is the C: drive?” “Where are
+my files?” “I query by FIN?” “I can roll the whole system back?”
+
+The installer should feel fundamentally unlike a conventional Unix-like
+installer.
+
+2. FUNDAMENTAL SYSTEM HIERARCHY
+
+A major clarification from the user:
+
+THE WHOLE SYSTEM IS NOT A DIMENSION.
+
+The complete ExpOS environment is called a:
+
+    CFC — Central Finite Curve
+
+A CFC contains Dimensions.
+
+Conceptual hierarchy:
+
+    Physical Machine
+        |
+        +-- CFC (Central Finite Curve)
+              |
+              +-- Primary Dimension
+              |
+              +-- Work Dimension
+              |
+              +-- Gaming Dimension
+              |
+              +-- Development Dimension
+              |
+              +-- other/custom Dimensions
+              |
+              +-- Forms / FIN relationships / ExpFS state / identities / policies
+
+The Primary Dimension is only the default/primary Dimension inside the
+CFC. It is NOT the entire operating system.
+
+Multiple CFCs are possible, but only through the advanced/expert
+installation path.
+
+3. CFC AND EXPFS RELATIONSHIP
+
+The CFC is a complex, coexisting structure tightly coupled with
+HFS/ExpFS.
+
+The user’s description is essentially: - A CFC cannot meaningfully live
+without ExpFS. - ExpFS provides persistence/database-like behavior for
+the CFC. - Changes can cause snapshots/copies/checkpoints to be
+created. - CFC recovery is therefore integrated with ExpFS rather than
+being a separate conventional “recovery partition” concept.
+
+Recovery should be based on previous CFC/ExpFS states.
+
+Examples of possible user-facing recovery choices: Last successful state
+5 minutes ago Yesterday Before Update Snapshot / checkpoint
+
+Recovery is therefore an intrinsic property of the CFC + ExpFS
+architecture.
+
+4. FORMS — IMPORTANT TERMINOLOGY
+
+The user explicitly clarified:
+
+There are NO traditional “objects or files” as the fundamental storage
+abstraction.
+
+There are Forms.
+
+A Form may behave as: - data, - an object, - a function, - a driver, - a
+service, - configuration, - a document-like entity, - an
+application-like entity, - or essentially whatever semantic role it
+needs.
+
+Do NOT reduce a Form to “a file”.
+
+A useful principle from the discussion:
+
+    Forms are the fundamental persistent entities of ExpOS.
+
+FINs provide identities for Forms.
+
+FIN: Form Identification Number / unique Form identity concept.
+
+Names may not necessarily be unique; FIN is the important identity.
+
+ExpFS persists Forms and their relationships/state.
+
+5. GENESIS ENGINE
+
+A new term proposed during the conversation and accepted as fitting the
+architecture:
+
+    Genesis Engine
+
+The user-facing downloadable program can still be called:
+expos-installer.hex
+
+But internally, the subsystem that creates a ExpOS installation is the
+Genesis Engine.
+
+Suggested distinction:
+
+    ExpOS Installer
+        User-facing application/interface.
+
+    Genesis Engine
+        Internal subsystem responsible for constructing and initializing a CFC.
+
+Suggested UI title:
+
+    ExpOS Genesis Engine
+    Initializing a Central Finite Curve
+
+The central philosophical statement is:
+
+    Genesis does not merely copy an operating system.
+    Genesis constructs a Central Finite Curve.
+
+The Genesis Engine is responsible for transforming bare hardware/storage
+into a coherent, bootable ExpOS CFC.
+
+6. TWO INSTALLATION MODES
+
+The design now has TWO installation paths.
+
+A. BASIC INSTALLATION B. EXPERT / ARCHITECT INSTALLATION
+
+“Architect” was suggested as a more ExpOS-like user-facing name than
+“Expert”. The user’s original requirement is “expert”; future
+documentation can use “Architect Installation” if desired, but should
+make clear that this corresponds to the expert mode.
+
+7. BASIC INSTALLATION — FINAL REQUIREMENTS
+
+Basic mode is intended for ordinary users.
+
+STORAGE: - Basic mode claims the WHOLE selected disk automatically. -
+The user does NOT get an option to choose partial disk usage. -
+Necessary low-level boot structures (for example a small EFI System
+Partition on UEFI machines) may exist internally, but they should not
+normally be exposed to the user. - Everything else becomes
+ExpOS-managed storage / ExpFS space.
+
+CFC: - Basic mode creates ONE CFC only. - Multiple CFCs are NOT
+available in Basic mode.
+
+BOOT: - Basic mode does not expose bootloader configuration. - Basic
+users should not normally see a boot menu. - Boot should proceed
+directly into the created CFC.
+
+ENCRYPTION: - Encryption is mandatory in Basic mode. - There is no
+“disable encryption” option. - Encryption uses the Operator’s password.
+
+IDENTITY: - Creating an Operator is mandatory. - The Operator MUST have
+a password. - The installer may optionally allow creation of secondary
+Power and/or Guest users. - Secondary users need their own different
+passwords.
+
+DIMENSIONS: - The Primary Dimension is mandatory. - Both Basic and
+advanced installation modes allow the user to create additional
+Dimensions during installation. - The user does not need to wait until
+first boot to create Work/Gaming/etc. Dimensions.
+
+DESKTOP: - Basic users may choose whether to install a desktop
+environment. - A desktop is therefore not absolutely mandatory. - Basic
+mode should still keep desktop selection simple rather than exposing
+every individual desktop Form.
+
+AUTOMATION: - Hardware detection, storage setup, boot configuration,
+ExpFS initialization, FIN creation, driver resolution, and normal
+recovery setup should be automatic.
+
+8. EXPERT / ARCHITECT INSTALLATION — FINAL REQUIREMENTS
+
+Advanced mode is for users who want architectural control.
+
+STORAGE: - The user can choose whether ExpOS claims the whole disk. -
+Partial-disk/storage allocation must be possible. - The user can control
+how storage is allocated to CFCs.
+
+MULTIPLE CFCS: - Multiple CFCs MUST be supported in advanced
+installation. - This is a major difference from Basic mode.
+
+BOOT: - Advanced installation exposes boot behavior/configuration. - The
+advanced user must make a choice concerning the boot concept/boot menu
+rather than having Basic mode’s invisible automatic behavior forced on
+them. - A visible boot menu is relevant particularly when multiple CFCs
+exist.
+
+ENCRYPTION: - Encryption is optional in advanced mode. - If multiple
+CFCs are created, the installer should ask whether: a) one password
+should protect all relevant CFCs, or b) each CFC should use a separate
+password. - Advanced users can therefore create different encryption
+arrangements for different CFCs.
+
+IDENTITIES: - Operator creation remains mandatory. - Operator password
+remains mandatory. - Optional Power and Guest identities can be
+created. - Secondary identities use separate passwords.
+
+DIMENSIONS: - Primary Dimension is mandatory per applicable CFC
+design. - Additional Dimensions can be created during installation. -
+Advanced mode should expose more Dimension controls than Basic mode.
+
+DESKTOP / FORMS: - Advanced users should have more detailed choices. -
+They may choose not to install a desktop. - They may disable or omit
+specific desktop features/Forms. - More granular Form selection is
+appropriate here.
+
+RECOVERY: - Advanced users may receive more recovery configuration
+options, while still using the fundamental CFC + ExpFS
+snapshot/checkpoint model.
+
+9. IDENTITY AND PRIVILEGE MODEL
+
+Current roles discussed:
+
+    Operator
+        Highest-authority identity. Conceptually replaces the need to expose Unix "root" as
+        the normal user model.
+
+    Power
+        Normal/power-user role with less authority than Operator.
+
+    Guest
+        Very restricted identity.
+
+During BOTH Basic and advanced installation: - At least one Operator
+must be created. - Operator password is mandatory. - Optional Power and
+Guest identities may be created. - Secondary accounts require separate
+passwords.
+
+The Operator password also serves as the default encryption basis in
+Basic installation.
+
+DIESE remains ExpOS’s privileged/elevation/validation mechanism rather
+than sudo/doas.
+
+10. DIMENSION CREATION
+
+The installer should clearly distinguish:
+
+    CFC = complete ExpOS environment
+    Dimension = environment/workspace/security/execution division inside a CFC
+
+A CFC could conceptually look like:
+
+    CFC "My Machine"
+        |
+        +-- Primary Dimension "Home"
+        +-- Work
+        +-- Gaming
+        +-- Development
+        +-- Secure
+
+Both installation modes allow additional Dimensions to be “drifted” /
+made during installation.
+
+The exact semantics of Dimensions can later include execution, security,
+namespace, workspace, versioning, or other policies, but they should not
+be presented as ordinary disk partitions.
+
+11. PIMP AND DIESE DURING INSTALLATION
+
+PIMP is the system’s policy/specification/constraint mechanism.
+
+The installer may ask for an initial PIMP constraint.
+
+Example: security: strict=no
+
+DIESE validates the constraint.
+
+DIESE should not merely accept/reject; it can explain consequences, for
+example: “Accepted. Fallback drivers will be virtualized.”
+
+The important idea: The installer asks for policy/intention rather than
+forcing the user to edit configuration files or kernel command-line
+parameters.
+
+12. ASL DURING INSTALLATION
+
+ASL = Abstracted Silicon Layer.
+
+ASL is a kernel-level architecture abstraction/capability layer intended
+to support portable ExpOS execution across architectures such as x86,
+ARM, and RISC-V without making normal Forms depend directly on
+architecture-specific implementation.
+
+During Genesis: - Hardware is discovered. - Architecture/capabilities
+are identified. - ASL is initialized/bound. - Hardware capability Forms
+can then be resolved.
+
+Suggested installer wording: Scanning hardware architecture… Assigning
+Base Form identities… Binding ASL… Constructing Hardware Forms…
+
+13. DRIVER PHILOSOPHY
+
+The original fictional scenario said GPU driver Forms were loaded
+“directly from firmware”. This wording may be technically misleading
+because real firmware does not necessarily contain a complete
+operating-system GPU driver.
+
+A better architectural interpretation is: - firmware exposes
+hardware/boot information, - Genesis + ASL identify capabilities, -
+appropriate driver/capability Forms are instantiated/resolved, - DIESE
+validates dependencies/policies, - risky capabilities can be
+isolated/virtualized/sandboxed where ExpOS supports it.
+
+The user experience should still be: “It just works.”
+
+Users should not normally hunt for Wi-Fi/GPU packages during
+installation.
+
+14. LOW-LEVEL DISK REALITY
+
+Even though ExpOS should hide traditional storage concepts from Basic
+users, a real machine still needs boot-compatible structures.
+
+A practical UEFI implementation could internally look approximately
+like:
+
+    EFI System Partition
+        small firmware-readable region
+
+    ExpFS / ExpOS storage
+        remainder of the disk in Basic mode
+
+The user does NOT need to see this in Basic mode.
+
+Architect mode may expose storage layout when necessary.
+
+Important distinction: “ExpFS claims the whole disk” is a user-facing
+abstraction. Firmware/boot compatibility may still require a small
+conventional structure beneath that abstraction.
+
+15. PROPOSED GENESIS INTERNAL PIPELINE
+
+A conceptual pipeline discussed:
+
+    Physical Machine
+          |
+          v
+    Genesis Engine
+          |
+          v
+    Hardware Discovery
+          |
+          v
+    Storage Preparation
+          |
+          v
+    Initialize ExpFS
+          |
+          v
+    Construct CFC
+          |
+          v
+    Construct Root Form
+          |
+          v
+    Generate Initial FIN Graph
+          |
+          v
+    Initialize / Bind ASL
+          |
+          v
+    Initialize DIESE
+          |
+          v
+    Create Operator Identity
+          |
+          v
+    Construct Primary Dimension
+          |
+          v
+    Construct Optional Dimensions
+          |
+          v
+    Instantiate Core Forms
+          |
+          v
+    Instantiate Optional Desktop Forms
+          |
+          v
+    Establish Recovery Baseline
+          |
+          v
+    Final Validation
+          |
+          v
+    Reboot / First Startup
+
+Exact ordering can be refined during implementation.
+
+16. PROPOSED BOOT FLOW
+
+A conceptual post-install boot sequence:
+
+    Power On
+        |
+        v
+    Firmware (typically UEFI)
+        |
+        v
+    ExpLoader
+        |
+        v
+    Locate CFC
+        |
+        v
+    Validate CFC
+        |
+        v
+    Initialize ExpFS
+        |
+        v
+    Initialize ASL
+        |
+        v
+    Instantiate Root Form
+        |
+        v
+    Initialize DIESE
+        |
+        v
+    Load Primary Dimension
+        |
+        v
+    Authenticate User / Operator
+        |
+        v
+    Desktop or selected system mode
+
+Basic installation should hide the boot menu and normally enter its
+single CFC directly.
+
+Advanced installation may expose a boot menu, particularly for multiple
+CFCs.
+
+17. PROPOSED INSTALLER EXPERIENCE
+
+Example opening:
+
+    ExpOS Genesis Engine
+
+    Discovering execution environment...
+
+    CPU Architecture       x86-64
+    Memory                 16 GB
+    Graphics               Compatible
+    Storage                1 Physical Device
+    Firmware               UEFI
+
+    Constructing Hardware Forms...
+    Generating Base FIN Graph...
+    Validating ASL compatibility...
+
+    Ready
+
+Basic user-facing questions should be minimal.
+
+Possible flow:
+
+    Installation Mode
+        Basic
+        Architect
+
+BASIC: Create Operator Name Password Confirm Password
+
+    Configure CFC
+        CFC name (if the final design exposes this)
+
+    Create Primary Dimension
+        Name
+
+    Additional Dimensions
+        optional templates/custom creation
+
+    Preferred System Mode
+        Desktop (Standard)
+        Headless / no desktop
+        other simple presets
+
+    Initial PIMP constraint
+        optional/default-aware
+
+    Optional secondary identities
+        Power
+        Guest
+
+    Install
+
+Advanced mode expands the same concepts rather than replacing them with
+Unix terminology.
+
+18. INSTALLATION PROGRESS LANGUAGE
+
+The installer should not show conventional Linux-style messages such as:
+
+    Formatting ext4...
+    Mounting /dev/sda2...
+    Installing GRUB...
+    Copying /usr...
+
+Instead it should speak ExpOS language.
+
+Example:
+
+    Initializing Central Finite Curve...
+    Preparing persistent storage...
+    Initializing ExpFS...
+    Constructing Root Form...
+    Generating FIN graph...
+    Constructing Primary Dimension...
+    Instantiating Forms...
+    Binding ASL...
+    Synchronizing DIESE...
+    Establishing recovery baseline...
+    Activating Operator identity...
+    Finalizing CFC...
+
+    ExpOS is ready.
+
+Low-level operations still happen, but they are implementation details.
+
+19. USER-FACING TERMINOLOGY PRINCIPLE
+
+Do NOT rename every normal word merely to sound alien.
+
+Keep familiar terms where they remain useful: - Install - Update -
+Restart - Desktop - User - Settings - Password
+
+Reserve ExpOS-specific terminology for genuinely distinct concepts: -
+CFC - Dimension - Form - FIN - ExpFS - DIESE - PIMP - ASL - AYO -
+Genesis Engine
+
+The goal is to make ExpOS conceptually original without making it
+unnecessarily confusing.
+
+20. RECOVERY EXPERIENCE
+
+Recovery should be integrated into the CFC/ExpFS model.
+
+Possible UI:
+
+    Recovery
+
+    Restore:
+        Last successful state
+        5 minutes ago
+        Yesterday
+        Before Update
+        Checkpoint #...
+
+Rather than traditional “Safe Mode” being the primary model, ExpOS can
+use known-good CFC states.
+
+Changes to the CFC may cause ExpFS to preserve appropriate
+state/checkpoints.
+
+The exact snapshot algorithm, retention policy, deduplication strategy,
+and consistency model still require a dedicated ExpFS/CFC
+specification.
+
+21. UPDATES / AYO
+
+AYO is ExpOS’s package/Form manager.
+
+The installer should initialize a minimal coherent set of Forms.
+Depending on installation choices, desktop Forms can also be included.
+
+After installation, AYO can manage subsequent Form
+acquisition/update/removal.
+
+User-facing update language can remain architectural:
+
+    12 Forms updated
+    3 capability providers replaced
+    FIN graph synchronized
+    Execution map validated
+
+Rather than exposing traditional package-file operations by default.
+
+22. DOCUMENTATION STRATEGY DISCUSSED
+
+The installer design became large enough that it should be documented
+separately from the main ExpOS Philosophy document.
+
+Proposed publication:
+
+    ExpOS
+    Genesis Engine & Central Finite Curve Initialization
+    Version 1.0
+    Architecture Specification
+
+This can live independently on GitHub and the ExpOS website.
+
+A proposed larger architecture series:
+
+    Volume I   — Core Philosophy
+    Volume II  — Genesis Engine & CFC Initialization
+    Volume III — ExpFS Specification
+    Volume IV  — Abstracted Silicon Layer (ASL)
+    Volume V   — DIESE Execution Architecture
+    Volume VI  — Forms, FINs & Dimensions
+    Volume VII — AYO Package Manager
+    Volume VIII — Security & Identity
+    Volume IX  — Developer SDK
+
+This numbering is only a proposed documentation structure and can be
+changed.
+
+23. PROPOSED GENESIS SPECIFICATION CHAPTERS
+
+The long Genesis specification was planned as multiple GitHub-friendly
+text files:
+
+    00_Cover.txt
+    01_Purpose_and_Philosophy.txt
+    02_Genesis_Engine.txt
+    03_Basic_Installation.txt
+    04_Architect_Installation.txt
+    05_CFC_and_ExpFS.txt
+    06_Dimensions_Forms_FINs.txt
+    07_Boot_and_Recovery.txt
+    08_First_Startup.txt
+    09_Appendix_UI_Mockups.txt
+
+Target total: approximately 6–10+ pages / roughly 5,000–8,000 words.
+
+The documents should be formal architecture specifications, but may
+include examples and UI mockups.
+
+24. CORE PHILOSOPHICAL STATEMENTS
+
+The strongest concepts produced during the conversation were:
+
+    "The whole system is a CFC. A Dimension is inside the CFC."
+
+    "Genesis does not deploy an operating system. It constructs a Central Finite Curve."
+
+    "Forms are fundamental."
+
+    "The user expresses intent, not storage implementation."
+
+    "Basic Installation prioritizes simplicity."
+
+    "Architect Installation prioritizes architectural control."
+
+    "Recovery is part of the CFC + ExpFS architecture."
+
+    "A machine becomes ExpOS by Genesis constructing a coherent CFC on it."
+
+25. IMPORTANT THINGS ANOTHER AI SHOULD NOT ACCIDENTALLY CHANGE
+
+1.  Do NOT make the Primary Dimension equal to the entire OS. The CFC is
+    the complete system; Dimensions live inside it.
+
+2.  Do NOT describe Forms simply as files. A Form can represent data,
+    functionality, objects, drivers, services, etc.
+
+3.  Do NOT make Basic mode ask the user whether ExpOS should use the
+    whole disk. Basic mode claims the whole selected disk automatically.
+
+4.  Do NOT add multiple CFC creation to Basic mode. Multiple CFCs belong
+    to advanced/Architect installation.
+
+5.  Do NOT make encryption optional in Basic mode. It is mandatory and
+    tied to the Operator password.
+
+6.  Do NOT remove mandatory Operator creation. Every installation
+    requires an Operator and password.
+
+7.  Do NOT prevent optional Power/Guest creation during installation.
+    The user may create them, each with a separate password.
+
+8.  Do NOT restrict additional Dimension creation to after installation.
+    Both Basic and Architect modes can create additional Dimensions
+    during Genesis.
+
+9.  Do NOT expose a normal boot menu to Basic users. Basic mode should
+    boot directly.
+
+10. Do NOT force encryption in Architect mode. Architect users choose.
+
+11. Do NOT assume one encryption password for all CFCs in Architect
+    mode. The user may choose one shared password or different passwords
+    per CFC.
+
+12. Do NOT force a desktop. Basic can choose desktop/no desktop;
+    Architect has even more granular desktop/Form choices.
+
+13. Do NOT model recovery primarily as a traditional recovery partition.
+    Recovery belongs to CFC + ExpFS persistence/checkpoint behavior.
+
+14. Do NOT turn the UI into a Linux installer with renamed labels. The
+    user should specify identity, intent, Dimensions, policy, and
+    desired system behavior.
+
+15. Do NOT claim complete GPU drivers literally come from firmware
+    unless the implementation actually does that. Treat firmware as
+    hardware information/bootstrap input and resolve driver/capability
+    Forms through ExpOS mechanisms.
+
+16. OPEN QUESTIONS / FUTURE SPECIFICATION WORK
+
+These were not completely finalized and another AI should ask before
+making them canonical:
+
+-   Exact on-disk ExpFS format.
+-   Exact CFC metadata layout.
+-   Exact FIN binary representation.
+-   Whether a CFC itself has a FIN and how that differs from Form FINs.
+-   Exact semantics and isolation boundaries of Dimensions.
+-   Exact snapshot/checkpoint algorithm.
+-   Recovery retention and garbage collection.
+-   Exact encryption algorithm and key derivation.
+-   Whether Operator password directly derives the storage key or
+    unlocks a randomly generated key (the latter is likely preferable
+    technically, but this was not finalized by the user).
+-   Multi-CFC storage sharing rules.
+-   Whether multiple CFCs can share Forms/data.
+-   Exact ExpLoader format and boot protocol.
+-   BIOS/legacy boot support versus UEFI-only initial releases.
+-   Secure Boot design.
+-   Exact ASL bootstrap ordering.
+-   Exact DIESE bootstrap trust chain.
+-   Network availability requirements during Genesis.
+-   Offline driver/Form repository design.
+-   Exact PIMP grammar.
+-   Whether “Architect” officially replaces the name “Expert”.
+-   Whether CFC naming is mandatory or optional.
+-   Whether each CFC has exactly one Primary Dimension.
+-   How secondary users relate to multiple CFCs and Dimensions.
+-   Whether recovery checkpoints are immutable Forms, special ExpFS
+    state, or another mechanism.
+-   Exact desktop Form composition.
+
+27. TONE FOR FUTURE DOCUMENTATION
+
+The desired tone is: - formal, - architectural, -
+implementation-aware, - slightly futuristic, - original, - but
+understandable.
+
+Avoid pure marketing language.
+
+Avoid pretending currently conceptual components are already implemented
+when they are not.
+
+UI examples can be stylish/minimalist, but technical sections should
+distinguish: - conceptual architecture, - user-facing abstraction, -
+actual implementation requirements.
+
+The documentation should make ExpOS feel like a coherent architecture
+rather than Linux with renamed concepts.
+
+END OF SUMMARY
+
+This summary is intended as handoff context for another AI working on
+ExpOS. Treat decisions explicitly attributed to the user as
+requirements. Treat proposed names, diagrams, wording, and unresolved
+implementation details as design proposals unless later confirmed.

@@ -262,6 +262,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "expos-core"
+version = "0.1.0"
+
+[[package]]
+name = "expos-kernel"
+version = "8.0.0-alpha.12"
+dependencies = [
+ "embedded-io",
+ "embedded-tls",
+ "expos-core",
+ "linked_list_allocator",
+ "rand_core",
+]
+
+[[package]]
 name = "ff"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -320,21 +335,6 @@ checksum = "25ba4bd83f9415b58b4ed8dc5714c76e626a105be4646c02630ad730ad3b5aa4"
 dependencies = [
  "hash32",
  "stable_deref_trait",
-]
-
-[[package]]
-name = "hexa-core"
-version = "0.1.0"
-
-[[package]]
-name = "hexa-kernel"
-version = "8.0.0-alpha.12"
-dependencies = [
- "embedded-io",
- "embedded-tls",
- "hexa-core",
- "linked_list_allocator",
- "rand_core",
 ]
 
 [[package]]

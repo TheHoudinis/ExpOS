@@ -1,0 +1,17 @@
+2222
+operator
+expos
+python print(sum(x*x for x in range(5)))
+python while True: pass
+python print(42)
+mkform Script data
+write Script print('hello from a Form')
+python -f Script
+python exec('while True:\n try:\n  while True: pass\n except:\n  pass')
+python print('after abort')
+python sum(range(1000000000))
+python a='x'*10000000
+python print('recovered')
+revoke 1
+python print('forbidden')
+shutdown

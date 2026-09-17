@@ -1,6 +1,25 @@
 use std::{env, fs, path::PathBuf};
 
 fn main() {
+    if env::var("TARGET").unwrap_or_default() == "x86_64-unknown-none" {
+        println!("cargo:rerun-if-changed=../ports/python");
+        println!("cargo:rerun-if-changed=../vendor/micropython");
+        let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap())
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let status = std::process::Command::new("make")
+            .args(["-C", "ports/python", "-j4"])
+            .current_dir(&root)
+            .status()
+            .expect("run ExpPython build");
+        assert!(status.success(), "ExpPython build failed");
+        println!(
+            "cargo:rustc-link-search=native={}",
+            root.join("build/python").display()
+        );
+        println!("cargo:rustc-link-lib=static=expos_python");
+    }
     let output_directory = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
     for (source, output_name) in [
         ("trust/global_sign_root_r1.pem", "global_sign_root_r1.der"),

@@ -1,4 +1,4 @@
-module hexaos.dev/ayo
+module expos.dev/ayo
 
 go 1.23
 

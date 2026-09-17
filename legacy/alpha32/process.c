@@ -284,7 +284,7 @@ int process_event_send(pid_t target_pid, uint32_t event_type, uint32_t payload_h
             cli();
             int next = (tasks[i].event_head + 1) % EVENT_QUEUE_SIZE;
             if (next == tasks[i].event_tail) { sti(); return -1; }
-            hexaos_event_t *ev = &tasks[i].event_queue[tasks[i].event_head];
+            expos_event_t *ev = &tasks[i].event_queue[tasks[i].event_head];
             ev->event_type = event_type;
             ev->sender_pid = current_task >= 0 ? tasks[current_task].pid : 0;
             ev->sender_snap = 0;
@@ -299,14 +299,14 @@ int process_event_send(pid_t target_pid, uint32_t event_type, uint32_t payload_h
     return -1;
 }
 
-int process_event_poll(uint32_t event_type_mask, hexaos_event_t *out_event) {
+int process_event_poll(uint32_t event_type_mask, expos_event_t *out_event) {
     cli();
     if (tasks[current_task].event_tail == tasks[current_task].event_head) {
         tasks[current_task].event_pending = 0;
         sti();
         return -1;
     }
-    hexaos_event_t *ev = &tasks[current_task].event_queue[tasks[current_task].event_tail];
+    expos_event_t *ev = &tasks[current_task].event_queue[tasks[current_task].event_tail];
     if (event_type_mask && !(ev->event_type & event_type_mask)) {
         sti();
         return -1;

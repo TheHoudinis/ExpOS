@@ -4,7 +4,7 @@
 #include "paging.h"
 #include "interrupts.h"
 #include "log.h"
-#include "hexafs.h"
+#include "expfs.h"
 
 extern int num_tasks;
 extern void *memset(void *dest, int c, size_t len);
@@ -175,7 +175,7 @@ int kobserve_vfs_mounts(uint32_t filter, char *out, int out_len) {
     int pos = 0;
     const char *hdr = "VFS Mounts:\n";
     for (int i = 0; hdr[i] && pos < out_len - 1; i++) out[pos++] = hdr[i];
-    const char *m1 = "  /  -> hexafs_disk (persistent)\n";
+    const char *m1 = "  /  -> expfs_disk (persistent)\n";
     for (int i = 0; m1[i] && pos < out_len - 1; i++) out[pos++] = m1[i];
     out[pos] = 0;
     return pos;
@@ -244,13 +244,13 @@ int kobserve_snapshots_tree(uint32_t filter, char *out, int out_len) {
     const char *hdr = "Snapshot Tree:\n";
     for (int i = 0; hdr[i] && pos < out_len - 1; i++) out[pos++] = hdr[i];
     uint32_t snap_block = 0;
-    extern hexafs_superblock_t sb_cache;
+    extern expfs_superblock_t sb_cache;
     if (sb_cache.root_snap_block) {
         snap_block = sb_cache.root_snap_block;
-        hexafs_snap_t snap;
+        expfs_snap_t snap;
         while (snap_block) {
-            if (!hexafs_block_read(snap_block, &snap)) break;
-            if (snap.magic != HEXAFS_SNAP_MAGIC) break;
+            if (!expfs_block_read(snap_block, &snap)) break;
+            if (snap.magic != EXPFS_SNAP_MAGIC) break;
             char buf[16];
             itoa(snap_block, buf, 10);
             for (int j = 0; buf[j] && pos < out_len - 1; j++) out[pos++] = buf[j];

@@ -1,7 +1,7 @@
 //! ExpOS bootstrap kernel.
 //!
-//! Booted by GRUB via Multiboot2. `boot/boot.asm` enters long mode and
-//! calls `kernel_main(magic, mbi_phys)`.
+//! Entered through native UEFI or the legacy Multiboot2 compatibility path.
+//! `boot/boot.asm` installs kernel mappings and calls `kernel_main`.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(not(test), no_main)]
@@ -9,6 +9,7 @@
 extern crate alloc;
 
 mod allocator;
+pub(crate) mod boot;
 mod compat;
 mod crypto;
 mod desktop;
@@ -20,6 +21,7 @@ mod input;
 mod kernel_controls;
 mod network;
 mod port;
+mod python;
 mod radio;
 mod serial;
 mod session;
@@ -34,8 +36,6 @@ mod volatile;
 use core::fmt;
 #[cfg(not(test))]
 use core::panic::PanicInfo;
-
-const MULTIBOOT2_BOOTLOADER_MAGIC: u32 = 0x36D76289;
 
 // ---------------------------------------------------------------------------
 // Printing macros
@@ -129,14 +129,8 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
     );
     println!("============================================");
 
-    if magic != MULTIBOOT2_BOOTLOADER_MAGIC {
-        panic!(
-            "bad Multiboot2 magic: expected {:#x}, got {:#x}",
-            MULTIBOOT2_BOOTLOADER_MAGIC, magic
-        );
-    }
-    println!("[ok] Multiboot2 magic {:#010x}", magic);
-    println!("[ok] boot info structure @ {:#x}", mbi_phys);
+    unsafe { boot::initialize(magic, mbi_phys) };
+    println!("[ok] boot handoff @ {:#x}", mbi_phys);
 
     let mut writer = vga::WRITER.lock();
     writer.set_color(vga::Color::Black, vga::Color::LightGreen);
@@ -149,35 +143,42 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
 
     println!();
 
-    let report = match hexa_core::bootstrap_demo() {
+    let report = match expos_core::bootstrap_demo() {
         Ok(report) => {
             println!("[ok] Root Form FIN {}", report.root_fin);
             println!("[ok] Stable Dimension FIN {}", report.stable_fin);
             println!("[ok] PIMP accepted; DIESE resolved policy");
             println!("[ok] scoped Form Handle #{}", report.handle_id);
-            println!("[ok] HexaFS journal commit #{}", report.journal_sequence);
-            slog!("HEXA_BOOT_OK form-native bootstrap complete\r\n");
+            println!("[ok] ExpFS journal commit #{}", report.journal_sequence);
+            slog!("EXPOS_BOOT_OK form-native bootstrap complete\r\n");
             report
         }
         Err(error) => panic!("Form-native bootstrap failed: {:?}", error),
     };
-    let ethernet_ready = network::initialize();
-    radio::initialize(ethernet_ready, network::link_up());
     state::initialize();
     let preferences = state::preferences();
     if let Some(mode) = framebuffer::DisplayMode::from_persisted(preferences.display_mode) {
         let _ = framebuffer::request_mode(mode);
     }
-    radio::restore_persisted_policy(
-        preferences.flags & state::PREF_NETWORK_ENABLED != 0,
-        preferences.flags & state::PREF_WIFI_ENABLED != 0,
-        preferences.flags & state::PREF_BLUETOOTH_ENABLED != 0,
-    );
     session::initialize();
     println!();
     println!("Core architecture online. Starting session manager.");
     let mut input = input::Input::new();
     let requested_mode = session::choose_boot_mode(&mut input);
+    boot::set_single_user(requested_mode == session::BootMode::SingleUser);
+    if boot::single_user() {
+        slog!("EXPOS_SERVICE_MODE single-user network=disabled desktop=disabled operator-only=true\r\n");
+        radio::initialize(false, false);
+    } else {
+        let ethernet_ready = network::initialize();
+        radio::initialize(ethernet_ready, network::link_up());
+        radio::restore_persisted_policy(
+            preferences.flags & state::PREF_NETWORK_ENABLED != 0,
+            preferences.flags & state::PREF_WIFI_ENABLED != 0,
+            preferences.flags & state::PREF_BLUETOOTH_ENABLED != 0,
+        );
+        slog!("EXPOS_SERVICE_MODE multi-user\r\n");
+    }
     let login = session::login(&mut input, requested_mode);
     if login.mode == session::BootMode::Graphical {
         desktop::run(&mut input, false, login.session);

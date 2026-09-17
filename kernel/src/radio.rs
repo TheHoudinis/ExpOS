@@ -7,7 +7,7 @@
 //! three are true.
 
 use crate::{hardware, slog, sync::SpinMutex};
-use hexa_core::{CapabilityBroker, Fin, Operations};
+use expos_core::{CapabilityBroker, Fin, Operations};
 
 /// The settings authority target for connectivity configuration Handles.
 pub const RADIO_FIN: Fin = Fin::from_u128(0x5241_4449_4F00_0000_0000_0000_0000_0001);
@@ -355,7 +355,7 @@ pub fn initialize(ethernet_ready: bool, ethernet_connected: bool) {
     );
     let snapshot = snapshot();
     slog!(
-        "HEXA_RADIO_READY ethernet={} wifi={} bluetooth={} usb_controller={}\r\n",
+        "EXPOS_RADIO_READY ethernet={} wifi={} bluetooth={} usb_controller={}\r\n",
         snapshot.ethernet.status_text(),
         snapshot.wifi.status_text(),
         snapshot.bluetooth.status_text(),
@@ -384,20 +384,20 @@ pub(crate) fn restore_persisted_policy(
     drop(connectivity);
 
     slog!(
-        "HEXA_RADIO_POLICY_RESTORED network={} wifi={} bluetooth={}\r\n",
+        "EXPOS_RADIO_POLICY_RESTORED network={} wifi={} bluetooth={}\r\n",
         snapshot.network_enabled,
         snapshot.wifi_requested,
         snapshot.bluetooth_requested
     );
     if wifi_requested && wifi_result.is_err() {
         slog!(
-            "HEXA_RADIO_POLICY_SKIPPED kind=wifi reason={:?}\r\n",
+            "EXPOS_RADIO_POLICY_SKIPPED kind=wifi reason={:?}\r\n",
             wifi_result.err()
         );
     }
     if bluetooth_requested && bluetooth_result.is_err() {
         slog!(
-            "HEXA_RADIO_POLICY_SKIPPED kind=bluetooth reason={:?}\r\n",
+            "EXPOS_RADIO_POLICY_SKIPPED kind=bluetooth reason={:?}\r\n",
             bluetooth_result.err()
         );
     }

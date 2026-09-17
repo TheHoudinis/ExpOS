@@ -64,7 +64,7 @@ const DEFAULT_FONT_STYLE: u8 =
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum FontFace {
-    /// The original IBM-style HexaOS bitmap face.
+    /// The original IBM-style ExpOS bitmap face.
     #[default]
     System = 0,
     /// Softened cap and baseline terminals.
@@ -649,13 +649,13 @@ pub fn active_mode() -> Option<Mode> {
 
 pub fn enter() -> bool {
     let requested = requested_mode();
-    crate::slog!("HEXA_DISPLAY_ENTER requested={}\r\n", requested.label());
+    crate::slog!("EXPOS_DISPLAY_ENTER requested={}\r\n", requested.label());
     if program_mode(requested) {
         return true;
     }
     if requested != DisplayMode::P480 {
         crate::slog!(
-            "HEXA_DISPLAY_FALLBACK from={} to=480p reason=mode-rejected\r\n",
+            "EXPOS_DISPLAY_FALLBACK from={} to=480p reason=mode-rejected\r\n",
             requested.label()
         );
         REQUESTED_MODE.store(DisplayMode::P480.persisted(), Ordering::Release);
@@ -663,7 +663,7 @@ pub fn enter() -> bool {
             return true;
         }
     }
-    crate::slog!("HEXA_DISPLAY_UNAVAILABLE reason=no-supported-vbe-mode\r\n");
+    crate::slog!("EXPOS_DISPLAY_UNAVAILABLE reason=no-supported-vbe-mode\r\n");
     false
 }
 
@@ -763,7 +763,7 @@ fn program_mode(requested: DisplayMode) -> bool {
     if !configured {
         if let Some(mode) = active {
             crate::slog!(
-                "HEXA_DISPLAY_MODE_REJECTED requested={}x{}x{} actual={}x{}x{} virtual={}x{}\r\n",
+                "EXPOS_DISPLAY_MODE_REJECTED requested={}x{}x{} actual={}x{}x{} virtual={}x{}\r\n",
                 desired.width,
                 desired.height,
                 BITS_PER_PIXEL,
@@ -775,7 +775,7 @@ fn program_mode(requested: DisplayMode) -> bool {
             );
         } else {
             crate::slog!(
-                "HEXA_DISPLAY_MODE_REJECTED requested={}x{}x{} actual=disabled\r\n",
+                "EXPOS_DISPLAY_MODE_REJECTED requested={}x{}x{} actual=disabled\r\n",
                 desired.width,
                 desired.height,
                 BITS_PER_PIXEL
@@ -795,7 +795,7 @@ fn program_mode(requested: DisplayMode) -> bool {
     write(INDEX_Y_OFFSET, 0);
     HARDWARE_Y_OFFSET.store(read(INDEX_Y_OFFSET), Ordering::Release);
     crate::slog!(
-        "HEXA_DISPLAY_MODE width={} height={} bpp={} stride={} bytes={} preset={} pageflip={} virtual_height={}\r\n",
+        "EXPOS_DISPLAY_MODE width={} height={} bpp={} stride={} bytes={} preset={} pageflip={} virtual_height={}\r\n",
         mode.width,
         mode.height,
         mode.bits_per_pixel,
@@ -896,7 +896,7 @@ pub fn present_damage(vsync: bool, damage: &[DamageRegion]) -> bool {
             let visible = recovered_y_offset == prior_front;
             FRONT_CONTENT_VISIBLE.store(visible, Ordering::Release);
             crate::slog!(
-                "HEXA_PAGE_FLIP_DISABLED requested_y={} actual_y={} recovered_y={} visible={}\r\n",
+                "EXPOS_PAGE_FLIP_DISABLED requested_y={} actual_y={} recovered_y={} visible={}\r\n",
                 next_front,
                 hardware_y_offset,
                 recovered_y_offset,

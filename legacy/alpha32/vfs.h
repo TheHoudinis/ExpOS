@@ -3,7 +3,7 @@
 
 #include "types.h"
 
-// Form access modes (HexaOS native)
+// Form access modes (ExpOS native)
 #define FORM_READ  0
 #define FORM_WRITE 1
 #define FORM_RDWR  2

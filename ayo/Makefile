@@ -1,6 +1,6 @@
 .PHONY: build test clean
 
-export GOCACHE := /tmp/hexaos-go-cache
+export GOCACHE := /tmp/expos-go-cache
 
 build:
 	mkdir -p bin

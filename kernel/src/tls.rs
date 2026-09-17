@@ -186,7 +186,7 @@ where
         .open(TlsContext::new(&config, provider))
         .map_err(map_tls_error)?;
     slog!(
-        "HEXA_TLS_VERIFIED host={} version=1.3 suite=AES_128_GCM_SHA256 trust={}\r\n",
+        "EXPOS_TLS_VERIFIED host={} version=1.3 suite=AES_128_GCM_SHA256 trust={}\r\n",
         hostname,
         trust_anchor.label()
     );

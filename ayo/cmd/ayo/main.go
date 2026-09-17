@@ -8,11 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"hexaos.dev/ayo/internal/catalog"
-	"hexaos.dev/ayo/internal/manager"
-	"hexaos.dev/ayo/internal/model"
-	"hexaos.dev/ayo/internal/store"
-	"hexaos.dev/ayo/internal/tui"
+	"expos.dev/ayo/internal/catalog"
+	"expos.dev/ayo/internal/manager"
+	"expos.dev/ayo/internal/model"
+	"expos.dev/ayo/internal/store"
+	"expos.dev/ayo/internal/tui"
 )
 
 func main() { os.Exit(run(os.Args[1:])) }
@@ -20,7 +20,7 @@ func main() { os.Exit(run(os.Args[1:])) }
 func run(arguments []string) int {
 	flags := flag.NewFlagSet("ayo", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
-	statePath := flags.String("state", defaultStatePath(), "development HexaFS bridge state")
+	statePath := flags.String("state", defaultStatePath(), "development ExpFS bridge state")
 	authority := flags.String("authority", "power", "operator, power, or guest")
 	dimension := flags.String("dimension", "Stable", "active Dimension")
 	registrySource := flags.String("registry", os.Getenv("AYO_REGISTRY"), "HTTPS URL or local ayo catalog JSON")
@@ -116,7 +116,7 @@ func run(arguments []string) int {
 		return 1
 	}
 	if isMutation(command) {
-		fmt.Printf("ayo %s: HexaFS transaction committed in %s. nice.\n", command, *dimension)
+		fmt.Printf("ayo %s: ExpFS transaction committed in %s. nice.\n", command, *dimension)
 	}
 	return 0
 }
@@ -322,7 +322,7 @@ func isMutation(command string) bool {
 }
 func defaultStatePath() string {
 	if root, err := os.UserConfigDir(); err == nil {
-		return filepath.Join(root, "hexaos", "ayo-bridge.json")
+		return filepath.Join(root, "expos", "ayo-bridge.json")
 	}
 	return "ayo-bridge.json"
 }
@@ -332,7 +332,7 @@ func defaultInstallRoot() string {
 		return configured
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".local", "share", "hexaos", "ayo-root")
+		return filepath.Join(home, ".local", "share", "expos", "ayo-root")
 	}
 	return "ayo-root"
 }

@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"hexaos.dev/ayo/internal/model"
+	"expos.dev/ayo/internal/model"
 )
 
 func validState(name string) model.State {

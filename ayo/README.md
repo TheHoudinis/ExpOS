@@ -73,7 +73,7 @@ The philosophy command vocabulary remains available: `slap`, `yeet`, `glance`,
 `chill`, `fix`, `ghost`, `manifest`, `highfive`, `dodge`, `vibecheck`, and
 `flex`. Ayo v3 adds `install`, `files`, and `recover` for artifact workflows.
 
-The JSON state store is a development HexaFS bridge. It uses a single-writer
+The JSON state store is a development ExpFS bridge. It uses a single-writer
 lock, pending journal, atomic rename and recovery snapshot. Native integration
 will replace that bridge with kernel Form Handle calls without changing the
 package transaction model.

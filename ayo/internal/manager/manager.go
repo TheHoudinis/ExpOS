@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"hexaos.dev/ayo/internal/artifact"
-	"hexaos.dev/ayo/internal/model"
-	"hexaos.dev/ayo/internal/store"
+	"expos.dev/ayo/internal/artifact"
+	"expos.dev/ayo/internal/model"
+	"expos.dev/ayo/internal/store"
 )
 
 type Manager struct {
@@ -43,7 +43,7 @@ type HealthReport struct {
 	Issues                            []string
 }
 
-const hexaOSVersion = "8.0.0"
+const exposVersion = "8.0.0"
 
 func (manager Manager) Read() (model.State, error) { return manager.Store.Load() }
 
@@ -493,14 +493,14 @@ func checkCompatibility(requirements []string, dimension string) error {
 			if !strings.EqualFold(wanted, dimension) {
 				return fmt.Errorf("compatibility requires Dimension %s, current Dimension is %s", wanted, dimension)
 			}
-		case strings.HasPrefix(strings.ToLower(rule), "hexaos"):
-			constraint := strings.TrimSpace(rule[len("hexaos"):])
-			ok, err := satisfies(hexaOSVersion, constraint)
+		case strings.HasPrefix(strings.ToLower(rule), "expos"):
+			constraint := strings.TrimSpace(rule[len("expos"):])
+			ok, err := satisfies(exposVersion, constraint)
 			if err != nil {
 				return fmt.Errorf("invalid compatibility %q: %w", rule, err)
 			}
 			if !ok {
-				return fmt.Errorf("compatibility requires HexaOS %s, current version is %s", constraint, hexaOSVersion)
+				return fmt.Errorf("compatibility requires ExpOS %s, current version is %s", constraint, exposVersion)
 			}
 		default:
 			return fmt.Errorf("unknown compatibility requirement %q", rule)

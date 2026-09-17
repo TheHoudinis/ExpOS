@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"hexaos.dev/ayo/internal/model"
+	"expos.dev/ayo/internal/model"
 )
 
 func TestBuiltinBrowserResolvesCompleteFormPlan(t *testing.T) {
@@ -18,7 +18,7 @@ func TestBuiltinBrowserResolvesCompleteFormPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"CoreTools", "Network", "Terminal", "HexaDisplay", "Browser"}
+	want := []string{"CoreTools", "Network", "Terminal", "ExpDisplay", "Browser"}
 	if len(plan) != len(want) {
 		t.Fatalf("unexpected plan: %#v", plan)
 	}
@@ -34,7 +34,7 @@ func TestBuiltinSnakeResolvesPlayableGameStack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"CoreTools", "HexaDisplay", "InputKit", "GameHub", "Snake"}
+	want := []string{"CoreTools", "ExpDisplay", "InputKit", "GameHub", "Snake"}
 	if len(plan) != len(want) {
 		t.Fatalf("unexpected plan: %#v", plan)
 	}

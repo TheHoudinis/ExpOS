@@ -11,7 +11,7 @@ use core::cmp;
 pub const MAX_TUNABLES: usize = 9;
 pub const MAX_WATCHES: usize = 16;
 pub const MAX_READY_EVENTS: usize = 16;
-pub const RESOURCE_COUNT: usize = 4;
+pub const RESOURCE_COUNT: usize = 5;
 
 const NODE_EVENT_BATCH: usize = 2;
 const NODE_EVENT_COALESCE: usize = 3;
@@ -495,6 +495,7 @@ pub enum Resource {
     IpcBytes = 1,
     ScratchPages = 2,
     FormOperations = 3,
+    FormBytes = 4,
 }
 
 impl Resource {
@@ -503,6 +504,7 @@ impl Resource {
         Self::IpcBytes,
         Self::ScratchPages,
         Self::FormOperations,
+        Self::FormBytes,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -511,6 +513,7 @@ impl Resource {
             Self::IpcBytes => "ipc-bytes",
             Self::ScratchPages => "scratch-pages",
             Self::FormOperations => "form-operations",
+            Self::FormBytes => "form-bytes",
         }
     }
 
@@ -559,6 +562,7 @@ impl ResourceLedger {
                 ResourceLimit::new(Resource::IpcBytes, 4096, 16_384, 65_536),
                 ResourceLimit::new(Resource::ScratchPages, 16, 64, 256),
                 ResourceLimit::new(Resource::FormOperations, 64, 256, 4096),
+                ResourceLimit::new(Resource::FormBytes, 6144, 6144, 6144),
             ],
             total_denials: 0,
         }
@@ -704,7 +708,10 @@ impl KernelControls {
     }
 
     pub fn charge(&mut self, resource: Resource, amount: u64) -> Result<u64, ControlError> {
-        if resource == Resource::EventWatches {
+        if matches!(
+            resource,
+            Resource::EventWatches | Resource::FormOperations | Resource::FormBytes
+        ) {
             return Err(ControlError::ManagedResource);
         }
         self.charge_internal(resource, amount)
@@ -725,10 +732,36 @@ impl KernelControls {
     }
 
     pub fn release(&mut self, resource: Resource, amount: u64) -> Result<u64, ControlError> {
-        if resource == Resource::EventWatches {
+        if matches!(
+            resource,
+            Resource::EventWatches | Resource::FormOperations | Resource::FormBytes
+        ) {
             return Err(ControlError::ManagedResource);
         }
         self.resources.release(resource, amount)
+    }
+
+    /// Only owning subsystems may charge actual work or resident Form content.
+    pub(crate) fn charge_form_operation(&mut self) -> Result<(), ControlError> {
+        self.charge_internal(Resource::FormOperations, 1)
+            .map(|_| ())
+    }
+
+    /// Validate growth before publishing a content replacement; shrinking always
+    /// releases the corresponding owned bytes. Manual reservations cannot forge it.
+    pub(crate) fn resize_form_content(
+        &mut self,
+        old: usize,
+        new: usize,
+    ) -> Result<(), ControlError> {
+        if new >= old {
+            self.charge_internal(Resource::FormBytes, (new - old) as u64)
+                .map(|_| ())
+        } else {
+            self.resources
+                .release(Resource::FormBytes, (old - new) as u64)
+                .map(|_| ())
+        }
     }
 
     pub const fn tracing_enabled(&self) -> bool {
@@ -764,6 +797,34 @@ mod tests {
         data: 0,
         sequence: 0,
     };
+
+    #[test]
+    fn real_form_content_and_work_are_owned_and_fail_atomically() {
+        let mut controls = KernelControls::new();
+        controls.set_limit(Resource::FormBytes, 4, 8).unwrap();
+        controls.resize_form_content(0, 4).unwrap();
+        assert_eq!(
+            controls.resize_form_content(4, 5),
+            Err(ControlError::ResourceExhausted)
+        );
+        assert_eq!(controls.resources().get(Resource::FormBytes).used, 4);
+        assert_eq!(
+            controls.release(Resource::FormBytes, 4),
+            Err(ControlError::ManagedResource)
+        );
+        controls.resize_form_content(4, 1).unwrap();
+        assert_eq!(controls.resources().get(Resource::FormBytes).used, 1);
+        controls.set_limit(Resource::FormOperations, 1, 2).unwrap();
+        controls.charge_form_operation().unwrap();
+        assert_eq!(
+            controls.charge_form_operation(),
+            Err(ControlError::ResourceExhausted)
+        );
+        assert_eq!(
+            controls.release(Resource::FormOperations, 1),
+            Err(ControlError::ManagedResource)
+        );
+    }
 
     #[test]
     fn tunables_are_typed_validated_and_protect_read_only_nodes() {

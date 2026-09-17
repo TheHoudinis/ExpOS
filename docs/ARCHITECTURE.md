@@ -19,7 +19,7 @@ firmware / GRUB (temporary)
  PIMP specification -> DIESE resolution
           |
           v
- HexaFS transaction + journal sequence
+ ExpFS transaction + journal sequence
 ```
 
 ## Implemented vertical slice
@@ -27,7 +27,7 @@ firmware / GRUB (temporary)
 1. The loader validates long-mode support and enters an identity-mapped x86_64
    kernel with a 1 MiB bootstrap stack.
 2. The kernel validates Multiboot2, initializes polling serial and VGA output,
-   and invokes `hexa_core::bootstrap_demo`.
+   and invokes `expos_core::bootstrap_demo`.
 3. The demo creates a Root Form and Stable Dimension with independent FINs.
 4. A binding makes the Root Form visible in Stable at revision 1.
 5. Typed PIMP settings request service mode, restricted networking and
@@ -35,7 +35,7 @@ firmware / GRUB (temporary)
    same-scope conflicts with a diagnostic.
 6. The capability broker returns a time-limited, Dimension-scoped Form Handle
    that authorizes only read and execution.
-7. HexaFS preflights and atomically publishes a journaled metadata transaction.
+7. ExpFS preflights and atomically publishes a journaled metadata transaction.
 8. The kernel starts a graphical Session Manager and maps the selected identity
    to Operator, Power or Guest authority before opening the command environment.
    Polling COM1, PS/2 keyboard and PS/2 mouse input work before the interrupt
@@ -76,11 +76,13 @@ firmware / GRUB (temporary)
   coalescing. Signal, one-shot/periodic timer and resource-denial filters are
   implemented. Missed periodic expirations accumulate rather than silently
   disappearing. The rlimit-style ledger tracks event watches, IPC bytes,
-  scratch pages and Form operations; each record enforces
+  scratch pages, Form operations and live Form content bytes; each record enforces
   `used <= soft <= hard <= ceiling`, charges against the soft limit, records
   denials and can raise resource-readiness events. Event watches use this ledger
-  internally; IPC bytes, scratch pages and Form operations are explicit
-  runtime-local reservations and are not yet enforced across those subsystems.
+  internally. The shell charges every Form mutation attempt and checks content
+  growth before writes/copies, releasing bytes on shrink/reclamation. These
+  owned counters cannot be forged through manual charge/release commands.
+  IPC bytes and scratch pages remain explicit runtime-local reservations.
   Reads are available to every authenticated authority. Tunable and limit
   changes require a Configure-capable bootstrap Handle issued only to Operator;
   watch/signal/poll and charge/release require its Execute right. Revoking that
@@ -88,7 +90,7 @@ firmware / GRUB (temporary)
   The tables fail closed at capacity and remain runtime-local. They are not a
   scheduler, an interrupt notification backend or a FreeBSD compatibility
   subsystem.
-- HexaDisplay uses a Wayland-like ownership model without copying Wayland's
+- ExpDisplay uses a Wayland-like ownership model without copying Wayland's
   Unix socket/file-descriptor ABI: clients own surfaces and Buffer Handles,
   mutate pending state, report surface-local damage, and publish atomically
   with `commit`. This is a Form-native compositor protocol, not Wayland
@@ -102,7 +104,7 @@ firmware / GRUB (temporary)
   configure, frame-complete, key and pointer events are routed back to the
   owning FIN. The software renderer can program 640x480, 1280x720 or 1920x1080 XRGB
   scanout in QEMU standard VGA's 16 MiB linear framebuffer BAR. The bootstrap
-  maps the entire fourth-GiB PCI window, and HexaDisplay checks the selected
+  maps the entire fourth-GiB PCI window, and ExpDisplay checks the selected
   geometry, stride and double-buffer byte count against the aperture before the
   first framebuffer write. When the adapter accepts a virtual height of twice
   the visible height, rendering targets the hidden page and presentation flips
@@ -197,7 +199,7 @@ firmware / GRUB (temporary)
   for new records); candidate hashes are compared in constant time and
   plaintext input is wiped after use. This is not yet a claim of lockout,
   hardware-backed keys or a complete modern account-security policy.
-- The state disk is a compact versioned store, not HexaFS. Two 2 KiB slots at
+- The state disk is a compact versioned store, not ExpFS. Two 2 KiB slots at
   fixed LBAs hold accounts and desktop preferences. Each commit writes the
   inactive slot with a monotonically advancing generation, format/version
   fields and CRC-32 over its header and payload; boot selects the newest valid
@@ -234,8 +236,8 @@ firmware / GRUB (temporary)
   real packet authorization path. PCI Wi-Fi/Bluetooth functions are discovered,
   while missing 802.11 drivers and the absent USB host stack remain visibly
   unavailable instead of being reported as connected.
-- The Browser is an Interface Form above HexaDisplay. Its current document
-  engine accepts local `hexa://`, `data:text/html` and bounded `http://` or
+- The Browser is an Interface Form above ExpDisplay. Its current document
+  engine accepts local `expos://`, `data:text/html` and bounded `http://` or
   `https://` resources. It receives a requester-bound Network Handle only for
   non-Guest sessions when PIMP networking is enabled. Text entered without a
   URL scheme is encoded for DuckDuckGo's canonical non-JavaScript HTML endpoint
@@ -259,13 +261,16 @@ firmware / GRUB (temporary)
   loading still depends on the execution-context loader and scheduler.
 - PIMP accepts only known keys and typed values. DIESE never silently resolves
   an equal-precedence conflict.
-- HexaFS transaction commit validates all staged records and capacity before
+- ExpFS transaction commit validates all staged records and capacity before
   publishing any record under a single journal sequence.
 
 ## Transitional boundaries
 
-The current GRUB/Multiboot2 path came from expodOS and is explicitly temporary;
-the philosophy calls for UEFI in Phase 1. The `ayo` JSON store is similarly a
+The native UEFI path now loads the kernel directly, reserves its memory,
+passes firmware memory-map/GOP metadata, and exits boot services. The older
+GRUB/Multiboot2 path from expodOS remains a development fallback while final
+Genesis boot policy is pending; see `BOOT.md` for hardware limits.
+The `ayo` JSON store remains a
 host-development bridge that makes transactions inspectable. It serializes
 updates with a lock, pending journal, atomic rename and recovery snapshot, but
 is not the native persistent format and will be replaced by kernel Form Handle
@@ -278,7 +283,7 @@ process naming must not leak into the new public model.
 Form contents, relationships and PIMP state are deliberately backed by
 fixed-capacity, in-memory tables at this stage. Account and desktop preference
 mutations are durable through the separate state journal, but that journal is
-not a substitute for the HexaFS block driver, persistent Form graph or FIN
+not a substitute for the ExpFS block driver, persistent Form graph or FIN
 index.
 
 Alpha.12 includes the runtime-selectable 480p/720p/1080p empty-start desktop,

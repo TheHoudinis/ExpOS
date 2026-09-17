@@ -25,7 +25,7 @@ import (
 	"syscall"
 	"time"
 
-	"hexaos.dev/ayo/internal/model"
+	"expos.dev/ayo/internal/model"
 )
 
 const (

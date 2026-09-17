@@ -8,7 +8,7 @@
 
 use crate::{port, println, slog};
 use core::sync::atomic::{compiler_fence, Ordering};
-use hexa_core::{CapabilityBroker, Fin, Operations};
+use expos_core::{CapabilityBroker, Fin, Operations};
 
 pub const NETWORK_FIN: Fin = Fin::from_u128(0x4E45_5457_4F52_4B00_0000_0000_0000_0001);
 
@@ -1308,7 +1308,7 @@ pub fn initialize() -> bool {
     if ready {
         let mac = network.mac;
         slog!(
-            "HEXA_NET_READY driver=rtl8139 mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\r\n",
+            "EXPOS_NET_READY driver=rtl8139 mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\r\n",
             mac[0],
             mac[1],
             mac[2],
@@ -1317,7 +1317,7 @@ pub fn initialize() -> bool {
             mac[5]
         );
     } else {
-        slog!("HEXA_NET_UNAVAILABLE driver=rtl8139\r\n");
+        slog!("EXPOS_NET_UNAVAILABLE driver=rtl8139\r\n");
     }
     ready
 }
@@ -1395,7 +1395,7 @@ pub fn ping_text(
 ) {
     if !crate::radio::network_allowed() {
         println!("ping: network access is disabled in Settings");
-        slog!("HEXA_PING_DENIED policy=disabled\r\n");
+        slog!("EXPOS_PING_DENIED policy=disabled\r\n");
         return;
     }
     if let Err(error) = broker.authorize_requester(
@@ -1408,7 +1408,7 @@ pub fn ping_text(
     ) {
         println!("ping: DIESE denied a Network Handle: {:?}", error);
         slog!(
-            "HEXA_PING_DENIED handle={} error={:?}\r\n",
+            "EXPOS_PING_DENIED handle={} error={:?}\r\n",
             handle_id,
             error
         );
@@ -1459,7 +1459,7 @@ pub fn ping_text(
                     reply.elapsed_cycles
                 );
                 slog!(
-                    "HEXA_PING_REPLY address={}.{}.{}.{} sequence={}\r\n",
+                    "EXPOS_PING_REPLY address={}.{}.{}.{} sequence={}\r\n",
                     reply.address[0],
                     reply.address[1],
                     reply.address[2],
@@ -1469,13 +1469,17 @@ pub fn ping_text(
             }
             Err(error) => {
                 println!("ping: {}", error.message());
-                slog!("HEXA_PING_ERROR {:?}\r\n", error);
+                slog!("EXPOS_PING_ERROR {:?}\r\n", error);
                 break;
             }
         }
     }
     println!("ping summary: sent={} received={}", count, received);
-    slog!("HEXA_PING_SUMMARY sent={} received={}\r\n", count, received);
+    slog!(
+        "EXPOS_PING_SUMMARY sent={} received={}\r\n",
+        count,
+        received
+    );
 }
 
 fn authorize_network(

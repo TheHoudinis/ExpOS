@@ -3,8 +3,8 @@ use crate::{
     input::{Input, InputEvent},
     print, println, slog, state,
 };
+use expos_core::Authority;
 use framebuffer::color;
-use hexa_core::Authority;
 
 const FIELD_CAPACITY: usize = 24;
 const MAX_ACCOUNTS: usize = 12;
@@ -65,6 +65,7 @@ pub struct Session {
 pub enum BootMode {
     Graphical,
     Console,
+    SingleUser,
 }
 
 impl BootMode {
@@ -72,6 +73,7 @@ impl BootMode {
         match self {
             Self::Graphical => "graphical",
             Self::Console => "console",
+            Self::SingleUser => "single-user",
         }
     }
 
@@ -79,6 +81,7 @@ impl BootMode {
         match self {
             Self::Graphical => Self::Console,
             Self::Console => Self::Graphical,
+            Self::SingleUser => Self::SingleUser,
         }
     }
 }
@@ -131,7 +134,7 @@ impl Account {
         let (password_salt, entropy) = crypto::password_salt(name.as_bytes());
         if entropy == crypto::SaltEntropy::Degraded {
             slog!(
-                "HEXA_PASSWORD_SALT_ENTROPY degraded user={}\r\n",
+                "EXPOS_PASSWORD_SALT_ENTROPY degraded user={}\r\n",
                 name.as_str()
             );
         }
@@ -273,14 +276,14 @@ pub fn initialize() {
     *ACCOUNTS.lock() = accounts;
     if source == "defaults" {
         match state::save_accounts(accounts.persistent()) {
-            Ok(()) => slog!("HEXA_ACCOUNTS_READY source=defaults persisted=true\r\n"),
+            Ok(()) => slog!("EXPOS_ACCOUNTS_READY source=defaults persisted=true\r\n"),
             Err(error) => slog!(
-                "HEXA_ACCOUNTS_READY source=defaults persisted=false error={:?}\r\n",
+                "EXPOS_ACCOUNTS_READY source=defaults persisted=false error={:?}\r\n",
                 error
             ),
         }
     } else {
-        slog!("HEXA_ACCOUNTS_READY source=disk persisted=true\r\n");
+        slog!("EXPOS_ACCOUNTS_READY source=disk persisted=true\r\n");
     }
 }
 
@@ -433,7 +436,7 @@ fn present_graphical(stage: &str) -> bool {
     let visible = framebuffer::present(false);
     if !visible {
         slog!(
-            "HEXA_GRAPHICS_PRESENT_FAILED stage={} reason=scanout-not-visible\r\n",
+            "EXPOS_GRAPHICS_PRESENT_FAILED stage={} reason=scanout-not-visible\r\n",
             stage
         );
     }
@@ -441,9 +444,16 @@ fn present_graphical(stage: &str) -> bool {
 }
 
 pub fn choose_boot_mode(input: &mut Input) -> BootMode {
+    if crate::boot::single_user() {
+        return BootMode::SingleUser;
+    }
+    if let Some(mode) = crate::boot::requested_mode() {
+        slog!("EXPOS_BOOT_MODE {} source=firmware\r\n", mode.name());
+        return mode;
+    }
     let _ = input.enable_mouse();
     if !framebuffer::enter() {
-        slog!("HEXA_BOOT_MODE console fallback=true\r\n");
+        slog!("EXPOS_BOOT_MODE console fallback=true\r\n");
         return BootMode::Console;
     }
     let mut selected = BootMode::Graphical;
@@ -454,19 +464,19 @@ pub fn choose_boot_mode(input: &mut Input) -> BootMode {
     if !present_graphical("boot-chooser") {
         framebuffer::exit();
         crate::clear_console();
-        slog!("HEXA_BOOT_MODE console fallback=true reason=scanout-not-visible\r\n");
+        slog!("EXPOS_BOOT_MODE console fallback=true reason=scanout-not-visible\r\n");
         return BootMode::Console;
     }
     let presentation = framebuffer::presentation_stats();
     slog!(
-        "HEXA_BOOT_SCREEN_PRESENTED preset={} frames={} pageflip={} y_offset={} visible={}\r\n",
+        "EXPOS_BOOT_SCREEN_PRESENTED preset={} frames={} pageflip={} y_offset={} visible={}\r\n",
         framebuffer::current_mode().label(),
         presentation.frames,
         presentation.page_flip_available,
         presentation.hardware_y_offset,
         presentation.visible_content
     );
-    slog!("HEXA_BOOT_MODE_READY\r\n");
+    slog!("EXPOS_BOOT_MODE_READY\r\n");
     loop {
         let Some(event) = input.poll_event() else {
             core::hint::spin_loop();
@@ -480,6 +490,7 @@ pub fn choose_boot_mode(input: &mut Input) -> BootMode {
             InputEvent::Key(b'2' | b'c' | b'C') | InputEvent::Key(crate::input::KEY_DOWN) => {
                 selected = BootMode::Console;
             }
+            InputEvent::Key(b'3' | b's' | b'S') => selected = BootMode::SingleUser,
             InputEvent::Key(b'\n') => accepted = true,
             InputEvent::Pointer(pointer) => {
                 pointer_x = pointer_x
@@ -509,7 +520,7 @@ pub fn choose_boot_mode(input: &mut Input) -> BootMode {
         if accepted {
             framebuffer::exit();
             crate::clear_console();
-            slog!("HEXA_BOOT_MODE {}\r\n", selected.name());
+            slog!("EXPOS_BOOT_MODE {}\r\n", selected.name());
             return selected;
         }
         render_boot_mode(selected);
@@ -517,7 +528,7 @@ pub fn choose_boot_mode(input: &mut Input) -> BootMode {
         if !present_graphical("boot-chooser") {
             framebuffer::exit();
             crate::clear_console();
-            slog!("HEXA_BOOT_MODE console fallback=true reason=scanout-not-visible\r\n");
+            slog!("EXPOS_BOOT_MODE console fallback=true reason=scanout-not-visible\r\n");
             return BootMode::Console;
         }
     }
@@ -530,7 +541,7 @@ pub fn login(input: &mut Input, initial_mode: BootMode) -> LoginResult {
             LoginAttempt::Authenticated(session) => return LoginResult { session, mode },
             LoginAttempt::SwitchEnvironment => {
                 mode = mode.alternate();
-                slog!("HEXA_LOGIN_ENVIRONMENT {}\r\n", mode.name());
+                slog!("EXPOS_LOGIN_ENVIRONMENT {}\r\n", mode.name());
             }
         }
     }
@@ -555,7 +566,7 @@ fn login_once(input: &mut Input, mode: BootMode) -> LoginAttempt {
     let mut denied = false;
     let mut pointer_x = (framebuffer::width() / 2) as i16;
     let mut pointer_y = (framebuffer::height() / 2) as i16;
-    slog!("HEXA_LOGIN_READY\r\n");
+    slog!("EXPOS_LOGIN_READY\r\n");
     if graphical {
         render_login(
             &username,
@@ -573,7 +584,7 @@ fn login_once(input: &mut Input, mode: BootMode) -> LoginAttempt {
         }
         let presentation = framebuffer::presentation_stats();
         slog!(
-            "HEXA_LOGIN_SCREEN_PRESENTED preset={} frames={} pageflip={} y_offset={} visible={}\r\n",
+            "EXPOS_LOGIN_SCREEN_PRESENTED preset={} frames={} pageflip={} y_offset={} visible={}\r\n",
             framebuffer::current_mode().label(),
             presentation.frames,
             presentation.page_flip_available,
@@ -582,7 +593,11 @@ fn login_once(input: &mut Input, mode: BootMode) -> LoginAttempt {
         );
     } else {
         println!("ExpOS login");
-        println!("Press Esc to use the graphical login.");
+        if crate::boot::single_user() {
+            println!("Single-user maintenance: Operator authentication required; network and desktop are stopped.");
+        } else {
+            println!("Press Esc to use the graphical login.");
+        }
         print!("user: ");
     }
 
@@ -758,7 +773,18 @@ fn render_boot_mode(selected: BootMode) {
         "2  Console",
         selected == BootMode::Console,
     );
-    framebuffer::text(center_x - 20, center_y + 86, "Enter", color::MUTED, 1);
+    framebuffer::text(
+        center_x - 126,
+        center_y + 74,
+        "3  Single-user maintenance",
+        if selected == BootMode::SingleUser {
+            color::WHITE
+        } else {
+            color::MUTED
+        },
+        1,
+    );
+    framebuffer::text(center_x - 20, center_y + 106, "Enter", color::MUTED, 1);
 }
 
 fn boot_mode_card(x: i32, y: i32, title: &str, selected: bool) {
@@ -796,7 +822,7 @@ fn complete_login(session: Session, graphical: bool) -> Session {
         session.name(),
         session.authority_name()
     );
-    slog!("HEXA_LOGIN_OK user={}\r\n", session.name());
+    slog!("EXPOS_LOGIN_OK user={}\r\n", session.name());
     session
 }
 
@@ -808,6 +834,10 @@ fn authenticate(username: &[u8], password: &[u8]) -> Option<Session> {
         .iter()
         .find(|account| account.occupied && account.name.as_bytes() == normalized.as_bytes())
         .copied()?;
+    if crate::boot::single_user() && account.authority != Authority::Operator {
+        slog!("EXPOS_SINGLE_USER_DENIED non-operator\r\n");
+        return None;
+    }
     account
         .verify_password(password)
         .then_some(account.session())

@@ -1,6 +1,6 @@
 #include "types.h"
 #include "intent.h"
-#include "hexafs.h"
+#include "expfs.h"
 #include "process.h"
 #include "log.h"
 
@@ -12,7 +12,7 @@ extern void *kmalloc(size_t size);
 extern void kfree(void *ptr);
 extern int find_form(const char *name);
 extern void itoa(int num, char *str, int base);
-extern struct hexa_formentry {
+extern struct expos_formentry {
     char name[32];
     char *content;
     int size;
@@ -32,11 +32,11 @@ int intent_init(void) {
     return 0;
 }
 
-int intent_create(int pid, hexaos_intent_t *intent, uint32_t *handle) {
+int intent_create(int pid, expos_intent_t *intent, uint32_t *handle) {
     if (!intent || !handle) return -1;
 
     if (intent->intent_type == INTENT_PRODUCE || intent->intent_type == INTENT_TRANSFORM) {
-        if (!hexafs_cap_check((uint32_t)pid, CAP_TYPE_INTENT) && pid != 0) {
+        if (!expfs_cap_check((uint32_t)pid, CAP_TYPE_INTENT) && pid != 0) {
             return -1;
         }
     }
@@ -65,7 +65,7 @@ int intent_fulfill(uint32_t handle, void *buffer, int len) {
                     int idx = (int)e->intent.target_hash;
                     if (idx >= 0 && idx < form_count) {
                         if (e->intent.schema_hash != 0) {
-                            uint32_t content_hash = hexafs_content_hash(buffer, (uint32_t)len);
+                            uint32_t content_hash = expfs_content_hash(buffer, (uint32_t)len);
                             if (content_hash != e->intent.schema_hash) {
                                 return -1;
                             }
@@ -106,7 +106,7 @@ int intent_fulfill(uint32_t handle, void *buffer, int len) {
                 if (buffer && len > 0) {
                     int idx = (int)e->intent.target_hash;
                     if (idx >= 0 && idx < form_count) {
-                        uint32_t content_hash = hexafs_content_hash(buffer, (uint32_t)len);
+                        uint32_t content_hash = expfs_content_hash(buffer, (uint32_t)len);
                         if (e->intent.schema_hash != 0 && content_hash != e->intent.schema_hash) {
                             return -1;
                         }
@@ -144,7 +144,7 @@ int intent_compat_open(const char *path, int flags) {
         idx = find_form(path);
         if (idx < 0) return -1;
     }
-    hexaos_intent_t intent;
+    expos_intent_t intent;
     if (flags & 1)
         intent.intent_type = INTENT_PRODUCE;
     else
@@ -184,7 +184,7 @@ int intent_compat_write(int fd, const char *buf, int count, int pos) {
     if (!e) {
         int idx = find_form((const char *)(uint32_t)fd);
         if (idx >= 0) {
-            hexaos_intent_t intent;
+            expos_intent_t intent;
             intent.intent_type = INTENT_PRODUCE;
             intent.target_hash = (uint32_t)idx;
             intent.schema_hash = 0;

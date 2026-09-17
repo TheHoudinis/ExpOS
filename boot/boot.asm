@@ -1,4 +1,4 @@
-; HexaOS transitional Multiboot2 boot stub
+; ExpOS transitional Multiboot2 boot stub
 ;
 ; GRUB (Multiboot2) enters here in 32-bit protected mode with paging
 ; disabled. This stub:
@@ -198,3 +198,55 @@ bits 64
 .hang:
         hlt
         jmp .hang
+
+; Native UEFI already runs in long mode. EFI has exited boot services before
+; this entry; switch to an owned stack, GDT and page tables before Rust starts.
+; Arguments use the kernel's SysV ABI, not UEFI's Microsoft x64 ABI.
+global _uefi_start
+_uefi_start:
+        cli
+        cld
+        mov rsp, stack_top
+        xor ebp, ebp
+        lgdt [rel gdt64_desc]
+        push CODE_SEG
+        lea rax, [rel .native_cs]
+        push rax
+        retfq
+.native_cs:
+        mov ax, DATA_SEG
+        mov ds, ax
+        mov es, ax
+        mov ss, ax
+        xor eax, eax
+        mov fs, ax
+        mov gs, ax
+        mov rax, pdpt_table
+        or rax, 3
+        mov [pml4_table], rax
+        mov rax, pd_table
+        or rax, 3
+        mov [pdpt_table], rax
+        mov rax, pd_high_table
+        or rax, 3
+        mov [pdpt_table + 3*8], rax
+        xor ecx, ecx
+.native_map:
+        mov rax, rcx
+        shl rax, 21
+        or rax, 0x83
+        mov [pd_table + rcx*8], rax
+        add eax, 0xC0000000
+        mov [pd_high_table + rcx*8], rax
+        inc ecx
+        cmp ecx, 512
+        jne .native_map
+        mov rax, pml4_table
+        mov cr3, rax
+        call kernel_main
+        cli
+.native_halt:
+        hlt
+        jmp .native_halt
+
+section .note.GNU-stack noalloc noexec nowrite progbits

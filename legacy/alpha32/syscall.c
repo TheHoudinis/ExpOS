@@ -8,7 +8,7 @@
 #include "paging.h"
 #include "intent.h"
 #include "replay.h"
-#include "hexafs.h"
+#include "expfs.h"
 
 extern void print_string(const char *str);
 extern void print_color(const char *str, uint8_t color);
@@ -101,7 +101,7 @@ static int sys_lseek(int fd, int offset, int whence) {
 
 static int sys_sysname(char *buf) {
     if (sys_validate_buf(buf, 64) < 0) return SYS_EINVAL;
-    const char *name = "HexaOS";
+    const char *name = "ExpOS";
     for (int i = 0; name[i] && i < 63; i++) buf[i] = name[i];
     return 0;
 }
@@ -129,12 +129,12 @@ static int sys_munmap(uint32_t addr, uint32_t len) {
 }
 
 static int sys_intent(uint32_t arg1, uint32_t arg2, uint32_t arg3) {
-    hexaos_intent_t *intent = (hexaos_intent_t *)arg1;
+    expos_intent_t *intent = (expos_intent_t *)arg1;
     uint32_t *handle = (uint32_t *)arg2;
     (void)arg3;
     if (!intent || !handle) return SYS_EINVAL;
 
-    if (!hexafs_cap_check(tasks[current_task].pid, CAP_TYPE_INTENT)) {
+    if (!expfs_cap_check(tasks[current_task].pid, CAP_TYPE_INTENT)) {
         if (intent->intent_type != INTENT_CONSUME && tasks[current_task].pid != 0)
             return SYS_EPERM;
     }
@@ -176,7 +176,7 @@ static int sys_event_send(uint32_t target_pid, uint32_t event_type, uint32_t pay
 }
 
 static int sys_event_poll(uint32_t event_type_mask, uint32_t timeout_ticks) {
-    hexaos_event_t ev;
+    expos_event_t ev;
     uint32_t start = system_ticks;
     while (1) {
         int ret = process_event_poll(event_type_mask, &ev);

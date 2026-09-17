@@ -1,6 +1,6 @@
-# HexaOS Go SDK
+# ExpOS Go SDK
 
-`hexaos.dev/sdk/hexa` is the Go-facing contract for HexaOS Go ABI v1. It uses
+`expos.dev/sdk/expos` is the Go-facing contract for ExpOS Go ABI v1. It uses
 FIN caller identity and a Form Handle on every privileged request—there are no
 Unix paths, file descriptors, UIDs, or implicit global authority.
 

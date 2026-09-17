@@ -3,18 +3,18 @@
 #include "process.h"
 #include "pipe.h"
 
-// Hook into hexa.c's form table
+// Hook into expos.c's form table
 extern int form_count;
 extern int find_form(const char *name);
 extern int check_perm(int idx, int want_write);
 extern int form_ensure_cap(int idx, int needed);
 
-// String functions from hexa.c
+// String functions from expos.c
 extern char *strcpy(char *dest, const char *src);
 extern size_t strlen(const char *str);
 
-// hexa.c form table structure (dynamic content)
-struct hexa_form {
+// expos.c form table structure (dynamic content)
+struct expos_form {
   char name[32];
   char *content;
   int size;
@@ -22,7 +22,7 @@ struct hexa_form {
   int owner;
   uint16_t mode;
 };
-extern struct hexa_form form_table[];
+extern struct expos_form form_table[];
 
 // FD table for the whole system
 #define VFS_MAX_FDS 128

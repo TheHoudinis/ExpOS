@@ -387,12 +387,12 @@ pub fn initialize() {
                 device.sectors(),
                 MINIMUM_DISK_SECTORS
             );
-            slog!("HEXA_STATE_VOLATILE reason=disk-too-small\r\n");
+            slog!("EXPOS_STATE_VOLATILE reason=disk-too-small\r\n");
             return;
         }
         Err(error) => {
             println!("[warn] persistent state unavailable: {:?}", error);
-            slog!("HEXA_STATE_VOLATILE error={:?}\r\n", error);
+            slog!("EXPOS_STATE_VOLATILE error={:?}\r\n", error);
             return;
         }
     };
@@ -413,13 +413,13 @@ pub fn initialize() {
             if slot.slot == 0 { "A" } else { "B" }
         );
         slog!(
-            "HEXA_STATE_READY generation={} slot={} loaded=true\r\n",
+            "EXPOS_STATE_READY generation={} slot={} loaded=true\r\n",
             slot.generation,
             if slot.slot == 0 { "A" } else { "B" }
         );
     } else {
         println!("[ok] blank state disk detected; defaults will be journaled");
-        slog!("HEXA_STATE_READY generation=0 slot=none loaded=false\r\n");
+        slog!("EXPOS_STATE_READY generation=0 slot=none loaded=false\r\n");
     }
 }
 
@@ -582,7 +582,7 @@ fn commit_locked(state: &mut RuntimeState, candidate: PersistentData) -> Result<
     state.active_slot = target_slot;
     state.loaded = true;
     slog!(
-        "HEXA_STATE_COMMIT generation={} slot={}\r\n",
+        "EXPOS_STATE_COMMIT generation={} slot={}\r\n",
         generation,
         if target_slot == 0 { "A" } else { "B" }
     );

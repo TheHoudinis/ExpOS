@@ -1,6 +1,6 @@
 #include "types.h"
 #include "boot_policy.h"
-#include "hexafs.h"
+#include "expfs.h"
 #include "log.h"
 
 extern void print_string(const char *str);
@@ -20,12 +20,12 @@ static int g_boot_failed = 0;
 static uint32_t g_failure_count = 0;
 
 static uint32_t snap_block_by_name(const char *name) {
-    return hexafs_snap_find(name);
+    return expfs_snap_find(name);
 }
 
 static void write_failure_log(const char *stage_name, uint32_t tick) {
     (void)tick;
-    if (!hexafs_mounted) return;
+    if (!expfs_mounted) return;
     char buf[64];
     int pos = 0;
     while (stage_name[pos] && pos < 31) { buf[pos] = stage_name[pos]; pos++; }
@@ -85,7 +85,7 @@ int boot_policy_read(void) {
 }
 
 int boot_policy_write(void) {
-    if (!hexafs_mounted) return 0;
+    if (!expfs_mounted) return 0;
     return 1;
 }
 
@@ -125,20 +125,20 @@ int boot_policy_execute(void) {
     }
 
     print_string("[BOOT] Executing boot policy...\n");
-    hexafs_tx_begin();
+    expfs_tx_begin();
 
     for (uint32_t i = 0; i < g_policy.stage_count; i++) {
         if (!boot_policy_run_stage((int)i)) {
             print_color("[BOOT] Stage failed, rolling back...\n", 0x0C);
-            hexafs_tx_abort();
+            expfs_tx_abort();
             log_write(LOG_LEVEL_ERROR, "boot policy stage failed");
             return 0;
         }
     }
 
-    hexafs_current_tx.dirty = 1;
-    hexafs_snap_create("boot_ok");
-    hexafs_tx_commit();
+    expfs_current_tx.dirty = 1;
+    expfs_snap_create("boot_ok");
+    expfs_tx_commit();
 
     print_color("[BOOT] Boot policy completed successfully.\n", 0x0A);
     log_write(LOG_LEVEL_INFO, "boot policy completed");

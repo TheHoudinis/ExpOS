@@ -2,7 +2,7 @@
 #define HEX_BIN_H
 
 #include "types.h"
-#include "hexafs_disk.h"
+#include "expfs_disk.h"
 
 #define HEX_MAGIC 0x48455841
 

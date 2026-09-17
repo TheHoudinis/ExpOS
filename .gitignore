@@ -11,3 +11,7 @@
 *.iso
 *.log
 
+
+__pycache__/
+*.pyc
+*.egg-info/

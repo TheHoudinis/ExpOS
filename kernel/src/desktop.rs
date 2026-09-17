@@ -8,11 +8,11 @@ use crate::{
     },
     network, radio, slog, state,
 };
-use framebuffer::color;
-use hexa_core::{
+use expos_core::{
     Authority, BrowserText, BufferFormat, BufferHandle, CapabilityBroker, DisplayServer, Document,
     Fin, NodeKind, Operations, Rect, SurfaceRole, TextAlign,
 };
+use framebuffer::color;
 
 pub const DISPLAY_FIN: Fin = Fin::from_u128(0x4449_5350_4C41_5900_0000_0000_0000_0001);
 pub const BROWSER_FIN: Fin = Fin::from_u128(0x4252_4F57_5345_5200_0000_0000_0000_0001);
@@ -345,13 +345,13 @@ const fn bypass_software_pacing(responsive: bool, damaged_commit: bool) -> bool 
     responsive && damaged_commit
 }
 
-const HOME: &str = "<style>h1{color:#74bcc7}.card{background:#151c20;border:1px solid #35433f;padding:8px}button{color:#f0f2f0;background:#365c62;padding:6px}</style><title>Home</title><h1>ExpOS Web</h1><p id='status' class='card'>Starting the bounded web engine</p><button id='demo'>Try JavaScript</button><a href='hexa://about'>About</a><a href='hexa://packages'>Packages</a><a href='hexa://system'>System</a><script>document.title='ExpOS Home';document.getElementById('status').textContent='CSS and JavaScript are active';document.getElementById('demo').onclick=function(){document.getElementById('status').textContent='Button handled locally';}</script>";
-const ABOUT: &str = "<title>About</title><h1>Browser</h1><p>A bounded native HTML, CSS, and JavaScript document engine.</p><a href='hexa://home'>Home</a>";
-const BROWSER_PACKAGES: &str = "<title>Packages</title><h1>Packages</h1><li>Core tools</li><li>Display</li><li>Notes</li><li>Games</li><a href='hexa://home'>Home</a>";
-const BROWSER_SYSTEM: &str = "<title>System</title><h1>System</h1><li>480p / 720p / 1080p display</li><li>60 / 75 / 120 / 144 Hz compositor pacing</li><li>Keyboard and mouse</li><li>RTL8139 network</li><a href='hexa://home'>Home</a>";
-const NETWORK_BLOCKED: &str = "<title>Offline</title><h1>Offline</h1><p>The address could not be loaded.</p><a href='hexa://home'>Home</a>";
-const NETWORK_ERROR: &str = "<title>Load failed</title><h1>Could not load page</h1><p>Check the address, connection, and certificate.</p><a href='hexa://home'>Home</a>";
-const SEARCH_ERROR: &str = "<title>Search failed</title><h1>Search query is too long</h1><p>Use a shorter query in the address bar.</p><a href='hexa://home'>Home</a>";
+const HOME: &str = "<style>h1{color:#74bcc7}.card{background:#151c20;border:1px solid #35433f;padding:8px}button{color:#f0f2f0;background:#365c62;padding:6px}</style><title>Home</title><h1>ExpOS Web</h1><p id='status' class='card'>Starting the bounded web engine</p><button id='demo'>Try JavaScript</button><a href='expos://about'>About</a><a href='expos://packages'>Packages</a><a href='expos://system'>System</a><script>document.title='ExpOS Home';document.getElementById('status').textContent='CSS and JavaScript are active';document.getElementById('demo').onclick=function(){document.getElementById('status').textContent='Button handled locally';}</script>";
+const ABOUT: &str = "<title>About</title><h1>Browser</h1><p>A bounded native HTML, CSS, and JavaScript document engine.</p><a href='expos://home'>Home</a>";
+const BROWSER_PACKAGES: &str = "<title>Packages</title><h1>Packages</h1><li>Core tools</li><li>Display</li><li>Notes</li><li>Games</li><a href='expos://home'>Home</a>";
+const BROWSER_SYSTEM: &str = "<title>System</title><h1>System</h1><li>480p / 720p / 1080p display</li><li>60 / 75 / 120 / 144 Hz compositor pacing</li><li>Keyboard and mouse</li><li>RTL8139 network</li><a href='expos://home'>Home</a>";
+const NETWORK_BLOCKED: &str = "<title>Offline</title><h1>Offline</h1><p>The address could not be loaded.</p><a href='expos://home'>Home</a>";
+const NETWORK_ERROR: &str = "<title>Load failed</title><h1>Could not load page</h1><p>Check the address, connection, and certificate.</p><a href='expos://home'>Home</a>";
+const SEARCH_ERROR: &str = "<title>Search failed</title><h1>Search query is too long</h1><p>Use a shorter query in the address bar.</p><a href='expos://home'>Home</a>";
 const SEARCH_PREFIX: &str = "https://duckduckgo.com/html/?q=";
 const MAX_BROWSER_REDIRECTS: usize = 3;
 
@@ -551,7 +551,7 @@ impl SettingsCategory {
             Self::Appearance => "Colors and window style",
             Self::Network => "Connections and network access",
             Self::Bluetooth => "Nearby wireless devices",
-            Self::Display => "HexaDisplay output",
+            Self::Display => "ExpDisplay output",
             Self::Performance => "Rendering cost and responsiveness",
             Self::Input => "Pointer and keyboard",
             Self::Windows => "Placement, decoration, and focus",
@@ -1642,7 +1642,7 @@ impl DesktopState {
             settings_category: SettingsCategory::System,
             settings_row: 0,
             settings_notice: "Changes are saved locally.",
-            document: Document::parse("hexa://home", HOME).expect("built-in home document"),
+            document: Document::parse("expos://home", HOME).expect("built-in home document"),
             browser_line: [0; 512],
             browser_len: 0,
             browser_editing: false,
@@ -1708,7 +1708,7 @@ impl DesktopState {
         let persistent = self.preferences.update_persistent(state::preferences());
         if let Err(error) = state::save_preferences(persistent) {
             self.settings_notice = error.message();
-            slog!("HEXA_SETTING_PERSIST_FAILED error={:?}\r\n", error);
+            slog!("EXPOS_SETTING_PERSIST_FAILED error={:?}\r\n", error);
         }
     }
 
@@ -2013,10 +2013,10 @@ impl DesktopState {
         if was_closed {
             self.set_app_geometry(next, default_rect(next, self.preferences));
             if self.app_ever_opened[next.index()] {
-                slog!("HEXA_APP_REOPENED {}\r\n", next.title());
+                slog!("EXPOS_APP_REOPENED {}\r\n", next.title());
             } else {
                 self.app_ever_opened[next.index()] = true;
-                slog!("HEXA_APP_OPENED {}\r\n", next.title());
+                slog!("EXPOS_APP_OPENED {}\r\n", next.title());
             }
         }
         self.sync_visibility();
@@ -2056,7 +2056,7 @@ impl DesktopState {
         }
         self.app_open[self.active.index()] = false;
         self.app_minimized[self.active.index()] = false;
-        slog!("HEXA_APP_CLOSED {}\r\n", self.active.title());
+        slog!("EXPOS_APP_CLOSED {}\r\n", self.active.title());
         self.fullscreen = false;
         let replacement = AppKind::ALL
             .iter()
@@ -2233,7 +2233,7 @@ impl DesktopState {
         }
         self.sync_visibility();
         self.full_redraw_requested = true;
-        slog!("HEXA_WINDOW_LAYOUT_RESET count={}\r\n", APP_COUNT);
+        slog!("EXPOS_WINDOW_LAYOUT_RESET count={}\r\n", APP_COUNT);
     }
 
     fn set_app_geometry(&mut self, app: AppKind, rect: Rect) {
@@ -2277,7 +2277,7 @@ impl DesktopState {
     fn log_browser_engine(&self) {
         let report = self.document.script_report();
         slog!(
-            "HEXA_BROWSER_ENGINE nodes={} css_rules={} scripts={} executed={} rejected={} handlers={}\r\n",
+            "EXPOS_BROWSER_ENGINE nodes={} css_rules={} scripts={} executed={} rejected={} handlers={}\r\n",
             self.document.len(),
             self.document.style_rule_count(),
             report.scripts_seen,
@@ -2290,35 +2290,35 @@ impl DesktopState {
     fn navigate_address(&mut self, address: &str) {
         let address = address.trim();
         if address.is_empty() {
-            self.navigate("hexa://home", HOME);
+            self.navigate("expos://home", HOME);
             return;
         }
-        if address.eq_ignore_ascii_case("hexa://home") || address == "home" {
-            self.navigate("hexa://home", HOME);
+        if address.eq_ignore_ascii_case("expos://home") || address == "home" {
+            self.navigate("expos://home", HOME);
             return;
         }
-        if address.eq_ignore_ascii_case("hexa://about") || address == "about" {
-            self.navigate("hexa://about", ABOUT);
+        if address.eq_ignore_ascii_case("expos://about") || address == "about" {
+            self.navigate("expos://about", ABOUT);
             return;
         }
-        if address.eq_ignore_ascii_case("hexa://packages") || address == "packages" {
-            self.navigate("hexa://packages", BROWSER_PACKAGES);
+        if address.eq_ignore_ascii_case("expos://packages") || address == "packages" {
+            self.navigate("expos://packages", BROWSER_PACKAGES);
             return;
         }
-        if address.eq_ignore_ascii_case("hexa://system") || address == "system" {
-            self.navigate("hexa://system", BROWSER_SYSTEM);
+        if address.eq_ignore_ascii_case("expos://system") || address == "system" {
+            self.navigate("expos://system", BROWSER_SYSTEM);
             return;
         }
         if !address.starts_with("http://") && !address.starts_with("https://") {
             let query = address.strip_prefix('?').unwrap_or(address).trim();
             let mut url = [0_u8; 512];
             let Some(length) = encode_search_url(query, &mut url) else {
-                self.navigate("hexa://search-error", SEARCH_ERROR);
+                self.navigate("expos://search-error", SEARCH_ERROR);
                 return;
             };
             let url = core::str::from_utf8(&url[..length]).unwrap_or("");
             slog!(
-                "HEXA_BROWSER_SEARCH query_bytes={} url_bytes={} provider=duckduckgo-html\r\n",
+                "EXPOS_BROWSER_SEARCH query_bytes={} url_bytes={} provider=duckduckgo-html\r\n",
                 query.len(),
                 length
             );
@@ -2326,8 +2326,8 @@ impl DesktopState {
             return;
         }
         if !self.network_active() {
-            self.navigate("hexa://offline", NETWORK_BLOCKED);
-            slog!("HEXA_BROWSER_HTTP_ERROR error=CapabilityDenied\r\n");
+            self.navigate("expos://offline", NETWORK_BLOCKED);
+            slog!("EXPOS_BROWSER_HTTP_ERROR error=CapabilityDenied\r\n");
             return;
         }
         let Some(handle_id) = self.browser_network_handle else {
@@ -2335,8 +2335,8 @@ impl DesktopState {
         };
         let mut current = [0_u8; 512];
         let Some(current_len) = copy_browser_url(&mut current, address.as_bytes()) else {
-            self.navigate("hexa://error", NETWORK_ERROR);
-            slog!("HEXA_BROWSER_HTTP_ERROR error=BadUrl\r\n");
+            self.navigate("expos://error", NETWORK_ERROR);
+            slog!("EXPOS_BROWSER_HTTP_ERROR error=BadUrl\r\n");
             return;
         };
         let mut current_len = current_len;
@@ -2352,30 +2352,30 @@ impl DesktopState {
                 Ok(response) => {
                     if is_http_redirect(response.status) {
                         let Some(location) = response.location() else {
-                            self.navigate("hexa://error", NETWORK_ERROR);
-                            slog!("HEXA_BROWSER_HTTP_ERROR error=RedirectWithoutLocation\r\n");
+                            self.navigate("expos://error", NETWORK_ERROR);
+                            slog!("EXPOS_BROWSER_HTTP_ERROR error=RedirectWithoutLocation\r\n");
                             return;
                         };
                         if redirect_count == MAX_BROWSER_REDIRECTS {
-                            self.navigate("hexa://error", NETWORK_ERROR);
-                            slog!("HEXA_BROWSER_HTTP_ERROR error=TooManyRedirects\r\n");
+                            self.navigate("expos://error", NETWORK_ERROR);
+                            slog!("EXPOS_BROWSER_HTTP_ERROR error=TooManyRedirects\r\n");
                             return;
                         }
                         let mut next = [0_u8; 512];
                         let Some(next_len) = resolve_browser_link(current_url, location, &mut next)
                         else {
-                            self.navigate("hexa://error", NETWORK_ERROR);
-                            slog!("HEXA_BROWSER_HTTP_ERROR error=BadRedirect\r\n");
+                            self.navigate("expos://error", NETWORK_ERROR);
+                            slog!("EXPOS_BROWSER_HTTP_ERROR error=BadRedirect\r\n");
                             return;
                         };
                         let next_url = core::str::from_utf8(&next[..next_len]).unwrap_or("");
                         if current_url.starts_with("https://") && next_url.starts_with("http://") {
-                            self.navigate("hexa://error", NETWORK_ERROR);
-                            slog!("HEXA_BROWSER_HTTP_ERROR error=InsecureRedirect\r\n");
+                            self.navigate("expos://error", NETWORK_ERROR);
+                            slog!("EXPOS_BROWSER_HTTP_ERROR error=InsecureRedirect\r\n");
                             return;
                         }
                         slog!(
-                            "HEXA_BROWSER_REDIRECT status={} hop={} target_bytes={}\r\n",
+                            "EXPOS_BROWSER_REDIRECT status={} hop={} target_bytes={}\r\n",
                             response.status,
                             redirect_count + 1,
                             next_len
@@ -2417,10 +2417,10 @@ impl DesktopState {
                         Ok(document) => {
                             self.set_document(document);
                             if search_results != 0 {
-                                slog!("HEXA_SEARCH_RESULTS count={}\r\n", search_results);
+                                slog!("EXPOS_SEARCH_RESULTS count={}\r\n", search_results);
                             }
                             slog!(
-                                "HEXA_BROWSER_HTTP_OK status={} bytes={} peer={}.{}.{}.{}\r\n",
+                                "EXPOS_BROWSER_HTTP_OK status={} bytes={} peer={}.{}.{}.{}\r\n",
                                 response.status,
                                 response.body_len,
                                 response.peer[0],
@@ -2430,14 +2430,14 @@ impl DesktopState {
                             );
                         }
                         Err(error) => {
-                            self.navigate("hexa://error", NETWORK_ERROR);
-                            slog!("HEXA_BROWSER_HTTP_ERROR error={:?}\r\n", error);
+                            self.navigate("expos://error", NETWORK_ERROR);
+                            slog!("EXPOS_BROWSER_HTTP_ERROR error={:?}\r\n", error);
                         }
                     }
                 }
                 Err(error) => {
-                    self.navigate("hexa://error", NETWORK_ERROR);
-                    slog!("HEXA_BROWSER_HTTP_ERROR error={:?}\r\n", error);
+                    self.navigate("expos://error", NETWORK_ERROR);
+                    slog!("EXPOS_BROWSER_HTTP_ERROR error={:?}\r\n", error);
                 }
             }
             return;
@@ -2449,7 +2449,7 @@ impl DesktopState {
         let local_y = y - rect.y;
         if (50..86).contains(&local_y) {
             if (18..58).contains(&local_x) {
-                self.navigate("hexa://home", HOME);
+                self.navigate("expos://home", HOME);
                 self.browser_editing = false;
                 return true;
             }
@@ -2483,7 +2483,7 @@ impl DesktopState {
         if scripted && self.document.dispatch_click_at_node(index) {
             let report = self.document.script_report();
             slog!(
-                "HEXA_BROWSER_EVENT type=click node={} executed={}\r\n",
+                "EXPOS_BROWSER_EVENT type=click node={} executed={}\r\n",
                 index,
                 report.statements_executed
             );
@@ -2495,8 +2495,8 @@ impl DesktopState {
             let Some(length) =
                 resolve_browser_link(self.document.url(), target.as_str(), &mut address)
             else {
-                self.navigate("hexa://error", NETWORK_ERROR);
-                slog!("HEXA_BROWSER_HTTP_ERROR error=BadUrl\r\n");
+                self.navigate("expos://error", NETWORK_ERROR);
+                slog!("EXPOS_BROWSER_HTTP_ERROR error=BadUrl\r\n");
                 return true;
             };
             let address = core::str::from_utf8(&address[..length]).unwrap_or("");
@@ -2593,7 +2593,7 @@ impl DesktopState {
     fn change_network_policy(&mut self) {
         let Some(handle_id) = self.settings_radio_handle else {
             self.settings_notice = "Read-only: DIESE did not grant Configure access.";
-            slog!("HEXA_SETTING_DENIED key=network error=CapabilityDenied\r\n");
+            slog!("EXPOS_SETTING_DENIED key=network error=CapabilityDenied\r\n");
             return;
         };
         let enabled = !radio::snapshot().network_enabled;
@@ -2606,13 +2606,13 @@ impl DesktopState {
                     "Network packet access is disabled."
                 };
                 slog!(
-                    "HEXA_SETTING_CHANGED key=network value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=network value={}\r\n",
                     if enabled { "on" } else { "off" }
                 );
             }
             Err(error) => {
                 self.settings_notice = error.message();
-                slog!("HEXA_SETTING_DENIED key=network error={:?}\r\n", error);
+                slog!("EXPOS_SETTING_DENIED key=network error={:?}\r\n", error);
             }
         }
     }
@@ -2620,7 +2620,7 @@ impl DesktopState {
     fn change_radio_policy(&mut self, kind: radio::RadioKind) {
         let Some(handle_id) = self.settings_radio_handle else {
             self.settings_notice = "Read-only: DIESE did not grant Configure access.";
-            slog!("HEXA_SETTING_DENIED key=radio error=CapabilityDenied\r\n");
+            slog!("EXPOS_SETTING_DENIED key=radio error=CapabilityDenied\r\n");
             return;
         };
         let snapshot = radio::snapshot();
@@ -2643,14 +2643,14 @@ impl DesktopState {
                     "Radio power is disabled."
                 };
                 slog!(
-                    "HEXA_SETTING_CHANGED key={} value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key={} value={}\r\n",
                     key,
                     if enabled { "on" } else { "off" }
                 );
             }
             Err(error) => {
                 self.settings_notice = error.message();
-                slog!("HEXA_SETTING_DENIED key={} error={:?}\r\n", key, error);
+                slog!("EXPOS_SETTING_DENIED key={} error={:?}\r\n", key, error);
             }
         }
     }
@@ -2664,7 +2664,7 @@ impl DesktopState {
                 self.sync_desktop_geometry();
                 self.reconstrain_windows();
                 slog!(
-                    "HEXA_SETTING_CHANGED key=taskbar value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=taskbar value={}\r\n",
                     if visible { "on" } else { "off" }
                 );
                 self.settings_notice = "Taskbar visibility updated.";
@@ -2673,7 +2673,7 @@ impl DesktopState {
                 self.full_redraw_requested = true;
                 self.preferences.status_visible = !self.preferences.status_visible;
                 slog!(
-                    "HEXA_SETTING_CHANGED key=status-indicator value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=status-indicator value={}\r\n",
                     if self.preferences.status_visible {
                         "on"
                     } else {
@@ -2686,7 +2686,7 @@ impl DesktopState {
                 self.full_redraw_requested = true;
                 self.preferences.theme = self.preferences.theme.shifted(direction);
                 slog!(
-                    "HEXA_SETTING_CHANGED key=theme value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=theme value={}\r\n",
                     self.preferences.theme.label()
                 );
                 self.settings_notice = "Desktop theme updated.";
@@ -2695,7 +2695,7 @@ impl DesktopState {
                 self.full_redraw_requested = true;
                 self.preferences.wallpaper = self.preferences.wallpaper.shifted(direction);
                 slog!(
-                    "HEXA_SETTING_CHANGED key=wallpaper value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=wallpaper value={}\r\n",
                     self.preferences.wallpaper.label()
                 );
                 self.settings_notice = "Wallpaper updated.";
@@ -2706,7 +2706,7 @@ impl DesktopState {
                 self.cursor
                     .set_style(self.preferences.cursor, self.preferences.accent.color());
                 slog!(
-                    "HEXA_SETTING_CHANGED key=accent value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=accent value={}\r\n",
                     self.preferences.accent.label()
                 );
                 self.settings_notice = "Accent color updated.";
@@ -2715,7 +2715,7 @@ impl DesktopState {
                 self.full_redraw_requested = true;
                 self.preferences.backdrop = self.preferences.backdrop.shifted(direction);
                 slog!(
-                    "HEXA_SETTING_CHANGED key=background-tone value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=background-tone value={}\r\n",
                     self.preferences.backdrop.label()
                 );
                 self.settings_notice = "Wallpaper tone updated.";
@@ -2724,7 +2724,7 @@ impl DesktopState {
                 self.full_redraw_requested = true;
                 self.preferences.pure_black_apps = !self.preferences.pure_black_apps;
                 slog!(
-                    "HEXA_SETTING_CHANGED key=pure-black-apps value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=pure-black-apps value={}\r\n",
                     if self.preferences.pure_black_apps {
                         "on"
                     } else {
@@ -2737,7 +2737,7 @@ impl DesktopState {
                 self.full_redraw_requested = true;
                 self.preferences.rounded_controls = !self.preferences.rounded_controls;
                 slog!(
-                    "HEXA_SETTING_CHANGED key=rounded-controls value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=rounded-controls value={}\r\n",
                     if self.preferences.rounded_controls {
                         "on"
                     } else {
@@ -2760,7 +2760,7 @@ impl DesktopState {
                     self.preferences.font_weight,
                 ));
                 slog!(
-                    "HEXA_SETTING_CHANGED key=font-face value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=font-face value={}\r\n",
                     state::FONT_FACE_NAMES[id as usize]
                 );
                 self.settings_notice = "Interface font face updated.";
@@ -2779,7 +2779,7 @@ impl DesktopState {
                     self.preferences.font_weight,
                 ));
                 slog!(
-                    "HEXA_SETTING_CHANGED key=font-weight value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=font-weight value={}\r\n",
                     state::FONT_WEIGHT_NAMES[id as usize]
                 );
                 self.settings_notice = "Interface font weight updated.";
@@ -2800,7 +2800,7 @@ impl DesktopState {
                 let selected = shift_display_mode(framebuffer::requested_mode(), direction);
                 let _ = framebuffer::request_mode(selected);
                 slog!(
-                    "HEXA_SETTING_CHANGED key=resolution value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=resolution value={}\r\n",
                     selected.label()
                 );
                 self.settings_notice = "Resolution applies when the desktop is reopened.";
@@ -2810,7 +2810,7 @@ impl DesktopState {
                     shift_refresh_rate(self.preferences.refresh_rate, direction);
                 self.reconfigure_presentation();
                 slog!(
-                    "HEXA_SETTING_CHANGED key=refresh-rate value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=refresh-rate value={}\r\n",
                     refresh_rate_label(self.preferences.refresh_rate)
                 );
                 self.settings_notice = "Compositor presentation rate updated.";
@@ -2819,7 +2819,7 @@ impl DesktopState {
                 self.preferences.vsync = !self.preferences.vsync;
                 self.reconfigure_presentation();
                 slog!(
-                    "HEXA_SETTING_CHANGED key=vsync value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=vsync value={}\r\n",
                     if self.preferences.vsync { "on" } else { "off" }
                 );
                 self.settings_notice = "Page-flip synchronization updated.";
@@ -2831,7 +2831,7 @@ impl DesktopState {
                     self.preferences.window_border_width = 1;
                 }
                 slog!(
-                    "HEXA_SETTING_CHANGED key=window-borders value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=window-borders value={}\r\n",
                     if self.preferences.window_borders {
                         "on"
                     } else {
@@ -2844,7 +2844,7 @@ impl DesktopState {
                 self.full_redraw_requested = true;
                 self.preferences.high_contrast = !self.preferences.high_contrast;
                 slog!(
-                    "HEXA_SETTING_CHANGED key=high-contrast value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=high-contrast value={}\r\n",
                     if self.preferences.high_contrast {
                         "on"
                     } else {
@@ -2857,7 +2857,7 @@ impl DesktopState {
                 self.full_redraw_requested = true;
                 self.preferences.window_shadows = !self.preferences.window_shadows;
                 slog!(
-                    "HEXA_SETTING_CHANGED key=window-shadows value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=window-shadows value={}\r\n",
                     if self.preferences.window_shadows {
                         "on"
                     } else {
@@ -2870,7 +2870,7 @@ impl DesktopState {
                 self.full_redraw_requested = true;
                 self.preferences.wallpaper_effects = !self.preferences.wallpaper_effects;
                 slog!(
-                    "HEXA_SETTING_CHANGED key=wallpaper-effects value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=wallpaper-effects value={}\r\n",
                     if self.preferences.wallpaper_effects {
                         "on"
                     } else {
@@ -2884,7 +2884,7 @@ impl DesktopState {
                     !self.preferences.responsive_presentation;
                 self.frame_pacer.reset_phase(crate::hardware::timestamp());
                 slog!(
-                    "HEXA_SETTING_CHANGED key=presentation-policy value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=presentation-policy value={}\r\n",
                     self.preferences.presentation_policy_label()
                 );
                 self.settings_notice = if self.preferences.responsive_presentation {
@@ -2906,7 +2906,7 @@ impl DesktopState {
                     }
                 };
                 slog!(
-                    "HEXA_SETTING_CHANGED key=pointer-speed value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=pointer-speed value={}\r\n",
                     self.preferences.pointer_speed_label()
                 );
                 self.settings_notice = "Pointer speed updated.";
@@ -2916,7 +2916,7 @@ impl DesktopState {
                 self.cursor
                     .set_style(self.preferences.cursor, self.preferences.accent.color());
                 slog!(
-                    "HEXA_SETTING_CHANGED key=cursor-theme value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=cursor-theme value={}\r\n",
                     self.preferences.cursor.label()
                 );
                 self.settings_notice = "Cursor theme updated.";
@@ -2926,7 +2926,7 @@ impl DesktopState {
                 self.cursor.set_shadow(self.preferences.cursor_shadow);
                 self.full_redraw_requested = true;
                 slog!(
-                    "HEXA_SETTING_CHANGED key=cursor-shadow value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=cursor-shadow value={}\r\n",
                     if self.preferences.cursor_shadow {
                         "on"
                     } else {
@@ -2943,7 +2943,7 @@ impl DesktopState {
                 );
                 self.full_redraw_requested = true;
                 slog!(
-                    "HEXA_SETTING_CHANGED key=window-radius value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=window-radius value={}\r\n",
                     CORNER_RADIUS_LABELS[self.preferences.window_corner_radius as usize]
                 );
                 self.settings_notice = "Window corner geometry updated.";
@@ -2957,7 +2957,7 @@ impl DesktopState {
                 self.preferences.window_borders = self.preferences.window_border_width != 0;
                 self.full_redraw_requested = true;
                 slog!(
-                    "HEXA_SETTING_CHANGED key=window-border-width value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=window-border-width value={}\r\n",
                     BORDER_WIDTH_LABELS[self.preferences.window_border_width as usize]
                 );
                 self.settings_notice = "Window border width updated.";
@@ -2971,7 +2971,7 @@ impl DesktopState {
                 self.reconstrain_windows();
                 self.full_redraw_requested = true;
                 slog!(
-                    "HEXA_SETTING_CHANGED key=titlebar-size value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=titlebar-size value={}\r\n",
                     TITLEBAR_LABELS[self.preferences.titlebar_density as usize]
                 );
                 self.settings_notice = "Titlebar density updated.";
@@ -2984,7 +2984,7 @@ impl DesktopState {
                 );
                 self.full_redraw_requested = true;
                 slog!(
-                    "HEXA_SETTING_CHANGED key=window-opacity value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=window-opacity value={}\r\n",
                     WINDOW_OPACITY_LABELS[self.preferences.window_opacity as usize]
                 );
                 self.settings_notice = "Window translucency updated.";
@@ -2998,7 +2998,7 @@ impl DesktopState {
                 self.reconstrain_windows();
                 self.full_redraw_requested = true;
                 slog!(
-                    "HEXA_SETTING_CHANGED key=offscreen-allowance value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=offscreen-allowance value={}\r\n",
                     OFFSCREEN_LABELS[self.preferences.window_offscreen_allowance as usize]
                 );
                 self.settings_notice = "Window edge travel updated.";
@@ -3006,7 +3006,7 @@ impl DesktopState {
             (SettingsCategory::Windows, 5) => {
                 self.preferences.window_snap = !self.preferences.window_snap;
                 slog!(
-                    "HEXA_SETTING_CHANGED key=window-snap value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=window-snap value={}\r\n",
                     if self.preferences.window_snap {
                         "on"
                     } else {
@@ -3022,7 +3022,7 @@ impl DesktopState {
                     direction,
                 );
                 slog!(
-                    "HEXA_SETTING_CHANGED key=snap-distance value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=snap-distance value={}\r\n",
                     SNAP_DISTANCE_LABELS[self.preferences.window_snap_distance as usize]
                 );
                 self.settings_notice = "Window snap distance updated.";
@@ -3034,7 +3034,7 @@ impl DesktopState {
                     direction,
                 );
                 slog!(
-                    "HEXA_SETTING_CHANGED key=focus-policy value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=focus-policy value={}\r\n",
                     self.preferences.focus_policy_label()
                 );
                 self.settings_notice = "Window focus policy updated.";
@@ -3045,7 +3045,7 @@ impl DesktopState {
                 self.sync_desktop_geometry();
                 self.reconstrain_windows();
                 slog!(
-                    "HEXA_SETTING_CHANGED key=taskbar-placement value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=taskbar-placement value={}\r\n",
                     self.preferences.taskbar_placement.label()
                 );
                 self.settings_notice = "Taskbar edge updated.";
@@ -3059,7 +3059,7 @@ impl DesktopState {
                 self.sync_desktop_geometry();
                 self.reconstrain_windows();
                 slog!(
-                    "HEXA_SETTING_CHANGED key=taskbar-size value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=taskbar-size value={}\r\n",
                     TASKBAR_SIZE_LABELS[self.preferences.taskbar_size as usize]
                 );
                 self.settings_notice = "Taskbar size updated.";
@@ -3069,7 +3069,7 @@ impl DesktopState {
                     self.preferences.taskbar_alignment.shifted(direction);
                 self.full_redraw_requested = true;
                 slog!(
-                    "HEXA_SETTING_CHANGED key=taskbar-alignment value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=taskbar-alignment value={}\r\n",
                     self.preferences.taskbar_alignment.label()
                 );
                 self.settings_notice = "Running-app alignment updated.";
@@ -3079,7 +3079,7 @@ impl DesktopState {
                 self.sync_desktop_geometry();
                 self.reconstrain_windows();
                 slog!(
-                    "HEXA_SETTING_CHANGED key=taskbar-autohide value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=taskbar-autohide value={}\r\n",
                     if self.preferences.taskbar_autohide {
                         "on"
                     } else {
@@ -3092,7 +3092,7 @@ impl DesktopState {
                 self.preferences.taskbar_translucent = !self.preferences.taskbar_translucent;
                 self.full_redraw_requested = true;
                 slog!(
-                    "HEXA_SETTING_CHANGED key=taskbar-translucent value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=taskbar-translucent value={}\r\n",
                     if self.preferences.taskbar_translucent {
                         "on"
                     } else {
@@ -3105,7 +3105,7 @@ impl DesktopState {
                 self.preferences.taskbar_labels = !self.preferences.taskbar_labels;
                 self.full_redraw_requested = true;
                 slog!(
-                    "HEXA_SETTING_CHANGED key=taskbar-labels value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=taskbar-labels value={}\r\n",
                     if self.preferences.taskbar_labels {
                         "on"
                     } else {
@@ -3118,7 +3118,7 @@ impl DesktopState {
                 self.preferences.clock_seconds = !self.preferences.clock_seconds;
                 self.full_redraw_requested = true;
                 slog!(
-                    "HEXA_SETTING_CHANGED key=clock-seconds value={}\r\n",
+                    "EXPOS_SETTING_CHANGED key=clock-seconds value={}\r\n",
                     if self.preferences.clock_seconds {
                         "on"
                     } else {
@@ -3131,8 +3131,8 @@ impl DesktopState {
                 self.browser_line.fill(0);
                 self.browser_len = 0;
                 self.browser_editing = false;
-                self.navigate("hexa://home", HOME);
-                slog!("HEXA_SETTING_CHANGED key=browser-data value=cleared\r\n");
+                self.navigate("expos://home", HOME);
+                slog!("EXPOS_SETTING_CHANGED key=browser-data value=cleared\r\n");
                 self.settings_notice = "Browser session data cleared.";
             }
             _ => {}
@@ -3477,7 +3477,7 @@ impl DesktopState {
     fn execute_terminal_command(&mut self, command: &[u8]) {
         let (name, arguments) = split_command(command);
         if let Ok(name) = core::str::from_utf8(name) {
-            slog!("HEXA_TERMINAL_COMMAND name={}\r\n", name);
+            slog!("EXPOS_TERMINAL_COMMAND name={}\r\n", name);
         }
         if name.is_empty() || name.eq_ignore_ascii_case(b"help") {
             self.terminal_print_help();
@@ -3505,7 +3505,7 @@ impl DesktopState {
             let authority = self.session.authority_name();
             self.terminal_push_parts(&["user=", user, " authority=", authority]);
         } else if name.eq_ignore_ascii_case(b"uname") {
-            self.terminal_push("ExpOS hexa-kernel x86_64");
+            self.terminal_push("ExpOS expos-kernel x86_64");
         } else if name.eq_ignore_ascii_case(b"uptime") {
             self.terminal_push_number("monotonic ticks: ", crate::hardware::timestamp(), "");
         } else if name.eq_ignore_ascii_case(b"neofetch") || name.eq_ignore_ascii_case(b"sysinfo") {
@@ -3680,8 +3680,8 @@ fn run_session(
 ) {
     let mouse_ready = input.enable_mouse();
     if !framebuffer::enter() {
-        crate::println!("HexaDisplay unavailable: no Bochs/QEMU VBE framebuffer.");
-        slog!("HEXA_DISPLAY_UNAVAILABLE\r\n");
+        crate::println!("ExpDisplay unavailable: no Bochs/QEMU VBE framebuffer.");
+        slog!("EXPOS_DISPLAY_UNAVAILABLE\r\n");
         return;
     }
 
@@ -3693,26 +3693,26 @@ fn run_session(
         .reset_phase(crate::hardware::timestamp());
     render(&mut desktop);
     if desktop.should_exit {
-        slog!("HEXA_DISPLAY_SESSION_ABORTED reason=scanout-not-visible\r\n");
+        slog!("EXPOS_DISPLAY_SESSION_ABORTED reason=scanout-not-visible\r\n");
         framebuffer::exit();
         crate::clear_console();
-        crate::println!("HexaDisplay could not confirm scanout; command environment restored.");
+        crate::println!("ExpDisplay could not confirm scanout; command environment restored.");
         return;
     }
-    slog!("HEXA_DISPLAY_READY surfaces=11 commit=11\r\n");
+    slog!("EXPOS_DISPLAY_READY surfaces=11 commit=11\r\n");
     if start_app.is_none() {
-        slog!("HEXA_DESKTOP_EMPTY open_apps=0 pinned_apps=0\r\n");
+        slog!("EXPOS_DESKTOP_EMPTY open_apps=0 pinned_apps=0\r\n");
     }
-    slog!("HEXA_MOUSE_READY enabled={}\r\n", mouse_ready);
+    slog!("EXPOS_MOUSE_READY enabled={}\r\n", mouse_ready);
     slog!(
-        "HEXA_DESKTOP_PREFS theme={} wallpaper={} cursor={} accent={}\r\n",
+        "EXPOS_DESKTOP_PREFS theme={} wallpaper={} cursor={} accent={}\r\n",
         desktop.preferences.theme.label(),
         desktop.preferences.wallpaper.label(),
         desktop.preferences.cursor.label(),
         desktop.preferences.accent.label()
     );
     slog!(
-        "HEXA_CUSTOMIZATION font={} weight={} radius={} border={} titlebar={} opacity={} offscreen={} snap={} focus={} taskbar={} size={} align={} autohide={} translucent={} labels={} seconds={}\r\n",
+        "EXPOS_CUSTOMIZATION font={} weight={} radius={} border={} titlebar={} opacity={} offscreen={} snap={} focus={} taskbar={} size={} align={} autohide={} translucent={} labels={} seconds={}\r\n",
         state::FONT_FACE_NAMES[desktop.preferences.font_face.persisted() as usize],
         state::FONT_WEIGHT_NAMES[desktop.preferences.font_weight.persisted() as usize],
         CORNER_RADIUS_LABELS[desktop.preferences.window_corner_radius as usize],
@@ -3732,7 +3732,7 @@ fn run_session(
     );
     let clock = crate::hardware::clock_info();
     slog!(
-        "HEXA_PRESENTATION_READY rate={} vsync={} pageflip={} clock_hz={} source={}\r\n",
+        "EXPOS_PRESENTATION_READY rate={} vsync={} pageflip={} clock_hz={} source={}\r\n",
         refresh_rate_label(desktop.preferences.refresh_rate),
         desktop.preferences.vsync,
         framebuffer::presentation_stats().page_flip_available,
@@ -3740,7 +3740,7 @@ fn run_session(
         clock.source.label()
     );
     slog!(
-        "HEXA_RENDER_POLICY mode={} damage=true shadows={} wallpaper_effects={}\r\n",
+        "EXPOS_RENDER_POLICY mode={} damage=true shadows={} wallpaper_effects={}\r\n",
         desktop.preferences.presentation_policy_label(),
         desktop.preferences.window_shadows,
         desktop.preferences.wallpaper_effects
@@ -3906,11 +3906,11 @@ fn run_session(
                             desktop.browser_len = 0;
                             desktop.browser_editing = true;
                         }
-                        b'h' => desktop.navigate("hexa://home", HOME),
-                        b'1' | b'a' => desktop.navigate("hexa://about", ABOUT),
-                        b'2' => desktop.navigate("hexa://packages", BROWSER_PACKAGES),
-                        b'3' => desktop.navigate("hexa://system", BROWSER_SYSTEM),
-                        b'n' => desktop.navigate("hexa://blocked", NETWORK_BLOCKED),
+                        b'h' => desktop.navigate("expos://home", HOME),
+                        b'1' | b'a' => desktop.navigate("expos://about", ABOUT),
+                        b'2' => desktop.navigate("expos://packages", BROWSER_PACKAGES),
+                        b'3' => desktop.navigate("expos://system", BROWSER_SYSTEM),
+                        b'n' => desktop.navigate("expos://blocked", NETWORK_BLOCKED),
                         _ => {}
                     }
                 }
@@ -3922,7 +3922,7 @@ fn run_session(
     let pacing = desktop.frame_pacer.stats();
     let presentation = framebuffer::presentation_stats();
     slog!(
-        "HEXA_PRESENTATION_STATS frames={} missed={} idle={} vblank_timeouts={} responsive_commits={}\r\n",
+        "EXPOS_PRESENTATION_STATS frames={} missed={} idle={} vblank_timeouts={} responsive_commits={}\r\n",
         presentation.frames,
         pacing.missed_frames,
         pacing.idle_frames,
@@ -3930,7 +3930,7 @@ fn run_session(
         desktop.responsive_commits
     );
     slog!(
-        "HEXA_RENDER_STATS full={} damaged={} callbacks={} surface_frames={} pointer_merged={} submitted_regions={} copied_regions={} copied_pixels={} collapses={} deferred={}\r\n",
+        "EXPOS_RENDER_STATS full={} damaged={} callbacks={} surface_frames={} pointer_merged={} submitted_regions={} copied_regions={} copied_pixels={} collapses={} deferred={}\r\n",
         desktop.full_frame_commits,
         desktop.damaged_frame_commits,
         desktop.frame_callbacks,
@@ -3944,8 +3944,8 @@ fn run_session(
     );
     framebuffer::exit();
     crate::clear_console();
-    crate::println!("HexaDisplay session closed; command environment restored.");
-    slog!("HEXA_DISPLAY_CLOSED\r\n");
+    crate::println!("ExpDisplay session closed; command environment restored.");
+    slog!("EXPOS_DISPLAY_CLOSED\r\n");
 }
 
 fn app_shortcut(key: u8) -> Option<AppKind> {
@@ -4249,7 +4249,7 @@ fn complete_visible_frame(desktop: &mut DesktopState, visible: bool) {
     } else {
         desktop.deferred_presents = desktop.deferred_presents.saturating_add(1);
         desktop.should_exit = true;
-        slog!("HEXA_FRAME_DEFERRED reason=scanout-not-visible\r\n");
+        slog!("EXPOS_FRAME_DEFERRED reason=scanout-not-visible\r\n");
     }
 }
 
@@ -4271,7 +4271,7 @@ fn pace_frame(desktop: &mut DesktopState, damaged_commit: bool) {
             FrameDecision::PresentNow { missed_frames, .. } => {
                 let severe_miss = desktop.preferences.refresh_rate.hz() as u64 / 2;
                 if missed_frames >= severe_miss {
-                    slog!("HEXA_FRAME_MISSED count={}\r\n", missed_frames);
+                    slog!("EXPOS_FRAME_MISSED count={}\r\n", missed_frames);
                 }
                 break;
             }
@@ -4565,7 +4565,7 @@ struct BrowserLayout {
     next_y: i32,
 }
 
-fn browser_layout(rect: Rect, styled: hexa_core::StyledNode<'_>, content_y: i32) -> BrowserLayout {
+fn browser_layout(rect: Rect, styled: expos_core::StyledNode<'_>, content_y: i32) -> BrowserLayout {
     let style = styled.style;
     let margin_left = style.margin.left as i32;
     let margin_right = style.margin.right as i32;
@@ -4649,7 +4649,7 @@ fn browser_wrapped_height(value: &str, width: i32, scale: i32) -> i32 {
     lines * line_height
 }
 
-const fn browser_color(value: hexa_core::CssColor) -> u32 {
+const fn browser_color(value: expos_core::CssColor) -> u32 {
     ((value.red as u32) << 16) | ((value.green as u32) << 8) | value.blue as u32
 }
 
@@ -4932,10 +4932,10 @@ fn draw_forms(rect: Rect) {
     let rows = [
         ("ROOT", "DIMENSION", "ACTIVE", color::GREEN),
         ("AYO", "PACKAGE", "BOUND", color::CYAN),
-        ("HEXADISPLAY", "SERVICE", "ACTIVE", color::GREEN),
+        ("EXPOSDISPLAY", "SERVICE", "ACTIVE", color::GREEN),
         ("BROWSER", "INTERFACE", "FOCUSED", color::PURPLE),
         ("GO ABI V1", "INTERFACE", "READY", color::CYAN),
-        ("HEXAFS", "STORAGE", "JOURNALED", color::GREEN),
+        ("EXPFS", "STORAGE", "JOURNALED", color::GREEN),
     ];
     for (index, (name, kind, status, status_color)) in rows.iter().enumerate() {
         let row_y = y + 96 + index as i32 * 43;
@@ -5416,7 +5416,7 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 content_width,
                 3,
                 "Active output",
-                "Double-buffered XRGB8888 HexaDisplay composition",
+                "Double-buffered XRGB8888 ExpDisplay composition",
                 framebuffer::current_mode().label(),
                 SettingControl::Status {
                     ready: framebuffer::presentation_stats().page_flip_available,
@@ -5834,7 +5834,7 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 1,
                 "Display server",
                 "Form-owned surfaces and explicit input routing",
-                "HexaDisplay",
+                "ExpDisplay",
                 SettingControl::Plain,
             );
             settings_row(
@@ -6393,7 +6393,7 @@ fn resolve_browser_link(base: &str, target: &str, output: &mut [u8]) -> Option<u
     }
     if target.starts_with("http://")
         || target.starts_with("https://")
-        || target.starts_with("hexa://")
+        || target.starts_with("expos://")
     {
         return copy_browser_url(output, target.as_bytes());
     }

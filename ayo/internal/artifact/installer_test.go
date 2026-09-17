@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"hexaos.dev/ayo/internal/model"
+	"expos.dev/ayo/internal/model"
 )
 
 func TestHTTPSVerifiedInstallOwnershipAndUninstall(t *testing.T) {

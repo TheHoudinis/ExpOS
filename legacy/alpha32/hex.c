@@ -1,7 +1,7 @@
 #include "types.h"
 #include "hex.h"
 #include "elf.h"
-#include "hexafs.h"
+#include "expfs.h"
 #include "process.h"
 #include "log.h"
 
@@ -17,7 +17,7 @@ extern int find_form(const char *name);
 extern void *kmalloc(size_t size);
 extern void kfree(void *ptr);
 
-struct hexa_formentry {
+struct expos_formentry {
     char name[32];
     char *content;
     int size;
@@ -25,7 +25,7 @@ struct hexa_formentry {
     int owner;
     uint16_t mode;
 };
-extern struct hexa_formentry form_table[];
+extern struct expos_formentry form_table[];
 extern int form_count;
 
 int hex_validate(hex_header_t *hdr) {
@@ -46,7 +46,7 @@ int hex_load(hex_header_t *hdr, uint32_t *entry, uint32_t *heap_start) {
 
     for (uint32_t i = 0; i < hdr->cap_count && i < 16; i++) {
         uint32_t needed_cap = hdr->caps[i];
-        if (!hexafs_cap_check(caller_pid, needed_cap)) {
+        if (!expfs_cap_check(caller_pid, needed_cap)) {
             log_write(LOG_LEVEL_WARN, "hex: missing capability for binary");
             print_color("[HEX] Missing cap 0x", 0x0C);
             char buf[16];

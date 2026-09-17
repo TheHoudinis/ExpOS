@@ -8,7 +8,7 @@ use crate::{
     session::Session,
     slog, vga,
 };
-use hexa_core::{
+use expos_core::{
     Authority, BootReport, CapabilityBroker, Dimension, Fin, Form, FormHandle, FormKind, Lifecycle,
     NetworkPolicy, Operations, PimpScope, PimpSpec, PimpValue, Relationship, RelationshipGraph,
     RelationshipKind, SpecKey, Text, GO_ABI_VERSION,
@@ -31,7 +31,7 @@ pub fn run(report: BootReport, mut input: Input, session: Session) -> ! {
 
     println!();
     println!("ExpOS shell. Type 'help'.");
-    slog!("HEXA_SHELL_READY\r\n");
+    slog!("EXPOS_SHELL_READY\r\n");
     prompt(shell.session);
 
     loop {
@@ -117,7 +117,7 @@ impl Shell {
         forms[1] = Some(Form::new(AYO_FIN, "Ayo", FormKind::Package));
         forms[2] = Some(Form::new(
             crate::desktop::DISPLAY_FIN,
-            "HexaDisplay",
+            "ExpDisplay",
             FormKind::Service,
         ));
         forms[3] = Some(Form::new(
@@ -236,7 +236,7 @@ impl Shell {
         content[1].length = ayo_description.len() as u16;
         seed_content(
             &mut content[2],
-            b"HexaDisplay v1: owned surfaces, attach, damage, atomic commit, focus, z-order, hit testing, XRGB8888",
+            b"ExpDisplay v1: owned surfaces, attach, damage, atomic commit, focus, z-order, hit testing, XRGB8888",
         );
         seed_content(
             &mut content[3],
@@ -250,6 +250,10 @@ impl Shell {
             &mut content[5],
             b"Network Driver Form: RTL8139, Ethernet, ARP, IPv4, ICMP, UDP, DNS, TCP, HTTP and verified TLS 1.3 HTTPS",
         );
+        let mut kernel_controls = KernelControls::new();
+        kernel_controls
+            .resize_form_content(0, content.iter().map(|entry| entry.length as usize).sum())
+            .expect("built-in Form content fits its budget");
         Self {
             report,
             session,
@@ -267,7 +271,7 @@ impl Shell {
             next_dimension_fin: 2,
             journal_sequence: report.journal_sequence,
             network_policy: NetworkPolicy::Restricted,
-            kernel_controls: KernelControls::new(),
+            kernel_controls,
         }
     }
 
@@ -289,8 +293,23 @@ impl Shell {
                 command,
                 self.session.authority_name()
             );
-            slog!("HEXA_COMMAND_DENIED {}\r\n", command);
+            slog!("EXPOS_COMMAND_DENIED {}\r\n", command);
             return;
+        }
+        if crate::boot::single_user() && unavailable_in_single_user(command) {
+            println!("Single-user maintenance mode: {} is unavailable. Restart in multi-user mode to use it.", command);
+            slog!("EXPOS_SINGLE_USER_DENIED {}\r\n", command);
+            return;
+        }
+        if is_form_mutation(command) {
+            if !self.kernel_control_allowed(is_operator_command(command), "mutate Forms") {
+                return;
+            }
+            if let Err(error) = self.kernel_controls.charge_form_operation() {
+                println!("Form operation denied: {}.", error.message());
+                slog!("EXPOS_FORM_BUDGET_DENIED command={}\r\n", command);
+                return;
+            }
         }
         let recognized = match command {
             "help" => {
@@ -396,6 +415,47 @@ impl Shell {
                 );
                 true
             }
+            "bootmode" => {
+                println!(
+                    "Boot mode: {}",
+                    if crate::boot::single_user() {
+                        "single-user (Operator maintenance; network and desktop disabled)"
+                    } else {
+                        "multi-user (normal account and service policy)"
+                    }
+                );
+                true
+            }
+            "python" | "python3" => {
+                if args.is_empty() {
+                    println!("ExpPython (MicroPython 1.26): python <code> or python -f <Form>");
+                    println!(
+                        "256 KiB heap; 100000 execution steps; 16 KiB output; fresh VM per run."
+                    );
+                } else if self.kernel_control_allowed(false, "run Python") {
+                    if let Some(identity) = args.strip_prefix("-f ") {
+                        if let Some(index) = self.find_form_index(identity.trim()) {
+                            if self.forms[index]
+                                .is_some_and(|form| form.lifecycle == Lifecycle::Active)
+                            {
+                                if let Ok(source) = core::str::from_utf8(
+                                    &self.content[index].bytes
+                                        [..self.content[index].length as usize],
+                                ) {
+                                    crate::python::execute(source);
+                                }
+                            } else {
+                                println!("ExpPython: Form is not active.");
+                            }
+                        } else {
+                            println!("ExpPython: unknown Form.");
+                        }
+                    } else {
+                        crate::python::execute(args);
+                    }
+                }
+                true
+            }
             "sysctl" => {
                 self.sysctl(args);
                 true
@@ -431,7 +491,7 @@ impl Shell {
             "dmesg" | "bootlog" => {
                 println!("[ok] x86_64 long mode, VGA, COM1");
                 println!("[ok] Root Form + Stable Dimension");
-                println!("[ok] PIMP/DIESE + Handle #1 + HexaFS journal #1");
+                println!("[ok] PIMP/DIESE + Handle #1 + ExpFS journal #1");
                 println!("[ok] Ayo Package Form + typed relationship graph");
                 println!("[ok] bounded tunables, event queue, and resource limits");
                 println!("[ok] interactive command environment");
@@ -441,7 +501,7 @@ impl Shell {
                 println!("active: VGA text 80x25, mirrored COM1 serial");
                 let requested = crate::framebuffer::requested_mode();
                 println!(
-                    "HexaDisplay preset: {} ({}x{}), applied on graphical entry",
+                    "ExpDisplay preset: {} ({}x{}), applied on graphical entry",
                     requested.label(),
                     requested.width(),
                     requested.height()
@@ -449,7 +509,7 @@ impl Shell {
                 true
             }
             "displayinfo" => {
-                println!("HexaDisplay protocol v1: surfaces attach damage commit focus hit-test");
+                println!("ExpDisplay protocol v1: surfaces attach damage commit focus hit-test");
                 println!(
                     "framebuffer: {}x{} XRGB8888 scanout available={}",
                     crate::framebuffer::width(),
@@ -488,7 +548,7 @@ impl Shell {
                 match crate::state::save_preferences(preferences) {
                     Ok(()) => {
                         println!("Safe video saved: 480p, 60Hz, VSync on.");
-                        slog!("HEXA_SAFE_VIDEO_APPLIED persisted=true\r\n");
+                        slog!("EXPOS_SAFE_VIDEO_APPLIED persisted=true\r\n");
                     }
                     Err(error) => {
                         crate::state::apply_runtime_preferences(preferences);
@@ -497,7 +557,7 @@ impl Shell {
                             error.message()
                         );
                         slog!(
-                            "HEXA_SAFE_VIDEO_APPLIED persisted=false error={:?}\r\n",
+                            "EXPOS_SAFE_VIDEO_APPLIED persisted=false error={:?}\r\n",
                             error
                         );
                     }
@@ -536,7 +596,7 @@ impl Shell {
                 println!(
                     "calls: resolve authorize surface attach damage commit event navigate package"
                 );
-                println!("SDK: sdk/go/hexa (host emulator tested)");
+                println!("SDK: sdk/go/expos (host emulator tested)");
                 println!(
                     "native Go execution loader: not connected; scheduler/loader work remains"
                 );
@@ -584,7 +644,7 @@ impl Shell {
                             name,
                             authority_name(authority)
                         );
-                        slog!("HEXA_USER_CREATED {}\r\n", name);
+                        slog!("EXPOS_USER_CREATED {}\r\n", name);
                     }
                     Err(error) => println!("useradd: {}", error.message()),
                 }
@@ -598,7 +658,7 @@ impl Shell {
                 match crate::session::remove_account(name, self.session.name()) {
                     Ok(()) => {
                         println!("Deleted user '{}'.", name);
-                        slog!("HEXA_USER_DELETED {}\r\n", name);
+                        slog!("EXPOS_USER_DELETED {}\r\n", name);
                     }
                     Err(error) => println!("userdel: {}", error.message()),
                 }
@@ -612,7 +672,7 @@ impl Shell {
                 match crate::session::change_password(name, password) {
                     Ok(()) => {
                         println!("Password changed for '{}'.", name);
-                        slog!("HEXA_PASSWORD_CHANGED {}\r\n", name);
+                        slog!("EXPOS_PASSWORD_CHANGED {}\r\n", name);
                     }
                     Err(error) => println!("passwd: {}", error.message()),
                 }
@@ -760,35 +820,36 @@ impl Shell {
                 true
             }
             "legacy" => {
-                println!("HexaOS 7.2 Diamond II remains available with its full legacy stack.");
+                println!("ExpOS 7.2 Diamond II remains available with its full legacy stack.");
                 println!("Exit QEMU, then run: make run-alpha");
-                println!("It includes games, networking, persistent ATA HexaFS, tasks, events,");
+                println!("It includes games, networking, persistent ATA ExpFS, tasks, events,");
                 println!("framebuffer modes, users, and the original 100+ command environment.");
                 true
             }
             "reboot" => {
                 println!("Rebooting ExpOS...");
-                slog!("HEXA_COMMAND_OK reboot\r\n");
+                slog!("EXPOS_COMMAND_OK reboot\r\n");
                 port::reboot();
             }
             "shutdown" | "halt" => {
                 println!("Shutting down ExpOS...");
-                slog!("HEXA_COMMAND_OK shutdown\r\n");
+                slog!("EXPOS_COMMAND_OK shutdown\r\n");
                 port::shutdown();
             }
             _ => crate::compat::execute(command, args),
         };
         if recognized {
-            slog!("HEXA_COMMAND_OK {}\r\n", command);
+            slog!("EXPOS_COMMAND_OK {}\r\n", command);
         } else {
             println!("Unknown command '{}'. Type 'help'.", command);
-            slog!("HEXA_COMMAND_ERROR {}\r\n", command);
+            slog!("EXPOS_COMMAND_ERROR {}\r\n", command);
         }
     }
 
     fn help(&self) {
         println!("ExpOS commands:");
-        println!("  help clear echo about status whoami users login logout");
+        println!("  help clear echo about status bootmode whoami users login logout");
+        println!("  python/python3 <code> | -f <Form>   (ExpPython)");
         println!("  useradd <name> <operator|power|guest> <password>");
         println!("  userdel <name>  passwd <name> <new-password>");
         println!("  forms packages dimensions makedim inspect journal policy handles history");
@@ -875,7 +936,7 @@ impl Shell {
         match self.kernel_controls.set_tunable(name, value) {
             Ok(node) => {
                 print_tunable(node);
-                slog!("HEXA_SYSCTL_CHANGED node={} value={}\r\n", name, value);
+                slog!("EXPOS_SYSCTL_CHANGED node={} value={}\r\n", name, value);
             }
             Err(error) => println!("sysctl: {}: {}", name, error.message()),
         }
@@ -1008,7 +1069,7 @@ impl Shell {
                         println!("watch added: {} {}", watch.filter.name(), watch.identifier);
                         if self.kernel_controls.tracing_enabled() {
                             slog!(
-                                "HEXA_KEVENT_WATCH filter={} id={}\r\n",
+                                "EXPOS_KEVENT_WATCH filter={} id={}\r\n",
                                 watch.filter.name(),
                                 watch.identifier
                             );
@@ -1150,7 +1211,7 @@ impl Shell {
                     Ok(limit) => {
                         print_limit(limit);
                         slog!(
-                            "HEXA_RLIMIT_CHANGED resource={} soft={} hard={}\r\n",
+                            "EXPOS_RLIMIT_CHANGED resource={} soft={} hard={}\r\n",
                             resource.name(),
                             soft,
                             hard
@@ -1232,7 +1293,7 @@ impl Shell {
                 action,
                 if operator_only { "Operator" } else { "Execute" }
             );
-            slog!("HEXA_KERNEL_CONTROL_DENIED action={}\r\n", action);
+            slog!("EXPOS_KERNEL_CONTROL_DENIED action={}\r\n", action);
         }
         allowed
     }
@@ -1259,7 +1320,7 @@ impl Shell {
                 "{}: DIESE denied I/O because the Network Driver Form is not active",
                 command
             );
-            slog!("HEXA_NET_DENIED command={} lifecycle\r\n", command);
+            slog!("EXPOS_NET_DENIED command={} lifecycle\r\n", command);
             return None;
         }
         if self.network_policy == NetworkPolicy::Disabled {
@@ -1267,7 +1328,7 @@ impl Shell {
                 "{}: DIESE denied I/O because PIMP network=disabled",
                 command
             );
-            slog!("HEXA_NET_DENIED command={} policy=disabled\r\n", command);
+            slog!("EXPOS_NET_DENIED command={} policy=disabled\r\n", command);
             return None;
         }
         let Some(handle) = self.handles.iter().flatten().find(|handle| {
@@ -1281,7 +1342,7 @@ impl Shell {
                 "{}: DIESE denied I/O because no active Network Handle is bound",
                 command
             );
-            slog!("HEXA_NET_DENIED command={} handle=missing\r\n", command);
+            slog!("EXPOS_NET_DENIED command={} handle=missing\r\n", command);
             return None;
         };
         Some(handle.id)
@@ -1320,7 +1381,7 @@ impl Shell {
                     hostname, address[0], address[1], address[2], address[3]
                 );
                 slog!(
-                    "HEXA_DNS_OK host={} address={}.{}.{}.{}\r\n",
+                    "EXPOS_DNS_OK host={} address={}.{}.{}.{}\r\n",
                     hostname,
                     address[0],
                     address[1],
@@ -1330,7 +1391,7 @@ impl Shell {
             }
             Err(error) => {
                 println!("dns: {}", error.message());
-                slog!("HEXA_DNS_ERROR host={} error={:?}\r\n", hostname, error);
+                slog!("EXPOS_DNS_ERROR host={} error={:?}\r\n", hostname, error);
             }
         }
     }
@@ -1375,7 +1436,7 @@ impl Shell {
                     Err(_) => println!("[response body is not UTF-8]"),
                 }
                 slog!(
-                    "HEXA_HTTP_OK status={} bytes={} peer={}.{}.{}.{}\r\n",
+                    "EXPOS_HTTP_OK status={} bytes={} peer={}.{}.{}.{}\r\n",
                     response.status,
                     response.body_len,
                     response.peer[0],
@@ -1386,7 +1447,7 @@ impl Shell {
             }
             Err(error) => {
                 println!("fetch: {}", error.message());
-                slog!("HEXA_HTTP_ERROR url={} error={:?}\r\n", url, error);
+                slog!("EXPOS_HTTP_ERROR url={} error={:?}\r\n", url, error);
             }
         }
     }
@@ -1673,17 +1734,38 @@ impl Shell {
             println!("DIESE denied: the Form is not active.");
             return;
         }
-        let content = &mut self.content[index];
-        let mut start = if append { content.length as usize } else { 0 };
-        if append && start > 0 && start < MAX_CONTENT && content.bytes[start - 1] != b'\n' {
-            content.bytes[start] = b' ';
-            start += 1;
-        }
-        let available = MAX_CONTENT.saturating_sub(start);
+        let old_length = self.content[index].length as usize;
+        let separator =
+            append && old_length > 0 && self.content[index].bytes[old_length - 1] != b'\n';
+        let start = if append {
+            old_length + usize::from(separator)
+        } else {
+            0
+        };
         let bytes = text.as_bytes();
-        let written = bytes.len().min(available);
+        let new_length = start + bytes.len();
+        if new_length > MAX_CONTENT {
+            println!(
+                "Form content exceeds {} bytes; nothing changed.",
+                MAX_CONTENT
+            );
+            return;
+        }
+        if let Err(error) = self
+            .kernel_controls
+            .resize_form_content(old_length, new_length)
+        {
+            println!("Form content denied: {}; nothing changed.", error.message());
+            return;
+        }
+        let content = &mut self.content[index];
+        if separator {
+            content.bytes[old_length] = b' ';
+        }
+        let written = bytes.len();
         content.bytes[start..start + written].copy_from_slice(&bytes[..written]);
         content.length = (start + written) as u16;
+        content.bytes[new_length..].fill(0);
         if let Some(form) = self.forms[index].as_mut() {
             form.revision += 1;
         }
@@ -1693,9 +1775,6 @@ impl Shell {
             if append { "Appended" } else { "Wrote" },
             written
         );
-        if written != bytes.len() {
-            println!("Warning: content was truncated at {} bytes.", MAX_CONTENT);
-        }
     }
 
     fn view_content(&self, identity: Option<&str>, line_limit: Option<usize>) {
@@ -1768,6 +1847,13 @@ impl Shell {
             return;
         };
         let source_form = self.forms[source_index].unwrap();
+        if let Err(error) = self
+            .kernel_controls
+            .resize_form_content(0, self.content[source_index].length as usize)
+        {
+            println!("Form copy denied: {}; nothing changed.", error.message());
+            return;
+        }
         let fin = Fin::from_u128(0x464F_524D_0000_0000_0000_0000_0000_0000 | self.next_fin as u128);
         self.next_fin += 1;
         self.forms[destination_index] = Some(Form::new(fin, destination, source_form.kind));
@@ -1819,7 +1905,7 @@ impl Shell {
             .map(|content| content.length as usize)
             .sum();
         println!(
-            "HexaFS bootstrap store: {} bytes used across {} Forms",
+            "ExpFS bootstrap store: {} bytes used across {} Forms",
             used,
             self.form_count()
         );
@@ -1919,6 +2005,9 @@ impl Shell {
             );
             return;
         }
+        self.kernel_controls
+            .resize_form_content(self.content[index].length as usize, 0)
+            .expect("reclaimed content was accounted");
         self.forms[index] = None;
         self.content[index] = FormContent::empty();
         self.commit_action();
@@ -2325,6 +2414,9 @@ fn is_shell_command(name: &str) -> bool {
             | "ps"
             | "kstat"
             | "sysctl"
+            | "bootmode"
+            | "python"
+            | "python3"
             | "kqueue"
             | "kevent"
             | "rlimit"
@@ -2414,6 +2506,35 @@ fn is_mutating_command(name: &str) -> bool {
             | "reboot"
             | "shutdown"
             | "halt"
+    )
+}
+
+fn is_form_mutation(name: &str) -> bool {
+    matches!(
+        name,
+        "makedim"
+            | "mkform"
+            | "write"
+            | "append"
+            | "delete"
+            | "recover"
+            | "move"
+            | "copy"
+            | "retire"
+            | "activate"
+            | "reclaim"
+            | "grant"
+            | "revoke"
+            | "pimp"
+            | "relate"
+            | "unrelate"
+    )
+}
+
+fn unavailable_in_single_user(name: &str) -> bool {
+    matches!(
+        name,
+        "desktop" | "browser" | "games" | "arcade" | "ping" | "dns" | "fetch"
     )
 }
 

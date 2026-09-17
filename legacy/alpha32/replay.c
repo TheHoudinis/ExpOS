@@ -1,7 +1,7 @@
 #include "types.h"
 #include "replay.h"
-#include "hexafs.h"
-#include "hexafs_disk.h"
+#include "expfs.h"
+#include "expfs_disk.h"
 #include "process.h"
 #include "log.h"
 
@@ -45,26 +45,26 @@ int replay_record(uint32_t syscall_num, uint32_t arg0, uint32_t arg1, uint32_t a
     return replay_count;
 }
 
-static int save_event_log_to_hexafs(void) {
-    if (!hexafs_mounted) return 0;
-    if (!hexafs_current_tx.active) return 0;
-    uint32_t event_obj = hexafs_object_alloc(HEXAFS_CONFIG);
+static int save_event_log_to_expfs(void) {
+    if (!expfs_mounted) return 0;
+    if (!expfs_current_tx.active) return 0;
+    uint32_t event_obj = expfs_object_alloc(EXPFS_CONFIG);
     if (!event_obj) return 0;
-    if (!hexafs_object_write_data(event_obj, (uint8_t *)replay_buffer,
+    if (!expfs_object_write_data(event_obj, (uint8_t *)replay_buffer,
                                    (uint32_t)(replay_count * sizeof(replay_event_t)))) {
-        hexafs_free_block(event_obj);
+        expfs_free_block(event_obj);
         return 0;
     }
-    uint32_t snap_block = hexafs_snap_find("live");
+    uint32_t snap_block = expfs_snap_find("live");
     if (!snap_block) snap_block = sb_cache.root_snap_block;
     if (snap_block) {
-        hexafs_abstraction_add_entry(snap_block, "replay_log", event_obj, HEXAFS_CONFIG);
+        expfs_abstraction_add_entry(snap_block, "replay_log", event_obj, EXPFS_CONFIG);
     }
     return 1;
 }
 
 void replay_save_log(void) {
-    save_event_log_to_hexafs();
+    save_event_log_to_expfs();
 }
 
 int replay_execute(uint32_t snap_id, uint32_t event_count) {

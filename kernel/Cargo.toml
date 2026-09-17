@@ -1,15 +1,15 @@
 [package]
-name = "hexa-kernel"
+name = "expos-kernel"
 version = "8.0.0-alpha.12"
 edition = "2021"
 
 # Bare-metal static library: linked together with boot/boot.asm by ld.
 [lib]
-name = "hexa_kernel"
+name = "expos_kernel"
 crate-type = ["staticlib"]
 
 [dependencies]
-hexa-core = { path = "../crates/hexa-core" }
+expos-core = { path = "../crates/expos-core" }
 embedded-io = { version = "0.7", default-features = false }
 embedded-tls = { version = "0.19", default-features = false, features = ["rustpki", "p384", "rsa"] }
 linked_list_allocator = "0.10.5"

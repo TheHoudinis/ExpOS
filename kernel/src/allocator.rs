@@ -37,7 +37,7 @@ pub fn initialize() {
     unsafe {
         ALLOCATOR.lock().init(start, HEAP_BYTES);
     }
-    crate::slog!("HEXA_HEAP_READY bytes={}\r\n", HEAP_BYTES);
+    crate::slog!("EXPOS_HEAP_READY bytes={}\r\n", HEAP_BYTES);
 }
 
 #[cfg(test)]

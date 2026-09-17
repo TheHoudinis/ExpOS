@@ -1,15 +1,18 @@
 # ExpOS v8
 
-ExpOS is the Form-native HexaOS rebuild described by
+ExpOS is the Form-native operating system described by
 [`docs/PHILOSOPHY.txt`](docs/PHILOSOPHY.txt). The current image contains:
 
-- an x86_64 Multiboot2 kernel with VGA, serial, PS/2 keyboard and mouse input;
+- an x86_64 kernel with native UEFI handoff and a separate Multiboot2 fallback,
+  VGA, serial, PS/2 keyboard and mouse input;
+- Operator-authenticated single-user maintenance and normal multi-user startup;
+- ExpPython, a bounded embedded MicroPython interpreter, plus a host Python SDK;
 - FIN identity, Dimensions, PIMP/DIESE policy, capability-scoped Form Handles,
-  typed relationships and transactional HexaFS metadata;
+  typed relationships and transactional ExpFS metadata;
 - bounded Form-native kernel controls: typed tunables, signal/timer/resource
   readiness watches, and session-local resource accounting with DIESE-gated
   mutation;
-- HexaDisplay, a runtime-selectable 640x480, 1280x720 or 1920x1080 software
+- ExpDisplay, a runtime-selectable 640x480, 1280x720 or 1920x1080 software
   compositor with Form-owned surfaces, atomic commits, presentation-complete
   frame events, bounded damage-region scanout, double-buffered Bochs/QEMU
   output and selectable 60, 75, 120 or 144 Hz pacing; fresh state starts at
@@ -41,10 +44,15 @@ buildable migration reference.
 
 Requirements: Rust with the `x86_64-unknown-none` target, Cargo, NASM, GNU
 binutils, GRUB i386-pc modules, xorriso, QEMU x86_64, Go, Make and Python 3.
-Python supplies the deterministic host HTTP fixture used by the network test.
+GCC builds the vendored ExpPython runtime; Clang and OVMF are needed for native
+UEFI builds/tests. Python also supplies the host SDK and test harnesses.
 
 ```sh
-make iso            # build build/hexaos.iso
+make uefi           # build build/esp/EFI/BOOT/BOOTX64.EFI
+make run-uefi       # boot the native firmware path with OVMF
+make bootmode-check # verify single-user account/service restrictions
+make python-check   # verify Python scripts and limits inside the kernel
+make iso            # build the fallback build/expos.iso
 make check          # boot and exercise the command environment
 make display-check  # verify desktop and window lifecycle
 make network-check  # verify ICMP, TCP, HTTP and Browser against a local fixture
@@ -67,6 +75,10 @@ primary ATA disk. Account and customization changes are journaled there. The
 image is intentionally preserved by `make clean`; copy it to back up the
 current local state.
 
+The default launch uses native UEFI with OVMF. `make run-bios` retains the
+previous GRUB image as a development fallback; removing legacy BIOS support
+awaits the final Genesis boot-policy decision.
+
 The boot chooser and graphical login explicitly present their completed back
 buffer before waiting for input. If a saved display mode is rejected, ExpOS
 automatically retries 480p before falling back to the console. For manual
@@ -75,7 +87,10 @@ recovery, choose Console, sign in as `operator`, run `displaydiag` and
 and VSync on; if the state disk cannot be written, the same safe settings stay
 active for the current boot. `desktop` retries graphics without rebooting.
 
-Choose `1` for the graphical environment or `2` for the console. The built-in
+Choose `1` for the multi-user graphical environment, `2` for the multi-user
+console, or `3`/`S` for Operator-only single-user maintenance. Single-user mode
+disables networking and the desktop until restart. See [native boot details](docs/BOOT.md)
+and [Python support](docs/PYTHON.md). The built-in
 development accounts are:
 
 | User | Password | Authority |
@@ -155,7 +170,7 @@ A fresh state image defaults to 480p and 60 Hz. Presentation pacing can be
 selected as 60, 75, 120 or 144 Hz and VSync can be enabled or disabled; both
 settings also persist. These rates are compositor frame targets, not physical
 monitor modes or a claim that QEMU changed the host display's refresh rate.
-With VSync enabled, HexaDisplay performs a bounded VGA vertical-retrace wait
+With VSync enabled, ExpDisplay performs a bounded VGA vertical-retrace wait
 before its Bochs framebuffer page flip; a timeout is recorded instead of
 hanging the kernel. The Network switch is enforced by the native packet path
 through a requester-bound Configure Handle; it is not a painted UI flag.
@@ -170,7 +185,7 @@ wallpaper effects off, so the desktop begins with the least expensive renderer
 path. These choices persist. With the keyboard, `6` selects Performance, `j`/`k`
 select a row, Enter or Space activates it, and `+`/`-` move choices.
 
-HexaDisplay adopts compositor concepts also used by Wayland—client-owned
+ExpDisplay adopts compositor concepts also used by Wayland—client-owned
 surfaces, pending state published by an atomic commit, explicit surface damage
 and frame completion after presentation—but it is a Form-native protocol, not
 a Wayland wire protocol or `libwayland` compatibility layer. Consecutive pure
@@ -254,10 +269,12 @@ original Form-native implementations: they do not copy FreeBSD code or expose
 its ABI. `sysctl` reads typed named nodes and lets an Operator change the three
 validated writable event controls. `kqueue`/`kevent` registers fixed-capacity
 signal, timer and resource watches, then returns sequenced readiness records.
-`rlimit` accounts event watches, IPC bytes, scratch pages and Form operations
+`rlimit` accounts event watches, IPC bytes, scratch pages, Form operations and live Form content bytes
 against validated soft/hard/ceiling tuples. Event-watch accounting is wired to
-the queue; the other ledgers are explicit runtime-local reservations, not yet
-global subsystem limits. DIESE authorizes mutations through the revocable
+the queue. Form mutation attempts and live content bytes are enforced by the
+shell; rejected growth leaves the original content intact. IPC bytes and
+scratch pages are explicit runtime-local reservations. These are not yet
+global process limits. DIESE authorizes mutations through the revocable
 bootstrap Handle: Configure is reserved for Operator, Execute is available to
 Power and Operator, and Guest receives read-only access.
 
@@ -285,7 +302,7 @@ or persistent system configuration.
 
 Accounts and Settings preferences are persisted through the dedicated state
 disk. General Form contents and PIMP changes remain in memory until native
-HexaFS block persistence is connected.
+ExpFS block persistence is connected.
 
 ## Preserved implementation
 
@@ -305,7 +322,7 @@ The feature pass described above does not modify `legacy/alpha32/`.
 | Area | Purpose |
 |---|---|
 | `boot/`, `kernel/` | x86_64 bootstrap and kernel |
-| `crates/hexa-core/` | platform-independent Form semantics |
+| `crates/expos-core/` | platform-independent Form semantics |
 | `ayo/` | Go package manager and development storage bridge |
 | `sdk/go/` | Go ABI client and host emulator |
 | `docs/PHILOSOPHY.txt` | source architecture specification |

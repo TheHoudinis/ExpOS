@@ -2,7 +2,7 @@
 #define PIPE_H
 
 #include "types.h"
-#include "hexafs.h"
+#include "expfs.h"
 
 #define PIPE_BUF_SIZE 4096
 #define PIPE_TYPED_CAPACITY 16

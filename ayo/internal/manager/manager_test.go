@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"hexaos.dev/ayo/internal/artifact"
-	"hexaos.dev/ayo/internal/model"
+	"expos.dev/ayo/internal/artifact"
+	"expos.dev/ayo/internal/model"
 )
 
 type memoryStore struct{ state model.State }
@@ -117,13 +117,13 @@ func TestManifestAndHighfivePreserveFormHistory(t *testing.T) {
 func TestCompatibilityAndPIMPPolicyAreEnforced(t *testing.T) {
 	storage := &memoryStore{}
 	ayo := Manager{Store: storage, Authority: model.Operator, Dimension: "Stable"}
-	if err := ayo.SlapSpec(InstallSpec{Name: "Future", Version: "1.0.0", Compatibility: []string{"hexaos>=9.0.0"}}); err == nil {
-		t.Fatal("incompatible HexaOS requirement was accepted")
+	if err := ayo.SlapSpec(InstallSpec{Name: "Future", Version: "1.0.0", Compatibility: []string{"expos>=9.0.0"}}); err == nil {
+		t.Fatal("incompatible ExpOS requirement was accepted")
 	}
 	if err := ayo.SlapSpec(InstallSpec{Name: "Denied", Version: "1.0.0", PIMP: map[string]string{"activation": "denied"}}); err == nil {
 		t.Fatal("PIMP activation denial was ignored")
 	}
-	if err := ayo.SlapSpec(InstallSpec{Name: "Native", Version: "1.0.0", Compatibility: []string{"dimension=Stable", "hexaos>=8.0.0"}}); err != nil {
+	if err := ayo.SlapSpec(InstallSpec{Name: "Native", Version: "1.0.0", Compatibility: []string{"dimension=Stable", "expos>=8.0.0"}}); err != nil {
 		t.Fatal(err)
 	}
 }

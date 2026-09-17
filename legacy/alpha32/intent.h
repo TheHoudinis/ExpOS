@@ -20,19 +20,19 @@ typedef struct {
     uint32_t schema_hash;
     uint32_t filter_offset;
     uint32_t flags;
-} hexaos_intent_t;
+} expos_intent_t;
 
 typedef struct {
     int active;
     int pid;
-    hexaos_intent_t intent;
+    expos_intent_t intent;
     uint32_t handle;
     uint32_t buffer_block;
     int buffer_len;
 } intent_entry_t;
 
 int intent_init(void);
-int intent_create(int pid, hexaos_intent_t *intent, uint32_t *handle);
+int intent_create(int pid, expos_intent_t *intent, uint32_t *handle);
 int intent_fulfill(uint32_t handle, void *buffer, int len);
 int intent_close(uint32_t handle);
 int intent_compat_open(const char *path, int flags);

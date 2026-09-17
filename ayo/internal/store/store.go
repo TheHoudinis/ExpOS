@@ -8,11 +8,11 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"hexaos.dev/ayo/internal/model"
+	"expos.dev/ayo/internal/model"
 )
 
-// Store is the development HexaFS bridge contract. AtomicStore mirrors one
-// serialized HexaFS transaction and prevents lost concurrent updates.
+// Store is the development ExpFS bridge contract. AtomicStore mirrors one
+// serialized ExpFS transaction and prevents lost concurrent updates.
 type Store interface {
 	Load() (model.State, error)
 	Save(model.State) error
@@ -40,7 +40,7 @@ func (bridge JSONBridge) Load() (model.State, error) {
 	if errors.Is(err, os.ErrNotExist) {
 		return model.State{SchemaVersion: model.CurrentSchema}, nil
 	}
-	return model.State{}, fmt.Errorf("HexaFS bridge state is invalid (%v); recovery failed (%v); journal replay failed (%v)", err, recoveryErr, pendingErr)
+	return model.State{}, fmt.Errorf("ExpFS bridge state is invalid (%v); recovery failed (%v); journal replay failed (%v)", err, recoveryErr, pendingErr)
 }
 
 func (bridge JSONBridge) Save(state model.State) error {

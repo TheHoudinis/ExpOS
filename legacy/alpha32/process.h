@@ -38,7 +38,7 @@ typedef struct {
     uint32_t sender_snap;
     uint32_t payload_hash;
     uint32_t timestamp;
-} hexaos_event_t;
+} expos_event_t;
 
 struct task {
     int pid;
@@ -54,7 +54,7 @@ struct task {
     uint8_t stack[STACK_SIZE];
     char name[PROC_NAME_LEN];
     struct fd_entry fds[MAX_FDS];
-    hexaos_event_t event_queue[EVENT_QUEUE_SIZE];
+    expos_event_t event_queue[EVENT_QUEUE_SIZE];
     int event_head;
     int event_tail;
     volatile int event_pending;
@@ -74,7 +74,7 @@ int proc_alloc_fd(pid_t pid, int type, int ref);
 void proc_free_fd(pid_t pid, int fd);
 
 int process_event_send(pid_t target_pid, uint32_t event_type, uint32_t payload_hash);
-int process_event_poll(uint32_t event_type_mask, hexaos_event_t *out_event);
+int process_event_poll(uint32_t event_type_mask, expos_event_t *out_event);
 
 extern struct task tasks[MAX_TASKS];
 extern int current_task;

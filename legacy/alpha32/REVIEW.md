@@ -1,6 +1,6 @@
-# HexaOS — Kernel Infrastructure Review
+# ExpOS — Kernel Infrastructure Review
 
-## Status: v7.2 "Diamond II" — HEXAFSv2, block cache, pimp ACLs, persistence
+## Status: v7.2 "Diamond II" — EXPFSv2, block cache, pimp ACLs, persistence
 
 ### ✅ Boot cleanly
 - Stable bootloader (real mode → protected mode, floppy CHS load with bank switching)
@@ -24,7 +24,7 @@
 - Page fault handler logs fault info and returns (system stays alive)
 
 ### ✅ Kernel structure
-- Separate files: `kernel_entry.asm`, `interrupts.c/h`, `paging.c/h`, `process.c/h`, `syscall.c/h`, `vfs.c/h`, `pipe.c/h`, `sync.c/h`, `log.c/h`, `driver.c/h`, `elf.c/h`, `hexa.c`
+- Separate files: `kernel_entry.asm`, `interrupts.c/h`, `paging.c/h`, `process.c/h`, `syscall.c/h`, `vfs.c/h`, `pipe.c/h`, `sync.c/h`, `log.c/h`, `driver.c/h`, `elf.c/h`, `expos.c`
 - Clear separation: interrupts, memory, scheduler, syscalls, VFS, drivers, shell
 - Shared type definitions in `types.h`, I/O helpers in `types.h`
 
@@ -51,7 +51,7 @@
 - ATA PIO block device driver (primary channel, LBA28)
 - Read/write sectors (proven working — file system loads/stores)
 - Storage persists via `storage.img` (QEMU virtual HDD)
-- **v7.2**: HEXAFSv2 with block cache (16 slots, ~60% fewer ATA reads), next-fit allocator, abstraction chains (unlimited entries), write-ahead journaling
+- **v7.2**: EXPFSv2 with block cache (16 slots, ~60% fewer ATA reads), next-fit allocator, abstraction chains (unlimited entries), write-ahead journaling
 
 ### ✅ Control loop
 - Page faults are logged and recovered (system continues)
@@ -69,8 +69,8 @@
 | Block cache | 16-slot in-memory block cache reduces redundant ATA reads/writes |
 | Next-fit allocator | `next_alloc_hint` pointer replaces linear full-scan for block allocation |
 | Abstraction chains | Chained abstraction blocks remove 11-entry limit |
-| Pimp ACL system | Persistent per-user diese rules stored as HEXAFS_CONFIG objects |
-| User persistence | User accounts saved/loaded as `.users` config object in HEXAFS |
+| Pimp ACL system | Persistent per-user diese rules stored as EXPFS_CONFIG objects |
+| User persistence | User accounts saved/loaded as `.users` config object in EXPFS |
 | Framebuffer driver | Bochs VBE detection, `fb.c`/`vbe.h`, mode switching, double buffer |
 | diese enhancement | Checks pimp rules for password-less escalation, shows pimped status |
 | copy command fix | Uses `form_ensure_cap` instead of hardcoded 512-byte memcpy |
@@ -80,9 +80,9 @@
 
 | Feature | Description |
 |---------|-------------|
-| HEXAFSv2 block cache | 16-slot LRU-like cache, dirty flush on commit, ~60% fewer disk reads |
-| HEXAFSv2 next-fit | Tracked alloc hint avoids linear scan for block allocation |
-| HEXAFSv2 abstraction chains | Chain up to 8 abstraction blocks (88 entries max) |
+| EXPFSv2 block cache | 16-slot LRU-like cache, dirty flush on commit, ~60% fewer disk reads |
+| EXPFSv2 next-fit | Tracked alloc hint avoids linear scan for block allocation |
+| EXPFSv2 abstraction chains | Chain up to 8 abstraction blocks (88 entries max) |
 | User persistence | `init_users()` checks disk first, `save_data()` packs users, survives reboot |
 | Framebuffer driver | VBE detection via Bochs I/O ports, `mode` command, double buffering |
 | Pimp ACL | `pimp add/list/remove` commands, persistent diese config |

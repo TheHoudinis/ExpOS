@@ -4,7 +4,7 @@ CC = gcc
 CFLAGS = -m32 -ffreestanding -nostdinc -nostdlib -fno-pie -fno-stack-protector -mno-sse -mno-sse2 -Wall -Wextra -I. -g
 LDFLAGS = -T link.ld -m elf_i386 -nostdlib
 
-OBJECTS = kernel_entry.o interrupts.o paging.o process.o syscall.o sync.o log.o driver.o pipe.o vfs.o elf.o hexafs_disk.o hexafs.o kobserve.o boot_policy.o intent.o replay.o hex.o net.o fb.o hexa.o
+OBJECTS = kernel_entry.o interrupts.o paging.o process.o syscall.o sync.o log.o driver.o pipe.o vfs.o elf.o expfs_disk.o expfs.o kobserve.o boot_policy.o intent.o replay.o hex.o net.o fb.o expos.o
 
 all: os.img storage.img
 
@@ -41,7 +41,7 @@ os.img: boot.bin kernel.bin
 	@echo "[✓] OS image: $@"
 
 run: os.img storage.img
-	@echo "[*] Booting HEXA OS in QEMU..."
+	@echo "[*] Booting EXPOS OS in QEMU..."
 	@qemu-system-i386 -fda os.img -hda storage.img -boot order=a -nographic -d cpu_reset -no-reboot -netdev user,id=u1 -device rtl8139,netdev=u1
 
 debug: kernel.elf os.img storage.img

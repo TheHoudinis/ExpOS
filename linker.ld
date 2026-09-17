@@ -1,4 +1,4 @@
-/* HexaOS transitional Multiboot2 kernel linker script.
+/* ExpOS transitional Multiboot2 kernel linker script.
  * Image is loaded by GRUB at 1 MiB physical. The Multiboot2 header
  * section must sit within the first 32 KiB of the image, so it comes
  * first. */
@@ -12,7 +12,7 @@ PHDRS
 
 SECTIONS
 {
-    . = 1M;
+    . = DEFINED(KERNEL_LOAD_BASE) ? KERNEL_LOAD_BASE : 1M;
 
     .multiboot_header : ALIGN(8)
     {

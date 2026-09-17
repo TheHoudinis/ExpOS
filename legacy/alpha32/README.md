@@ -1,6 +1,6 @@
-# HexaOS — Version 7.2 "Diamond II"
+# ExpOS — Version 7.2 "Diamond II"
 
-> **v7.2 is here!** HEXAFSv2 with block cache, write-ahead journaling, abstraction chains, next-fit allocator, and pimp ACL system for diese (sudo). Faster, more persistent, and more competitive.
+> **v7.2 is here!** EXPFSv2 with block cache, write-ahead journaling, abstraction chains, next-fit allocator, and pimp ACL system for diese (sudo). Faster, more persistent, and more competitive.
 
 A 32-bit protected-mode hobby OS written in C and x86 assembly, booting from a floppy disk image via QEMU.
 
@@ -10,16 +10,16 @@ A 32-bit protected-mode hobby OS written in C and x86 assembly, booting from a f
 - **Version** — 7.0 → 7.2 "Diamond II"
 - ALL banners, help strings, neofetch, login screen, sysname, sysinfo, about, logo updated
 
-### HEXAFSv2 — Performance & Persistence
+### EXPFSv2 — Performance & Persistence
 
 | Feature | What It Does |
 |---------|-------------|
 | **Block Cache** | 16-slot in-memory block cache reduces redundant ATA reads/writes by ~60% |
 | **Next-Fit Allocator** | Tracked `next_alloc_hint` pointer replaces linear full-scan for block allocation |
-| **Abstraction Chains** | Support for chained abstraction blocks removes 11-entry limit (HEXAFS_ABS_CHAIN_MAX=8) |
+| **Abstraction Chains** | Support for chained abstraction blocks removes 11-entry limit (EXPFS_ABS_CHAIN_MAX=8) |
 | **Write-Ahead Journal** | Crash-safe metadata updates via journal blocks before commit |
 | **Cache Coalescing** | Dirty cache lines are flushed on commit for atomic persistence |
-| **User Persistence** | User accounts saved/loaded as `.users` HEXAFS config object |
+| **User Persistence** | User accounts saved/loaded as `.users` EXPFS config object |
 | **Framebuffer Driver** | Bochs VBE detection, `mode` command, double buffering |
 
 ### Pimp ACL System (diese config)
@@ -34,7 +34,7 @@ Pimp:     pimp <user>         — add user with full nopass
           pimp remove <user>  — remove user from pimp list
 ```
 
-Pimp rules are stored persistently as `HEXAFS_CONFIG` objects in the form store, loaded at boot.
+Pimp rules are stored persistently as `EXPFS_CONFIG` objects in the form store, loaded at boot.
 
 ### New Shell Commands (5 added, 120+ total)
 
@@ -44,24 +44,24 @@ Video:    mode list, mode set, mode double, mode clear, mode color
 ```
 
 ### Other Changes
-- **User persistence** — user accounts (name, password hash, role) now saved to HEXAFS as `.users` config object, loaded on boot
+- **User persistence** — user accounts (name, password hash, role) now saved to EXPFS as `.users` config object, loaded on boot
 - **Framebuffer driver** — new `fb.c`/`vbe.h` with Bochs VBE detection, 800x600x32 default mode, `mode` command for resolution switching
 - **Double buffering** — `mode double` enables software double buffer, `mode clear`/`mode color` for framebuffer ops
 - **diese enhanced** — checks pimp rules for password-less escalation, shows pimped status
 - **copy command fixed** — now uses proper `form_ensure_cap` instead of hardcoded 512-byte memcpy
-- **Boot sequence** — framebuffer init + pimp rules loaded after HEXAFS mount
+- **Boot sequence** — framebuffer init + pimp rules loaded after EXPFS mount
 - **Memory efficiency** — block cache reduces heap allocations for repeated reads
 
 ## User Persistence
 
-User accounts are now saved to disk as a `.users` HEXAFS config object:
+User accounts are now saved to disk as a `.users` EXPFS config object:
 - **root** account created on first boot
 - All `useradd`, `passwd`, and login `new` operations persist immediately
 - On subsequent boots, users are loaded from disk automatically
 
 ## Framebuffer (GUI Prep)
 
-A framebuffer driver with Bochs VBE support prepares HexaOS for a future graphical environment:
+A framebuffer driver with Bochs VBE support prepares ExpOS for a future graphical environment:
 
 ```
 mode list              — show available video modes
@@ -125,7 +125,7 @@ tetris    Full Tetris game with WASD controls
 - ATA PIO block device driver (primary channel, LBA28 addressing)
 - Read/write disk sectors for persistent form storage
 - Multi-user form system with permissions (hex capability mode)
-- Transactional HEXAFS layer with write-ahead journaling and snapshot chains
+- Transactional EXPFS layer with write-ahead journaling and snapshot chains
 
 ### Shell & Commands (110+)
 ```
@@ -152,11 +152,11 @@ Pkg:      ayo list/add/remove/update
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                     HEXA OS 7.2 Diamond II                   │
+│                     EXPOS OS 7.2 Diamond II                   │
 ├─────────────┬───────────┬───────────┬────────────────────────┤
 │  Interrupts │  Memory   │  Tasks    │  v7.2 Upgrades         │
 │  ┌───────┐  │ ┌──────┐  │ ┌────────┐│ ┌────────────┐       │
-│  │ IDT   │  │ │ PMM  │  │ │ Sched  ││ │HEXAFSv2    │       │
+│  │ IDT   │  │ │ PMM  │  │ │ Sched  ││ │EXPFSv2    │       │
 │  │ PIC   │  │ │ Paging│  │ │ Tasks  ││ │ BLK CACHE  │       │
 │  │ PIT   │  │ │ Heap  │  │ │ CtxSw  ││ │ JOURNALING │       │
 │  │ Excp  │  │ │ PFHdl │  │ │ User   ││ │ PIMP ACL   │       │
@@ -165,7 +165,7 @@ Pkg:      ayo list/add/remove/update
 ├─────────────┴───────────┴───────────┴────────────────────────┤
 │  VFS:  Forms/Dims · Pipes · Console · Permission gating      │
 │  Syscall:  int 0x80  (28 syscalls, intent-based I/O)         │
-│  Shell:  HEXA CLI v7.2  (120+ commands, Diamond + Pimp cmds) │
+│  Shell:  EXPOS CLI v7.2  (120+ commands, Diamond + Pimp cmds) │
 │  Games:  Snake, TTT, Hangman, Memory, Tetris                 │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -189,7 +189,7 @@ make run
 
 This produces:
 - `os.img` — floppy disk image (1.44 MB) containing bootloader + kernel
-- `storage.img` — ATA hard disk image (2 MB) for persistent form storage (HEXAFS)
+- `storage.img` — ATA hard disk image (2 MB) for persistent form storage (EXPFS)
 - `kernel.elf` — ELF binary for debugging (symbols in `link.map`)
 
 Boots in QEMU with:
@@ -200,9 +200,9 @@ qemu-system-i386 -fda os.img -hda storage.img -boot order=a -nographic
 ## Boot Sequence
 
 1. **Real Mode Bootloader** (`boot_entry.asm`): Enables A20 gate, loads kernel from floppy using CHS addressing with 64KB bank switching, loads GDT, enters protected mode, jumps to kernel at 0x10000
-2. **Kernel Entry** (`hexa.c` kernel_main): Clears BSS, seeds RNG from CMOS, initializes all subsystems
+2. **Kernel Entry** (`expos.c` kernel_main): Clears BSS, seeds RNG from CMOS, initializes all subsystems
 3. **Subsystem Init**: GDT → IDT → PIC → PIT → PMM → Paging → Heap → Log → **kobserve** → **intent** → **replay** → **net** → Scheduler → Enable Interrupts
-4. **Storage Init**: VFS → ATA → **hexafs_mount** → **boot_policy_execute**
+4. **Storage Init**: VFS → ATA → **expfs_mount** → **boot_policy_execute**
 5. **User Task**: Created with PID=1, enters infinite syscall loop (`_user_entry`)
 6. **Shell Task**: `kernel_main` runs the shell/CLI loop (round-robin with user task)
 7. **Round-Robin**: 2 tasks (user + shell) cycle at 100Hz via timer IRQ
@@ -216,9 +216,9 @@ qemu-system-i386 -fda os.img -hda storage.img -boot order=a -nographic
 
 Create additional users with `useradd <name>` (root only) or type `new` at the login prompt.
 
-## Form System (HEXAFSv2)
+## Form System (EXPFSv2)
 
-- HEXAFS transactional form store on ATA disk image (4096 sectors, 2 MB)
+- EXPFS transactional form store on ATA disk image (4096 sectors, 2 MB)
 - Superblock with magic, bitmap allocator, CRC-verified object store
 - **Block cache** (16 slots) — reduces ATA reads by ~60%
 - **Abstraction chains** — removes 11-entry limit, allows up to 88 entries
@@ -249,13 +249,13 @@ Example: `ayo add games` enables Snake, Tic-Tac-Toe, Hangman, Memory, and Tetris
 ```
     __________________________
    /   H E X A   O S   7.2   \
-  |  HEXAFSv2 · Pimp · Persist|
+  |  EXPFSv2 · Pimp · Persist|
   |  120+ Cmds · 28 Syscalls  |
   |  32-bit Protected Mode    |
     \________________________/
  ┌────────────────────────────────┐
- │  OS:       HEXA OS 7.2 i386    │
- │  Host:     hexaos              │
+ │  OS:       EXPOS OS 7.2 i386    │
+ │  Host:     expos              │
  │  Version:  7.2 "Diamond II"    │
  │  Kernel:   GenuineIntel        │
  │  Paging:   Enabled (4KB pg)    │
@@ -269,7 +269,7 @@ Example: `ayo add games` enables Snake, Tic-Tac-Toe, Hangman, Memory, and Tetris
 
 ## Pimp System (diese ACL)
 
-Pimp files are config rules for the `diese` (sudo) command. They persistent across reboots via HEXAFS.
+Pimp files are config rules for the `diese` (sudo) command. They persistent across reboots via EXPFS.
 
 ```
 pimp list              — list all pimp rules
@@ -278,15 +278,15 @@ pimp add <user>=<hex>  — allow user with specific capability mask
 pimp remove <user>     — remove user's pimp rule
 ```
 
-Pimp rules are stored as `HEXAFS_CONFIG` objects named `.pimp` in the root abstraction.
+Pimp rules are stored as `EXPFS_CONFIG` objects named `.pimp` in the root abstraction.
 
 ## Project Structure
 
 ```
-HexaOS-alpha-build/
+ExpOS-alpha-build/
 ├── boot_entry.asm      # Real-mode bootloader (510 bytes + MBR)
 ├── kernel_entry.asm    # ISR stubs, IRQ stubs, context switch, TSS, user entry
-├── hexa.c              # Shell, 110+ commands, form system, user management, ATA driver, Tetris
+├── expos.c              # Shell, 110+ commands, form system, user management, ATA driver, Tetris
 ├── interrupts.c        # IDT setup, PIC remap, PIT init, exception handlers, keyboard IRQ
 ├── interrupts.h        # IDT/PIC/PIT declarations, regs struct
 ├── paging.c            # PMM bitmap, page tables, heap allocator
@@ -311,10 +311,10 @@ HexaOS-alpha-build/
 ├── boot_policy.h       # Boot policy declarations
 ├── hex.c               # HEX binary container format
 ├── hex.h               # HEX format declarations
-├── hexafs.c            # HEXAFS transactional form store (VFS layer)
-├── hexafs.h            # HEXAFS VFS declarations
-├── hexafs_disk.c       # HEXAFS block-level disk driver
-├── hexafs_disk.h       # HEXAFS disk declarations
+├── expfs.c            # EXPFS transactional form store (VFS layer)
+├── expfs.h            # EXPFS VFS declarations
+├── expfs_disk.c       # EXPFS block-level disk driver
+├── expfs_disk.h       # EXPFS disk declarations
 ├── intent.c            # Declarative capability-based I/O
 ├── intent.h            # Intent system declarations
 ├── kobserve.c          # In-kernel observability framework
@@ -351,7 +351,7 @@ HexaOS-alpha-build/
 - **Scheduling**: Round-robin, invoked from timer IRQ, saves/restores full register context
 - **Syscall**: Software interrupt 0x80, DPL=3 for user-mode access, 28 syscalls
 - **VFS**: Form/dim terminology, intent handles, pipes, console I/O, stat, permission gating
-- **Storage**: ATA PIO (LBA28), primary channel, polling mode, HEXAFS transactional layer
+- **Storage**: ATA PIO (LBA28), primary channel, polling mode, EXPFS transactional layer
 - **Intent I/O**: Capability-gated declarative I/O replacing raw FDs
 - **Observability**: Virtual `/@kernel/...` paths for runtime kernel introspection
 - **Network**: Virtual interfaces with loopback, TCP/UDP tracking
@@ -359,7 +359,7 @@ HexaOS-alpha-build/
 
 ## Warnings
 
-- **Alpha quality.** HexaOS is a hobby OS. Expect bugs, crashes, and missing features.
+- **Alpha quality.** ExpOS is a hobby OS. Expect bugs, crashes, and missing features.
 - **QEMU only.** The ATA driver targets QEMU's emulated disk. Real hardware untested.
 - **Minimal security.** Passwords use a simple hash (djb2 variant). No encryption.
 - **Games require packages.** Run `ayo add games` as root to enable games.

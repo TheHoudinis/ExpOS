@@ -1,0 +1,31 @@
+#include <stdint.h>
+#include <alloca.h>
+#define MICROPY_CONFIG_ROM_LEVEL MICROPY_CONFIG_ROM_LEVEL_MINIMUM
+#define MICROPY_ENABLE_COMPILER (1)
+#define MICROPY_ENABLE_GC (1)
+#define MICROPY_ENABLE_VM_ABORT (1)
+#define MICROPY_STACK_CHECK (1)
+#define MICROPY_ENABLE_EXTERNAL_IMPORT (0)
+#define MICROPY_PY_BUILTINS_FLOAT (0)
+#define MICROPY_PY_BUILTINS_COMPLEX (0)
+#define MICROPY_LONGINT_IMPL MICROPY_LONGINT_IMPL_NONE
+#define MICROPY_PY_BUILTINS_STR_UNICODE (1)
+#define MICROPY_PY_BUILTINS_SLICE (1)
+#define MICROPY_PY_BUILTINS_RANGE_ATTRS (1)
+#define MICROPY_PY_BUILTINS_MIN_MAX (1)
+#define MICROPY_PY_BUILTINS_PROPERTY (1)
+#define MICROPY_PY_BUILTINS_SET (1)
+#define MICROPY_PY_SYS (1)
+#define MICROPY_PY_SYS_PLATFORM "expos"
+#define MICROPY_PY_SYS_PATH (0)
+#define MICROPY_PY_SYS_ARGV (0)
+#define MICROPY_HW_BOARD_NAME "ExpPython"
+#define MICROPY_HW_MCU_NAME "x86_64"
+#define MICROPY_ALLOC_PARSE_CHUNK_INIT (16)
+void expos_python_tick(void);
+#define MICROPY_VM_HOOK_LOOP expos_python_tick();
+#define MICROPY_VM_HOOK_RETURN expos_python_tick();
+typedef intptr_t mp_int_t;
+typedef uintptr_t mp_uint_t;
+typedef long mp_off_t;
+#define MP_STATE_PORT MP_STATE_VM

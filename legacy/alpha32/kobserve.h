@@ -2,7 +2,7 @@
 #define KOBSERVE_H
 
 #include "types.h"
-#include "hexafs.h"
+#include "expfs.h"
 
 typedef struct {
     char path[64];

@@ -1,6 +1,6 @@
 use crate::{framebuffer, input};
+use expos_core::Rect;
 use framebuffer::color;
-use hexa_core::Rect;
 
 const SNAKE_CAPACITY: usize = 96;
 const SNAKE_WIDTH: i16 = 32;

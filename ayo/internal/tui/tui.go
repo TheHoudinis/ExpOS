@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"strings"
 
-	"hexaos.dev/ayo/internal/catalog"
-	"hexaos.dev/ayo/internal/manager"
-	"hexaos.dev/ayo/internal/model"
+	"expos.dev/ayo/internal/catalog"
+	"expos.dev/ayo/internal/manager"
+	"expos.dev/ayo/internal/model"
 )
 
 type App struct {
