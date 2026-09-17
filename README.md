@@ -51,6 +51,7 @@ UEFI builds/tests. Python also supplies the host SDK and test harnesses.
 make uefi           # build build/esp/EFI/BOOT/BOOTX64.EFI
 make run-uefi       # boot the native firmware path with OVMF
 make bootmode-check # verify single-user account/service restrictions
+make startup-check  # verify visible UEFI/BIOS screens and real keyboard login
 make python-check   # verify Python scripts and limits inside the kernel
 make iso            # build the fallback build/expos.iso
 make check          # boot and exercise the command environment
@@ -78,6 +79,12 @@ current local state.
 The default launch uses native UEFI with OVMF. `make run-bios` retains the
 previous GRUB image as a development fallback; removing legacy BIOS support
 awaits the final Genesis boot-policy decision.
+
+ExpOS discovers the framebuffer's PCI address assigned by firmware, so both
+OVMF and SeaBIOS draw to the actual video memory. `make startup-check` captures
+the chooser, login and desktop screens and signs in through emulated PS/2
+keyboard events. Screenshots and logs are saved under `build/startup-uefi/`
+and `build/startup-bios/`.
 
 The boot chooser and graphical login explicitly present their completed back
 buffer before waiting for input. If a saved display mode is rejected, ExpOS

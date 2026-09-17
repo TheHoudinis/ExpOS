@@ -3,8 +3,8 @@
 ; GRUB (Multiboot2) enters here in 32-bit protected mode with paging
 ; disabled. This stub:
 ;   1. verifies the CPU supports 64-bit long mode
-;   2. builds identity-mapped page tables covering the first 1 GiB and the
-;      fourth-GiB PCI/MMIO window (2 MiB huge pages)
+;   2. builds identity-mapped page tables covering RAM and PCI/MMIO below
+;      4 GiB (2 MiB huge pages)
 ;   3. enables PAE + LME + paging, loads a 64-bit GDT, far-jumps
 ;      into long mode
 ;   4. hands control to the Rust kernel: kernel_main(magic, mbi_phys)
@@ -33,7 +33,7 @@ header_start:
 header_end:
 
 ; ---------------------------------------------------------------------------
-; Page tables (identity map of RAM below 1 GiB plus PCI/MMIO in the fourth GiB)
+; Page tables (identity map below 4 GiB, including firmware-assigned PCI BARs)
 ; ---------------------------------------------------------------------------
 section .bss
 align 4096
@@ -42,9 +42,7 @@ pml4_table:
 pdpt_table:
         resb 4096
 pd_table:
-        resb 4096
-pd_high_table:
-        resb 4096
+        resb 4096 * 4
 
 align 16
 stack_bottom:
@@ -117,20 +115,20 @@ _start:
         or  eax, 0b11
         mov [pml4_table], eax
 
-        ; pdpt[0] -> pd | PRESENT | WRITE
-        mov eax, pd_table
-        or  eax, 0b11
-        mov [pdpt_table], eax
+        ; Firmware chooses the VGA BAR: SeaBIOS commonly uses 0xFD000000,
+        ; OVMF 0x80000000. Map all four directories before accessing it.
+        xor ecx, ecx
+.fill_pdpt:
+        mov eax, ecx
+        shl eax, 12
+        add eax, pd_table
+        or eax, 0b11
+        mov [pdpt_table + ecx*8], eax
+        inc ecx
+        cmp ecx, 4
+        jne .fill_pdpt
 
-        ; pdpt[3] -> high identity map for 0xC0000000..0xFFFFFFFF.
-        ; QEMU standard VGA maps its 16 MiB linear framebuffer BAR at
-        ; 0xFD000000. A 1920x1080x32 scanout consumes 8,294,400 bytes and
-        ; therefore ends at 0xFD7E8FFF, well within this high mapping.
-        mov eax, pd_high_table
-        or  eax, 0b11
-        mov [pdpt_table + 3*8], eax
-
-        ; pd[i] = i * 2MiB | PRESENT | WRITE | HUGE  (512 entries = 1 GiB)
+        ; pd[i] = i * 2MiB | PRESENT | WRITE | HUGE (2048 entries = 4 GiB)
         xor ecx, ecx
 .fill_pd:
         mov eax, 0x200000               ; 2 MiB
@@ -138,20 +136,8 @@ _start:
         or  eax, 0b10000011             ; P | RW | PS
         mov [pd_table + ecx*8], eax
         inc ecx
-        cmp ecx, 512
+        cmp ecx, 2048
         jne .fill_pd
-
-        ; Map the fourth GiB with 2 MiB pages for PCI MMIO/framebuffer access.
-        xor ecx, ecx
-.fill_pd_high:
-        mov eax, ecx
-        shl eax, 21
-        add eax, 0xC0000000
-        or  eax, 0b10000011
-        mov [pd_high_table + ecx*8], eax
-        inc ecx
-        cmp ecx, 512
-        jne .fill_pd_high
 
         ; ---- enter long mode -------------------------------------------
         mov eax, pml4_table
@@ -224,22 +210,24 @@ _uefi_start:
         mov rax, pdpt_table
         or rax, 3
         mov [pml4_table], rax
-        mov rax, pd_table
+        xor ecx, ecx
+.native_pdpt:
+        mov rax, rcx
+        shl rax, 12
+        add rax, pd_table
         or rax, 3
-        mov [pdpt_table], rax
-        mov rax, pd_high_table
-        or rax, 3
-        mov [pdpt_table + 3*8], rax
+        mov [pdpt_table + rcx*8], rax
+        inc ecx
+        cmp ecx, 4
+        jne .native_pdpt
         xor ecx, ecx
 .native_map:
         mov rax, rcx
         shl rax, 21
         or rax, 0x83
         mov [pd_table + rcx*8], rax
-        add eax, 0xC0000000
-        mov [pd_high_table + rcx*8], rax
         inc ecx
-        cmp ecx, 512
+        cmp ecx, 2048
         jne .native_map
         mov rax, pml4_table
         mov cr3, rax

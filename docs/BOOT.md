@@ -4,7 +4,8 @@
 contains the native kernel ELF payload, validates its bounds and non-overlapping
 load segments, reserves its memory at 32 MiB, obtains the firmware memory map,
 and exits boot services before entering ExpOS. The native entry establishes an
-owned stack, GDT and identity mappings. It does not invoke GRUB or Multiboot.
+owned stack, GDT and identity mappings below 4 GiB, including firmware-assigned
+PCI framebuffer addresses. It does not invoke GRUB or Multiboot.
 `make run` selects this native path. `make run-bios` retains BIOS as a separate
 fallback while the final boot-support policy is pending.
 
@@ -12,6 +13,7 @@ fallback while the final boot-support policy is pending.
 make run-uefi      # boot with OVMF and the existing runtime state image
 make uefi-check    # firmware handoff, login and shutdown
 make bootmode-check # reject Guest in single-user, test service restrictions
+make startup-check # capture visible UEFI/BIOS screens and exercise PS/2 login
 ```
 
 Build dependencies include Clang, GNU PE-capable ld, NASM, GCC, Rust, Make,
@@ -33,7 +35,9 @@ It is an implementation interface, not a finalized CFC disk or encryption
 format. The allocator currently uses its reserved kernel heap; it does not yet
 consume arbitrary conventional memory from the firmware map. GOP information
 is recorded, but the desktop still needs the existing Bochs/QEMU framebuffer
-driver. Hardware drivers, interrupts and memory isolation retain their current
+driver. The driver discovers its PCI BAR and checks the mapped address and
+reported video memory before drawing; it does not assume the BIOS BAR address.
+Hardware drivers, interrupts and memory isolation retain their current
 limitations. This build is unsigned and does not implement Secure Boot.
 
 The development chooser and development accounts are not the Genesis Basic

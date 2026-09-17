@@ -26,7 +26,7 @@ firmware / GRUB (temporary)
 
 1. The loader validates long-mode support and enters an identity-mapped x86_64
    kernel with a 1 MiB bootstrap stack.
-2. The kernel validates Multiboot2, initializes polling serial and VGA output,
+2. The kernel validates the native UEFI or Multiboot2 handoff, initializes polling serial and VGA output,
    and invokes `expos_core::bootstrap_demo`.
 3. The demo creates a Root Form and Stable Dimension with independent FINs.
 4. A binding makes the Root Form visible in Stable at revision 1.
@@ -104,8 +104,9 @@ firmware / GRUB (temporary)
   configure, frame-complete, key and pointer events are routed back to the
   owning FIN. The software renderer can program 640x480, 1280x720 or 1920x1080 XRGB
   scanout in QEMU standard VGA's 16 MiB linear framebuffer BAR. The bootstrap
-  maps the entire fourth-GiB PCI window, and ExpDisplay checks the selected
-  geometry, stride and double-buffer byte count against the aperture before the
+  maps RAM and PCI windows below 4 GiB. ExpDisplay discovers the firmware-assigned
+  VGA BAR and checks its mapped bounds and the selected geometry, stride and
+  double-buffer byte count against the reported video memory before the
   first framebuffer write. When the adapter accepts a virtual height of twice
   the visible height, rendering targets the hidden page and presentation flips
   the VBE Y offset. Every flip is read back from hardware; if the adapter

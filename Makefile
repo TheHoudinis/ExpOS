@@ -14,7 +14,7 @@ OVMF_VARS  ?= /usr/share/edk2/x64/OVMF_VARS.4m.fd
 
 .PHONY: all iso test check display-check session-check network-check internet-check https-check search-check persistence-check run debug clean legacy-alpha-check run-alpha ayo go-sdk kernel-build
 
-all: test check display-check session-check network-check persistence-check ayo go-sdk python-sdk python-runtime-check python-check budget-check uefi-check bootmode-check
+all: test check display-check session-check network-check persistence-check ayo go-sdk python-sdk python-runtime-check python-check budget-check uefi-check bootmode-check startup-check
 
 test:
 	cargo test --workspace
@@ -56,12 +56,17 @@ $(UEFI_APP): $(BUILD)/uefi-loader.obj $(BUILD)/uefi-payload.obj
 	mkdir -p $(dir $@)
 	ld -mi386pep --subsystem 10 --entry efi_main --image-base 0 --enable-reloc-section -o $@ $^
 
-.PHONY: uefi run-uefi uefi-check bootmode-check
+.PHONY: uefi run-uefi uefi-check bootmode-check startup-check
 uefi: $(UEFI_APP)
 
 run-uefi: $(UEFI_APP) $(STATE_IMG)
 	cp $(OVMF_VARS) $(BUILD)/OVMF-run-vars.fd
 	$(QEMU) -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) -drive if=pflash,format=raw,file=$(BUILD)/OVMF-run-vars.fd -drive file=$(STATE_IMG),format=raw,if=ide,index=0 -drive file=fat:rw:$(UEFI_DIR),format=raw,if=ide,index=1 -serial stdio -no-reboot
+
+startup-check: $(ISO) $(UEFI_APP)
+	OVMF_CODE=$(OVMF_CODE) OVMF_VARS=$(OVMF_VARS) python3 tests/check-startup.py uefi
+	python3 tests/check-startup.py bios
+	@echo ">>> EXPOS VISIBLE STARTUP TESTS PASSED <<<"
 
 uefi-check: $(UEFI_APP)
 	cp $(OVMF_VARS) $(BUILD)/OVMF-uefi-vars.fd

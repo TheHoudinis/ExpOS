@@ -1,5 +1,5 @@
 use crate::port;
-use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 /// Maximum scanout geometry supported by the mapped Bochs/QEMU framebuffer.
 ///
@@ -15,15 +15,14 @@ pub const BYTES_PER_PIXEL: usize = BITS_PER_PIXEL / 8;
 pub const STRIDE_BYTES: usize = WIDTH * BYTES_PER_PIXEL;
 pub const SCANOUT_BYTES: usize = STRIDE_BYTES * HEIGHT;
 
-// QEMU's standard VGA device exposes a 16 MiB prefetchable BAR0 at this
-// address in the i440FX machine used by the Makefile. The bootstrap maps the
-// complete 0xC000_0000..=0xFFFF_FFFF PCI/MMIO window, so the 7.91 MiB 1080p
-// scanout is both inside the BAR aperture and inside the identity map.
-pub const LFB_PHYSICAL_ADDRESS: usize = 0xFD00_0000;
+// Maximum VRAM used by this driver. The physical aperture is discovered from
+// the supported adapter's PCI BAR0: OVMF and SeaBIOS assign different addresses.
+// The bootstrap identity-maps the lower 4 GiB, including both placements.
 pub const LFB_APERTURE_BYTES: usize = 16 * 1024 * 1024;
 const _: () = assert!(SCANOUT_BYTES <= LFB_APERTURE_BYTES);
 
-const LFB: usize = LFB_PHYSICAL_ADDRESS;
+static LFB_ADDRESS: AtomicUsize = AtomicUsize::new(0);
+static LFB_DEVICE_BYTES: AtomicUsize = AtomicUsize::new(0);
 const VBE_INDEX: u16 = 0x01CE;
 const VBE_DATA: u16 = 0x01CF;
 
@@ -36,6 +35,7 @@ const INDEX_VIRT_WIDTH: u16 = 6;
 const INDEX_VIRT_HEIGHT: u16 = 7;
 const INDEX_X_OFFSET: u16 = 8;
 const INDEX_Y_OFFSET: u16 = 9;
+const INDEX_VIDEO_MEMORY_64K: u16 = 10;
 const DISABLED: u16 = 0;
 const ENABLED: u16 = 0x01;
 const LFB_ENABLED: u16 = 0x40;
@@ -562,6 +562,102 @@ pub fn available() -> bool {
     (0xB0C0..=0xB0C5).contains(&id)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FramebufferAperture {
+    address: usize,
+    bytes: usize,
+}
+
+/// Decode the memory BAR of a supported VGA adapter without probing or moving
+/// a live PCI resource. QEMU/Bochs reports its VRAM size in VBE register 10.
+fn decode_aperture(bar_low: u32, bar_high: u32, memory_64k: u16) -> Option<FramebufferAperture> {
+    if bar_low & 1 != 0 || memory_64k == 0 || memory_64k == u16::MAX {
+        return None;
+    }
+    let address = match (bar_low >> 1) & 3 {
+        0 => (bar_low & !0xF) as u64,
+        2 => ((bar_high as u64) << 32) | (bar_low & !0xF) as u64,
+        // Below-1-MiB and reserved encodings cannot describe our aperture.
+        _ => return None,
+    };
+    let bytes = (memory_64k as u64) << 16;
+    // This driver supports PCI MMIO above the kernel's low 1-GiB RAM window.
+    // BAR alignment and size must agree, and the entire device must be mapped.
+    if !bytes.is_power_of_two()
+        || address < 0x4000_0000
+        || !address.is_multiple_of(bytes)
+        || address.checked_add(bytes)? > 0x1_0000_0000
+    {
+        return None;
+    }
+    Some(FramebufferAperture {
+        address: address as usize,
+        bytes: bytes as usize,
+    })
+}
+
+fn pci_read(bus: u8, slot: u8, function: u8, offset: u8) -> u32 {
+    let address = 0x8000_0000
+        | ((bus as u32) << 16)
+        | ((slot as u32) << 11)
+        | ((function as u32) << 8)
+        | (offset as u32 & 0xFC);
+    unsafe {
+        port::outl(0xCF8, address);
+        port::inl(0xCFC)
+    }
+}
+
+fn discover_aperture() -> bool {
+    if LFB_ADDRESS.load(Ordering::Acquire) != 0 {
+        return true;
+    }
+    for bus in 0..=u8::MAX {
+        for slot in 0..32 {
+            if pci_read(bus, slot, 0, 0) as u16 == 0xFFFF {
+                continue;
+            }
+            let functions = if pci_read(bus, slot, 0, 0x0C) & 0x0080_0000 != 0 {
+                8
+            } else {
+                1
+            };
+            for function in 0..functions {
+                // Standard QEMU/Bochs VGA only. A VBE-compatible register ID
+                // by itself does not establish which PCI device owns VRAM.
+                if pci_read(bus, slot, function, 0) != 0x1111_1234
+                    || pci_read(bus, slot, function, 0x08) >> 16 != 0x0300
+                    || pci_read(bus, slot, function, 0x04) & 2 == 0
+                {
+                    continue;
+                }
+                let Some(aperture) = decode_aperture(
+                    pci_read(bus, slot, function, 0x10),
+                    pci_read(bus, slot, function, 0x14),
+                    read(INDEX_VIDEO_MEMORY_64K),
+                ) else {
+                    continue;
+                };
+                LFB_DEVICE_BYTES.store(aperture.bytes, Ordering::Relaxed);
+                LFB_ADDRESS.store(aperture.address, Ordering::Release);
+                crate::slog!(
+                    "EXPOS_FRAMEBUFFER_READY source=pci-bar0 bus={} slot={} function={} address={:#x} bytes={}\r\n",
+                    bus, slot, function, aperture.address, aperture.bytes
+                );
+                return true;
+            }
+        }
+    }
+    crate::slog!("EXPOS_FRAMEBUFFER_UNAVAILABLE reason=no-safe-supported-pci-aperture\r\n");
+    false
+}
+
+fn framebuffer_pointer() -> Option<*mut u32> {
+    active_display_mode()?;
+    let address = LFB_ADDRESS.load(Ordering::Acquire);
+    (address != 0).then_some(address as *mut u32)
+}
+
 /// Select the mode that the next [`enter`] call will program.
 ///
 /// Requesting a mode while graphics are active does not silently invalidate
@@ -712,7 +808,12 @@ pub fn print_diagnostics() {
         presentation.copied_pixels,
         presentation.damage_collapses
     );
-    crate::println!("aperture: {} bytes", LFB_APERTURE_BYTES);
+    crate::println!(
+        "aperture: address={:#x} device={} bytes driver-limit={} bytes",
+        LFB_ADDRESS.load(Ordering::Acquire),
+        LFB_DEVICE_BYTES.load(Ordering::Acquire),
+        LFB_APERTURE_BYTES
+    );
 }
 
 fn program_mode(requested: DisplayMode) -> bool {
@@ -730,7 +831,11 @@ fn program_mode(requested: DisplayMode) -> bool {
     COPIED_DAMAGE_REGIONS.store(0, Ordering::Release);
     COPIED_DAMAGE_PIXELS.store(0, Ordering::Release);
     DAMAGE_COLLAPSES.store(0, Ordering::Release);
-    if !available() {
+    if !available() || !discover_aperture() {
+        return false;
+    }
+    let aperture_bytes = LFB_DEVICE_BYTES.load(Ordering::Acquire);
+    if requested.scanout_bytes() > aperture_bytes.min(LFB_APERTURE_BYTES) {
         return false;
     }
     let desired = requested.hardware_mode();
@@ -749,17 +854,7 @@ fn program_mode(requested: DisplayMode) -> bool {
     // visible height and virtual width determine every address we draw. Reject
     // any change in visible geometry, pixel format, or stride.
     let active = active_mode();
-    let configured = active.is_some_and(|mode| {
-        mode.width == desired.width
-            && mode.height == desired.height
-            && mode.bits_per_pixel == desired.bits_per_pixel
-            && mode.virtual_width == desired.virtual_width
-            && mode.virtual_height >= desired.height
-            && mode.stride_bytes() == requested.stride_bytes()
-            && mode.scanout_bytes() == requested.scanout_bytes()
-            && mode.scanout_bytes() <= LFB_APERTURE_BYTES
-            && mode.aperture_bytes() <= LFB_APERTURE_BYTES
-    });
+    let configured = active.is_some_and(|mode| mode_fits_aperture(requested, mode, aperture_bytes));
     if !configured {
         if let Some(mode) = active {
             crate::slog!(
@@ -787,7 +882,8 @@ fn program_mode(requested: DisplayMode) -> bool {
     }
 
     let mode = active.expect("configured mode must be readable");
-    let page_flip = mode.virtual_height as usize >= requested.height() * 2;
+    let page_flip = mode.virtual_height as usize >= requested.height() * 2
+        && requested.double_buffer_bytes() <= aperture_bytes.min(LFB_APERTURE_BYTES);
     ACTIVE_DISPLAY_MODE.store(requested.persisted(), Ordering::Release);
     PAGE_FLIP_AVAILABLE.store(page_flip, Ordering::Release);
     DRAW_Y.store(if page_flip { mode.height } else { 0 }, Ordering::Release);
@@ -807,6 +903,19 @@ fn program_mode(requested: DisplayMode) -> bool {
     );
     clear(color::BACKGROUND);
     true
+}
+
+fn mode_fits_aperture(requested: DisplayMode, mode: Mode, aperture_bytes: usize) -> bool {
+    let desired = requested.hardware_mode();
+    mode.width == desired.width
+        && mode.height == desired.height
+        && mode.bits_per_pixel == desired.bits_per_pixel
+        && mode.virtual_width == desired.virtual_width
+        && mode.virtual_height >= desired.height
+        && mode.stride_bytes() == requested.stride_bytes()
+        && mode.scanout_bytes() == requested.scanout_bytes()
+        && mode.scanout_bytes() <= aperture_bytes.min(LFB_APERTURE_BYTES)
+        && mode.aperture_bytes() <= aperture_bytes
 }
 
 pub fn exit() {
@@ -918,7 +1027,9 @@ pub fn present_damage(vsync: bool, damage: &[DamageRegion]) -> bool {
 }
 
 pub fn clear(value: u32) {
-    let pointer = LFB as *mut u32;
+    let Some(pointer) = framebuffer_pointer() else {
+        return;
+    };
     let pixels = scanout_bytes() / BYTES_PER_PIXEL;
     let page = draw_page_offset_pixels();
     // SAFETY: the validated scanout geometry keeps this complete draw page
@@ -928,26 +1039,35 @@ pub fn clear(value: u32) {
 }
 
 pub fn pixel(x: i32, y: i32, value: u32) {
+    let Some(pointer) = framebuffer_pointer() else {
+        return;
+    };
     let mode = current_mode();
     if x < 0 || y < 0 || x >= mode.width() as i32 || y >= mode.height() as i32 {
         return;
     }
     let stride_pixels = mode.stride_bytes() / BYTES_PER_PIXEL;
     let offset = draw_page_offset_pixels() + y as usize * stride_pixels + x as usize;
-    unsafe { core::ptr::write_volatile((LFB as *mut u32).add(offset), value) };
+    unsafe { core::ptr::write_volatile(pointer.add(offset), value) };
 }
 
 pub fn read_pixel(x: i32, y: i32) -> u32 {
+    let Some(pointer) = framebuffer_pointer() else {
+        return 0;
+    };
     let mode = current_mode();
     if x < 0 || y < 0 || x >= mode.width() as i32 || y >= mode.height() as i32 {
         return 0;
     }
     let stride_pixels = mode.stride_bytes() / BYTES_PER_PIXEL;
     let offset = draw_page_offset_pixels() + y as usize * stride_pixels + x as usize;
-    unsafe { core::ptr::read_volatile((LFB as *const u32).add(offset)) }
+    unsafe { core::ptr::read_volatile(pointer.add(offset)) }
 }
 
 pub fn rect(x: i32, y: i32, width: i32, height: i32, value: u32) {
+    let Some(pointer) = framebuffer_pointer() else {
+        return;
+    };
     let mode = current_mode();
     let mode_width = mode.width() as i32;
     let mode_height = mode.height() as i32;
@@ -959,7 +1079,6 @@ pub fn rect(x: i32, y: i32, width: i32, height: i32, value: u32) {
         return;
     };
     let stride_pixels = mode.stride_bytes() / BYTES_PER_PIXEL;
-    let pointer = LFB as *mut u32;
     let page = draw_page_offset_pixels();
 
     // A full-width rectangle is contiguous and can be emitted as one string
@@ -1039,10 +1158,12 @@ fn copy_damage(source_y: u16, target_y: u16, damage: &NormalizedDamage) {
 }
 
 fn copy_clipped_region(source_y: u16, target_y: u16, clipped: ClippedRegion) {
+    let Some(pointer) = framebuffer_pointer() else {
+        return;
+    };
     let stride_pixels = stride_bytes() / BYTES_PER_PIXEL;
     let source = source_y as usize * stride_pixels;
     let target = target_y as usize * stride_pixels;
-    let pointer = LFB as *mut u32;
 
     debug_assert_ne!(source_y, target_y);
     if clipped.left == 0 && clipped.right == stride_pixels {
@@ -1678,6 +1799,67 @@ fn lighten_row(row: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn firmware_assigned_vga_apertures_replace_the_old_fixed_address() {
+        for address in [0x8000_0000, 0xFD00_0000] {
+            assert_eq!(
+                decode_aperture(address | 8, 0, 256),
+                Some(FramebufferAperture {
+                    address: address as usize,
+                    bytes: 16 * 1024 * 1024,
+                })
+            );
+        }
+        // A 32-bit BAR must not interpret the next independent BAR as its
+        // upper address. A 64-bit BAR must include its actual upper dword.
+        assert_eq!(
+            decode_aperture(0x8000_0008, 0xFFFF_FFFF, 256),
+            decode_aperture(0x8000_000C, 0, 256)
+        );
+        assert_eq!(decode_aperture(0x8000_000C, 1, 256), None);
+    }
+
+    #[test]
+    fn unsafe_or_unmapped_vga_apertures_are_rejected() {
+        for (low, high, memory) in [
+            (0x8000_0001, 0, 256),      // I/O BAR
+            (0x8000_0002, 0, 256),      // below-1-MiB memory BAR
+            (0x8000_0006, 0, 256),      // reserved BAR encoding
+            (0, 0, 256),                // unassigned BAR
+            (0x2000_0008, 0, 256),      // low RAM window
+            (0x8000_1008, 0, 256),      // not aligned to the reported VRAM size
+            (0xFF00_0008, 0, 512),      // aperture crosses the 4-GiB mapping limit
+            (0x8000_0008, 0, 0),        // absent size register
+            (0x8000_0008, 0, u16::MAX), // unsupported size register
+            (0x8000_0008, 0, 255),      // impossible PCI aperture size
+        ] {
+            assert_eq!(decode_aperture(low, high, memory), None);
+        }
+        // An aperture ending exactly at 4 GiB stays completely mapped.
+        assert!(decode_aperture(0xFF00_0008, 0, 256).is_some());
+    }
+
+    #[test]
+    fn actual_vram_bounds_control_mode_acceptance() {
+        let requested = DisplayMode::P480;
+        let mut mode = requested.hardware_mode();
+        // The reported canvas can be taller than the two requested pages.
+        mode.virtual_height = 6553;
+        assert!(mode_fits_aperture(requested, mode, 16 * 1024 * 1024));
+        assert!(!mode_fits_aperture(requested, mode, 8 * 1024 * 1024));
+        mode.virtual_height = 6554;
+        assert!(!mode_fits_aperture(requested, mode, 16 * 1024 * 1024));
+        mode = requested.hardware_mode();
+        assert!(!mode_fits_aperture(requested, mode, 1024 * 1024));
+        mode.virtual_width = 800;
+        assert!(!mode_fits_aperture(requested, mode, 16 * 1024 * 1024));
+        assert!(mode_fits_aperture(
+            DisplayMode::P1080,
+            DisplayMode::P1080.hardware_mode(),
+            16 * 1024 * 1024
+        ));
+    }
 
     const FONT_FACES: [FontFace; 5] = [
         FontFace::System,
