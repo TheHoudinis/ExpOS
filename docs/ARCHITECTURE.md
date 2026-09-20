@@ -4,16 +4,19 @@ The rebuild is split into a small trusted semantic core and platform adapters.
 Host tests exercise the same `no_std` core that is linked into the kernel.
 
 ```text
-firmware / GRUB (temporary)
+native UEFI / BIOS compatibility fallback
           |
           v
   x86_64 bootstrap kernel
           |
           v
- FIN -> Form Registry -> Dimension Binding
+CfcFin -> CFC ownership/catalog (semantic core)
+          |
+          v
+ FIN -> Form Registry -> Dimension Binding (runtime integration partial)
           |                    |
           v                    v
-     Form Handle <--- capability decision
+ CFC-scoped Handle <--- capability decision
           |
           v
  PIMP specification -> DIESE resolution
@@ -21,6 +24,37 @@ firmware / GRUB (temporary)
           v
  ExpFS transaction + journal sequence
 ```
+
+## Approved target architecture (not yet complete)
+
+Genesis constructs a Central Finite Curve (CFC) as the complete ExpOS
+environment. Every CFC has its own typed FIN, a required nonempty name, and
+exactly one Primary Dimension. Forms, Dimensions, relationships,
+identity/policy records, capabilities, ExpFS state, keys, checkpoints, and
+storage extents have one exclusive CFC owner. Cross-CFC sharing is forbidden;
+an explicit transfer creates a new destination-owned entity.
+
+Each encrypted CFC has a random storage key. Argon2id derives a key-encryption
+key (KEK) from the Operator password to wrap and unlock that storage key; it
+does not use the password directly as the data key. Persistent state of an
+encrypted CFC requires AEAD. Every CFC retains eight rotating checkpoints plus
+a protected immutable installation baseline; encrypted CFC recovery state is
+authenticated by its storage protection. Normal writes, rotation, and restore
+may not replace that baseline. Exact AEAD choice, Argon2id parameters,
+key-envelope layout, nonce construction, checkpoint format, and
+crash-consistency protocol remain to be specified and implemented.
+
+The approved confinement/enforcement names are `ExpScope` for CFC/Dimension-
+aware confinement, `ExpSeal` for monotonic capability reduction, and
+`ExpBudget` for per-context resource enforcement. The semantic core now has a
+deny-by-default fixed reachability scope, a broker-lifetime root-handle
+issuance cutoff with strict attenuation, and fixed-capacity checked budgets.
+Complete address-space/execution confinement, enforcement at every
+driver/storage boundary, durable execution-context seals, and
+scheduler/resource-owner accounting have not landed. The
+official configurable-installer label is **Architect**; “expert” is only a
+legacy explanation. Native UEFI is the default boot path, while BIOS is
+retained for compatibility, recovery, and development.
 
 ## Implemented vertical slice
 
@@ -48,6 +82,18 @@ firmware / GRUB (temporary)
 10. A fixed-capacity kernel-control service exposes typed tunables, readiness
     watches and resource ledgers to the console. DIESE checks the session's
     revocable bootstrap Handle before every mutation.
+11. The semantic core models a CFC with a distinct `CfcFin`, required name,
+    non-replaceable Primary Dimension, seven optional secondary Dimensions,
+    sixteen owned Forms and thirty-two bindings. A four-CFC catalog rejects
+    every cross-CFC Form/Dimension FIN reuse, including cross-kind collisions.
+12. Capability brokers, Handles, and in-memory ExpFS transactions carry a CFC
+    identity. ExpScope, ExpSeal, and ExpBudget provide bounded, allocation-free
+    policy primitives; kernel integration remains partial.
+13. CFC-bound recovery metadata stores an installation-baseline descriptor
+    outside an up-to-eight-entry rotating checkpoint ring. Publication and
+    batch validation are atomic and restore selection is non-destructive. This
+    code does not capture, protect, encrypt, authenticate, persist, or restore
+    disk contents.
 
 ## Trust boundaries
 
@@ -55,11 +101,16 @@ firmware / GRUB (temporary)
   a Dimension binding.
 - Operator, Power and Guest are authority inputs to capability decisions; they
   are not Unix UID aliases.
-- Handles carry requester and target FINs, allowed operations, Dimension,
+- Handles carry owning CFC, requester and target FINs, allowed operations, Dimension,
   expiry and revocation state. No file descriptor abstraction appears in the
   core. A Handle can derive only narrower children: delegation cannot add an
   operation, extend expiry, or change target/Dimension, and revoking a parent
   recursively revokes its descendants.
+  ExpSeal can monotonically close ambient root-handle issuance for one
+  requester/Dimension during a broker's lifetime while allowing already issued
+  authority to be delegated only through strict attenuation checks. Complete
+  enforcement still requires a durable per-context broker/seal registry and
+  every privileged kernel boundary to consume these CFC-scoped Handles.
 - Relationships are typed, FIN-to-FIN and optionally Dimension-scoped; package
   dependencies use the same model instead of paths.
 - Ayo v3 maps verified registry metadata into Package Forms and materializes
@@ -75,7 +126,8 @@ firmware / GRUB (temporary)
   monotonic event sequences, configurable 1-16 dispatch batches and optional
   coalescing. Signal, one-shot/periodic timer and resource-denial filters are
   implemented. Missed periodic expirations accumulate rather than silently
-  disappearing. The rlimit-style ledger tracks event watches, IPC bytes,
+  disappearing. The ExpBudget ledger, derived from an rlimit-style concept,
+  tracks event watches, IPC bytes,
   scratch pages, Form operations and live Form content bytes; each record enforces
   `used <= soft <= hard <= ceiling`, charges against the soft limit, records
   denials and can raise resource-readiness events. Event watches use this ledger
@@ -89,7 +141,8 @@ firmware / GRUB (temporary)
   Handle removes mutation access.
   The tables fail closed at capacity and remain runtime-local. They are not a
   scheduler, an interrupt notification backend or a FreeBSD compatibility
-  subsystem.
+  subsystem. It now uses the ExpBudget name, but remains one runtime-local
+  command context rather than scheduler-wide per-Form enforcement.
 - ExpDisplay uses a Wayland-like ownership model without copying Wayland's
   Unix socket/file-descriptor ABI: clients own surfaces and Buffer Handles,
   mutate pending state, report surface-local damage, and publish atomically
@@ -219,6 +272,9 @@ firmware / GRUB (temporary)
   use the low-cost renderer policy. Fresh state remains 480p/60 Hz with effects,
   translucency, animations, cursor shadow and off-screen travel disabled. Form
   records, notes and PIMP revisions are outside this store and remain volatile.
+  This current CRC journal is plaintext and is not the approved per-CFC AEAD
+  store. It has neither an Argon2id-wrapped random storage key nor the target
+  eight-checkpoint ring and protected installation baseline.
 - Network is a Driver Form protected by requester-bound Network Handles and
   PIMP policy. Its current polling RTL8139 path implements Ethernet, ARP,
   static QEMU-user IPv4, ICMP echo, checksum-validated UDP, DNS A lookup, one
@@ -269,8 +325,9 @@ firmware / GRUB (temporary)
 
 The native UEFI path now loads the kernel directly, reserves its memory,
 passes firmware memory-map/GOP metadata, and exits boot services. The older
-GRUB/Multiboot2 path from expodOS remains a development fallback while final
-Genesis boot policy is pending; see `BOOT.md` for hardware limits.
+GRUB/Multiboot2 path from expodOS is intentionally retained as a BIOS
+compatibility, recovery, and development fallback. Native UEFI is the approved
+Genesis/default path; see `BOOT.md` for hardware limits.
 The `ayo` JSON store remains a
 host-development bridge that makes transactions inspectable. It serializes
 updates with a lock, pending journal, atomic rename and recovery snapshot, but

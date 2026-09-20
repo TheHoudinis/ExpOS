@@ -9,8 +9,8 @@ use crate::{
     network, radio, slog, state,
 };
 use expos_core::{
-    Authority, BrowserText, BufferFormat, BufferHandle, CapabilityBroker, DisplayServer, Document,
-    Fin, NodeKind, Operations, Rect, SurfaceRole, TextAlign,
+    Authority, BrowserText, BufferFormat, BufferHandle, CapabilityBroker, CfcFin, DisplayServer,
+    Document, Fin, NodeKind, Operations, Rect, SurfaceRole, TextAlign,
 };
 use framebuffer::color;
 
@@ -1477,6 +1477,7 @@ impl DesktopState {
         start_app: Option<AppKind>,
         session: crate::session::Session,
         allow_network: bool,
+        cfc: CfcFin,
     ) -> Self {
         let active = start_app.unwrap_or(AppKind::Terminal);
         let preferences = DesktopPreferences::from_persistent(state::preferences());
@@ -1486,7 +1487,7 @@ impl DesktopState {
         ));
         let frame_pacer = FramePacer::new(timing_config(preferences), crate::hardware::timestamp());
         let mut server = DisplayServer::new();
-        let mut broker = CapabilityBroker::new();
+        let mut broker = CapabilityBroker::new(cfc);
         let compositor_handle = broker
             .issue_for(
                 DISPLAY_FIN,
@@ -1573,6 +1574,18 @@ impl DesktopState {
             )
             .ok()
             .map(|handle| handle.id);
+
+        // Desktop application authority is complete at activation. ExpSeal
+        // closes later ambient/root issuance while preserving each existing
+        // Handle's normal narrow delegation and revocation behavior.
+        broker
+            .seal_context(DISPLAY_FIN, STABLE_FIN)
+            .expect("compositor ExpSeal");
+        for app in AppKind::ALL.iter().copied() {
+            broker
+                .seal_context(app.owner(), STABLE_FIN)
+                .expect("application ExpSeal");
+        }
 
         let launcher_surface = server
             .create_surface(
@@ -3646,8 +3659,8 @@ impl DesktopState {
     }
 }
 
-pub fn run(input: &mut Input, start_browser: bool, session: crate::session::Session) {
-    run_with_network(input, start_browser, session, true);
+pub fn run(input: &mut Input, start_browser: bool, session: crate::session::Session, cfc: CfcFin) {
+    run_with_network(input, start_browser, session, true, cfc);
 }
 
 pub fn run_with_network(
@@ -3655,6 +3668,7 @@ pub fn run_with_network(
     start_browser: bool,
     session: crate::session::Session,
     allow_network: bool,
+    cfc: CfcFin,
 ) {
     run_session(
         input,
@@ -3665,11 +3679,12 @@ pub fn run_with_network(
         },
         session,
         allow_network,
+        cfc,
     );
 }
 
-pub fn run_games(input: &mut Input, session: crate::session::Session) {
-    run_session(input, Some(AppKind::Games), session, false);
+pub fn run_games(input: &mut Input, session: crate::session::Session, cfc: CfcFin) {
+    run_session(input, Some(AppKind::Games), session, false, cfc);
 }
 
 fn run_session(
@@ -3677,6 +3692,7 @@ fn run_session(
     start_app: Option<AppKind>,
     session: crate::session::Session,
     allow_network: bool,
+    cfc: CfcFin,
 ) {
     let mouse_ready = input.enable_mouse();
     if !framebuffer::enter() {
@@ -3685,7 +3701,7 @@ fn run_session(
         return;
     }
 
-    let mut desktop = DesktopState::new(start_app, session, allow_network);
+    let mut desktop = DesktopState::new(start_app, session, allow_network, cfc);
     // Desktop construction can include capability setup and document parsing;
     // begin presentation timing only when the first frame is ready to draw.
     desktop

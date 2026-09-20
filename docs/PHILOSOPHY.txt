@@ -2,17 +2,31 @@ EXPOS — CORE PHILOSOPHY AND ARCHITECTURE
 Version: 7.2 Diamond II
 Status: Living architecture specification
 
+This file defines the normative target model. It does not by itself claim that
+the current kernel, disk format, scheduler, or Genesis UI implements every
+requirement; implementation status is tracked separately in ARCHITECTURE.md and
+FEATURE_COVERAGE.md.
+
 1. IDENTITY
 
 ExpOS is an experimental operating system designed around concepts that are not derived from POSIX, Unix, Linux, BSD, or GNU/Hurd. It is not intended to be a conventional Unix-like system with renamed files or a custom desktop.
 
 Its central model is:
 
+    A complete ExpOS environment is a Central Finite Curve (CFC).
     Functionality exists through Forms.
     Forms are identified by FINs.
     Forms operate and appear through Dimensions.
     PIMP specifies how Forms and subsystems should behave.
     DIESE evaluates and resolves those specifications.
+
+Every CFC has its own typed FIN, a required nonempty human-readable name, and
+exactly one Primary Dimension. The Primary Dimension is the default Dimension
+inside the CFC; it is not the whole system. Every Form, Dimension, relationship,
+capability, identity/policy record, storage extent, encryption key, and recovery
+checkpoint is owned by exactly one CFC. Cross-CFC sharing is forbidden. An
+explicit transfer creates a newly owned destination entity rather than attaching
+one entity to two CFCs.
 
 2. FORMS
 
@@ -37,6 +51,9 @@ A Form may contain or reference:
 3. FIN — FORM IDENTIFICATION NUMBER
 
 Every Form has a unique FIN. FIN is the authoritative and stable identity of a Form.
+CFCs also have typed FINs in a distinct identity domain so a CFC FIN cannot be
+mistaken for a Form or Dimension FIN. The exact binary encoding and allocation
+scheme remain implementation specifications.
 
 Names are human-readable and may be duplicated:
 
@@ -63,7 +80,8 @@ A Dimension may affect:
     isolation
     policy
 
-A Form may appear in multiple Dimensions while retaining one FIN.
+A Form may appear in multiple Dimensions of its owning CFC while retaining one
+FIN. It may never appear in a Dimension owned by another CFC.
 
 Example:
 
@@ -84,6 +102,9 @@ Example:
         isolation=enabled
 
 A Dimension is not automatically a security boundary. Security behavior must be explicit.
+Each CFC has exactly one Dimension designated Primary. Additional Dimensions
+cannot acquire that designation, and a CFC without its Primary Dimension is not
+a valid bootable CFC.
 
 5. EXPFS
 
@@ -107,6 +128,20 @@ ExpFS may persist:
 ExpFS may internally use sectors, blocks, indexes, trees, journals, caches, checksums, and snapshots. These are implementation mechanisms, not necessarily user-facing abstractions.
 
 ExpFS should behave more like a persistent Form graph and structured system store than a traditional hierarchy of paths.
+
+Each encrypted CFC has an independently generated random storage key. An
+Operator password is processed by Argon2id to derive a key-encryption key (KEK), which wraps and
+unlocks that storage key; the password is not used directly as the data key.
+Persistent CFC state requires authenticated encryption (AEAD). Even if an
+Architect installation uses the same entered password for more than one CFC,
+each CFC keeps a distinct storage key, salt/key envelope, and AEAD domain.
+
+ExpFS recovery retains eight rotating checkpoints per CFC plus a protected
+immutable installation baseline. Encrypted-CFC recovery state is authenticated
+by its storage protection. Normal commits, rotation, and restores cannot
+overwrite that baseline. Exact AEAD selection, Argon2id parameters,
+key-envelope/nonce format, checkpoint encoding, and crash-consistent rotation
+are intentionally left to a dedicated storage specification.
 
 6. FORM RESOLUTION
 
@@ -153,6 +188,7 @@ Authorized interaction may return a Form Handle rather than a Unix file descript
 
 A Form Handle may specify:
 
+    owning CFC FIN
     target FIN
     allowed operations
     Dimension scope
@@ -160,6 +196,23 @@ A Form Handle may specify:
     revocation state
 
 Capabilities should be explicit, narrow, and revocable where practical.
+
+The approved enforcement vocabulary is:
+
+    ExpScope
+        CFC/Dimension-aware confinement for visibility, execution, and effects.
+
+    ExpSeal
+        Monotonic capability reduction: delegation may only narrow authority,
+        operations, targets, lifetime, or scope and may never cross a CFC.
+
+    ExpBudget
+        Per-context accounting and enforcement of finite resources.
+
+These are architectural requirements, not aliases for incomplete isolation.
+ExpScope must reach execution and service boundaries, ExpSeal must be enforced
+at every privileged interaction, and ExpBudget must be tied to real execution
+contexts and resource owners before end-to-end enforcement can be claimed.
 
 8. DELETION AND RECOVERY
 
@@ -190,7 +243,7 @@ The Form runtime cannot exist before the minimum kernel environment exists.
 
 Conceptual boot sequence:
 
-    Firmware
+    Firmware (native UEFI by default; BIOS compatibility fallback)
         ->
     Exp Bootloader
         ->
@@ -203,6 +256,8 @@ Conceptual boot sequence:
     interrupts and exceptions
         ->
     scheduler
+        ->
+    CFC selection and, when encrypted, storage-key unlock
         ->
     ExpFS initialization
         ->
@@ -221,6 +276,10 @@ Conceptual boot sequence:
 The kernel core makes Forms possible.
 The Form runtime manages Forms.
 Forms construct most of the operating environment.
+
+Native UEFI is the primary Genesis and normal boot architecture. BIOS/legacy
+boot remains supported as a compatibility, recovery, and development fallback;
+it does not define the CFC model.
 
 10. PIMP — PERSONAL INTERACTIONS MANAGER PANEL
 
@@ -610,6 +669,10 @@ The kernel must eventually provide:
     synchronization
     persistent-state coordination
     essential PIMP/DIESE integration
+    ExpScope confinement
+    ExpSeal capability reduction at every privileged boundary
+    ExpBudget enforcement per execution context
+    per-CFC AEAD persistence and recovery-key coordination
 
 The kernel architecture may be monolithic, modular, microkernel-based, hybrid, or novel. The choice must follow ExpOS semantics rather than copying another operating system.
 
@@ -629,7 +692,7 @@ Compatibility layers may exist later, but they must not define the core architec
 15. DEVELOPMENT STRATEGY
 
 Phase 1:
-    UEFI boot
+    native UEFI boot, with BIOS compatibility/recovery fallback
     serial output
     CPU initialization
     memory management
@@ -642,6 +705,8 @@ Phase 2:
     kernel messaging
 
 Phase 3:
+    CFC structure and typed CFC FIN
+    required CFC name and Primary Dimension invariant
     Form structure
     FIN generation
     in-memory Form registry
@@ -656,6 +721,9 @@ Phase 4:
 
 Phase 5:
     ExpFS integration
+    per-CFC random storage key and Argon2id key wrapping
+    authenticated encryption
+    eight rotating checkpoints and protected installation baseline
     persistent Forms
     FIN indexes
     revisions
@@ -666,6 +734,11 @@ Phase 6:
     Form Handles
     access checks
     revocation
+    ExpSeal monotonic reduction
+
+Phase 6A:
+    ExpScope confinement integration
+    ExpBudget per-context enforcement
 
 Phase 7:
     PIMP grammar
@@ -684,12 +757,16 @@ Phase 8:
 
 ExpOS is a Form-native, Dimension-oriented operating-system architecture.
 
+CFCs are complete, exclusively owned operating environments with typed identity.
 Forms are functional entities.
 FINs provide stable identity.
 Dimensions provide context.
 ExpFS persists the system model.
 Capabilities govern access.
 Form Handles represent authorized interaction.
+ExpScope confines execution and effects.
+ExpSeal ensures authority can only decrease through delegation.
+ExpBudget enforces finite resources per context.
 PIMP specifies desired behavior and policy.
 DIESE evaluates and resolves those specifications.
 The kernel provides the trusted substrate that makes the model executable.

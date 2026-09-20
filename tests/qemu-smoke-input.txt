@@ -29,14 +29,14 @@ mem
 sysctl kern.event.batch
 sysctl kern.event.batch=8
 kqueue add signal 7
-rlimit release event-watches 1
+expbudget release event-watches 1
 kqueue signal 7 42
 kqueue poll
 kqueue add resource scratch-pages
-rlimit set scratch-pages 2 4
-rlimit charge scratch-pages 3
+expbudget set scratch-pages 2 4
+expbudget charge scratch-pages 3
 kqueue poll
-rlimit list
+expbudget list
 displaydiag
 stateinfo
 diag

@@ -9,8 +9,15 @@ ExpOS is the Form-native operating system described by
 - ExpPython, a bounded embedded MicroPython interpreter, plus a host Python SDK;
 - FIN identity, Dimensions, PIMP/DIESE policy, capability-scoped Form Handles,
   typed relationships and transactional ExpFS metadata;
+- a bounded semantic CFC core with a distinct `CfcFin`, required name and
+  non-replaceable Primary Dimension, exclusive cross-CFC identity ownership,
+  CFC-owned ExpFS transactions/Handles, and CFC-bound metadata for an
+  up-to-eight-checkpoint ring plus a separate installation-baseline descriptor;
+- core ExpScope deny-by-default reachability, broker-lifetime ExpSeal
+  root-handle cutoff with strictly attenuated delegation, and fixed-capacity
+  ExpBudget accounting;
 - bounded Form-native kernel controls: typed tunables, signal/timer/resource
-  readiness watches, and session-local resource accounting with DIESE-gated
+  readiness watches, and shell-runtime-local resource accounting with DIESE-gated
   mutation;
 - ExpDisplay, a runtime-selectable 640x480, 1280x720 or 1920x1080 software
   compositor with Form-owned surfaces, atomic commits, presentation-complete
@@ -36,6 +43,39 @@ ExpOS is the Form-native operating system described by
   non-JavaScript HTML endpoint from the address bar;
 - graphical and console login for Operator, Power and Guest authority;
 - dedicated ATA PIO persistent state for accounts and desktop preferences.
+
+## Approved Genesis target
+
+The architecture now defines every Central Finite Curve (CFC) as an exclusively
+owned ExpOS environment with its own typed FIN, required nonempty name, and
+exactly one Primary Dimension. Forms, data, Dimensions, relationships,
+capabilities, identities/policy, storage extents, keys, and checkpoints cannot
+be shared across CFCs; an explicit transfer creates a new destination-owned
+entity.
+
+Each encrypted CFC receives an independent random storage key. Argon2id derives
+a key-encryption key (KEK) from the Operator password to wrap and unlock that
+storage key, and persistent CFC state uses authenticated encryption (AEAD).
+Recovery retains eight rotating checkpoints plus a protected immutable
+installation baseline per CFC. Exact AEAD selection, Argon2id parameters,
+key-envelope/nonce layout, checkpoint encoding, and crash-consistent rotation
+remain implementation work.
+
+Native UEFI is the default Genesis and normal boot path; BIOS remains a
+compatibility, recovery, and development fallback. **Architect** is the official
+name of the configurable installation path (“expert” is only a legacy
+explanation). The approved enforcement model names are **ExpScope** for
+CFC/Dimension-aware confinement, **ExpSeal** for monotonic capability reduction,
+and **ExpBudget** for per-context resource enforcement.
+
+These are approved target invariants, not claims about the current image. The
+bounded `Cfc`/`CfcCatalog` model enforces exclusive ownership of registered
+Form and Dimension FINs. ExpScope snapshots that ownership, recovery artifacts
+and ExpFS records are CFC-bound, and Handles carry a CFC identity. The general
+Form/relationship registries and privileged runtime boundaries are not yet
+fully CFC-integrated. Genesis construction, native disk capture/restore,
+Argon2id key wrapping, AEAD storage, process/address-space confinement, and
+scheduler-wide budget enforcement also remain implementation work.
 
 The 32-bit Diamond II source remains isolated under `legacy/alpha32/` as a
 buildable migration reference.
@@ -77,8 +117,8 @@ image is intentionally preserved by `make clean`; copy it to back up the
 current local state.
 
 The default launch uses native UEFI with OVMF. `make run-bios` retains the
-previous GRUB image as a development fallback; removing legacy BIOS support
-awaits the final Genesis boot-policy decision.
+previous GRUB image as the approved BIOS compatibility, recovery, and
+development fallback. Native UEFI remains the primary architecture.
 
 ExpOS discovers the framebuffer's PCI address assigned by firmware, so both
 OVMF and SeaBIOS draw to the actual video memory. `make startup-check` captures
@@ -112,6 +152,9 @@ Accounts and password changes persist when the state image is available.
 Passwords are never stored as plaintext or reversible ciphertext: ExpOS stores
 a per-account salt and a PBKDF2-HMAC-SHA256 verifier with 25,000 rounds.
 Password arguments are masked while typed and omitted from shell history.
+This describes the current account-login verifier only. It is distinct from the
+approved future Argon2id KEK used to wrap a random per-CFC storage key; the
+current state image is not storage-encrypted.
 
 ## Desktop
 
@@ -276,7 +319,7 @@ original Form-native implementations: they do not copy FreeBSD code or expose
 its ABI. `sysctl` reads typed named nodes and lets an Operator change the three
 validated writable event controls. `kqueue`/`kevent` registers fixed-capacity
 signal, timer and resource watches, then returns sequenced readiness records.
-`rlimit` accounts event watches, IPC bytes, scratch pages, Form operations and live Form content bytes
+`expbudget` accounts event watches, IPC bytes, scratch pages, Form operations and live Form content bytes
 against validated soft/hard/ceiling tuples. Event-watch accounting is wired to
 the queue. Form mutation attempts and live content bytes are enforced by the
 shell; rejected growth leaves the original content intact. IPC bytes and
@@ -293,23 +336,27 @@ kqueue signal 7 42
 kqueue poll
 kqueue add timer 9 1000 1000
 kqueue add resource scratch-pages
-rlimit list
-rlimit set scratch-pages 2 64
-rlimit charge scratch-pages 3
+expbudget list
+expbudget set scratch-pages 2 64
+expbudget charge scratch-pages 3
 kqueue poll
-rlimit charge scratch-pages 2
-rlimit release scratch-pages 2
+expbudget charge scratch-pages 2
+expbudget release scratch-pages 2
 ```
 
 The watch and ready rings each hold at most 16 entries, dispatch batch size is
 bounded to 1-16, duplicate watches are rejected, and optional coalescing
 accumulates missed timer expirations. These controls are runtime diagnostics
 and accounting primitives, not FreeBSD compatibility, a preemptive scheduler,
-or persistent system configuration.
+or persistent system configuration. `budget` and `rlimit` remain compatibility
+aliases for `expbudget`.
 
 Accounts and Settings preferences are persisted through the dedicated state
 disk. General Form contents and PIMP changes remain in memory until native
-ExpFS block persistence is connected.
+ExpFS block persistence is connected. The current state disk alternates two
+plaintext CRC-protected slots; it is not the approved AEAD CFC store and does
+not yet provide eight rotating checkpoints or a protected installation
+baseline.
 
 ## Preserved implementation
 
@@ -338,4 +385,5 @@ The feature pass described above does not modify `legacy/alpha32/`.
 | `docs/FEATURE_COVERAGE.md` | implemented and missing features |
 | `legacy/alpha32/` | preserved Diamond II source |
 
-ASL is not implemented because its established specification was not supplied.
+ASL's high-level role is defined, but its exact interfaces, bootstrap ordering,
+and cross-architecture implementation remain unspecified and unimplemented.

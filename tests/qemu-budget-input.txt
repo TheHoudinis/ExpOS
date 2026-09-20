@@ -1,13 +1,13 @@
 2222
 operator
 expos
-rlimit set form-bytes 490 6144
+expbudget set form-bytes 490 6144
 mkform BudgetProof data
 write BudgetProof 1234
 append BudgetProof forbidden
 cat BudgetProof
-rlimit release form-bytes 4
-rlimit set form-operations 3 4
+expbudget release form-bytes 4
+expbudget set form-operations 3 4
 mkform MustNotExist data
 forms
 shutdown

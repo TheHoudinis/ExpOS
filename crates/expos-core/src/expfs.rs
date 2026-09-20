@@ -1,4 +1,4 @@
-use crate::Fin;
+use crate::{Cfc, CfcFin, Fin};
 
 const MAX_RECORDS: usize = 32;
 const MAX_STAGED: usize = 8;
@@ -6,6 +6,7 @@ pub const FORM_CONTENT_CAPACITY: usize = 512;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PersistentForm {
+    pub cfc: CfcFin,
     pub form: Fin,
     pub dimension: Fin,
     pub revision: u32,
@@ -29,9 +30,13 @@ pub enum StorageError {
     DuplicateRecord,
     StaleRevision,
     SequenceExhausted,
+    WrongCfc,
+    UnownedForm,
+    UnownedDimension,
 }
 
 pub struct Transaction {
+    cfc: Cfc,
     records: [Option<PersistentForm>; MAX_STAGED],
 }
 
@@ -56,6 +61,12 @@ impl Transaction {
         if form.is_zero() || dimension.is_zero() || revision == 0 {
             return Err(StorageError::InvalidRecord);
         }
+        if !self.cfc.owns_form(form) {
+            return Err(StorageError::UnownedForm);
+        }
+        if !self.cfc.owns_dimension(dimension) {
+            return Err(StorageError::UnownedDimension);
+        }
         if bytes.len() > FORM_CONTENT_CAPACITY {
             return Err(StorageError::ContentTooLarge);
         }
@@ -75,6 +86,7 @@ impl Transaction {
         let mut content = [0; FORM_CONTENT_CAPACITY];
         content[..bytes.len()].copy_from_slice(bytes);
         *slot = Some(PersistentForm {
+            cfc: self.cfc.fin(),
             form,
             dimension,
             revision,
@@ -87,25 +99,39 @@ impl Transaction {
 }
 
 pub struct ExpFs {
+    /// Immutable ownership snapshot for this store. Staging checks the Form
+    /// and Dimension against this snapshot before a record can be created.
+    cfc: Cfc,
     records: [Option<PersistentForm>; MAX_RECORDS],
     next_sequence: u32,
 }
 
 impl ExpFs {
-    pub const fn new() -> Self {
+    pub fn new(cfc: &Cfc) -> Self {
+        cfc.validate().expect("ExpFS requires a valid CFC");
         Self {
+            cfc: *cfc,
             records: [None; MAX_RECORDS],
             next_sequence: 1,
         }
     }
+
+    pub const fn cfc(&self) -> CfcFin {
+        self.cfc.fin()
+    }
+
     pub const fn begin(&self) -> Transaction {
         Transaction {
+            cfc: self.cfc,
             records: [None; MAX_STAGED],
         }
     }
 
     /// Atomically validates capacity before publishing any staged record.
     pub fn commit(&mut self, transaction: Transaction) -> Result<u32, StorageError> {
+        if transaction.cfc != self.cfc {
+            return Err(StorageError::WrongCfc);
+        }
         let staged_count = transaction.records.iter().flatten().count();
         if staged_count == 0 {
             return Err(StorageError::EmptyTransaction);
@@ -148,19 +174,28 @@ impl ExpFs {
     }
 }
 
-impl Default for ExpFs {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn fin(value: u128) -> Fin {
+        Fin::from_u128(value)
+    }
+
+    fn cfc(value: u128) -> Cfc {
+        let mut cfc = Cfc::new(CfcFin::from_u128(value), "Test CFC", fin(2)).unwrap();
+        cfc.own_form(fin(1)).unwrap();
+        cfc.own_form(fin(3)).unwrap();
+        cfc
+    }
+
+    fn store() -> ExpFs {
+        ExpFs::new(&cfc(100))
+    }
+
     #[test]
     fn content_and_revision_publish_together_and_failed_batches_publish_nothing() {
-        let mut store = ExpFs::new();
+        let mut store = store();
         let form = Fin::from_u128(1);
         let dimension = Fin::from_u128(2);
         let other = Fin::from_u128(3);
@@ -190,7 +225,7 @@ mod tests {
 
     #[test]
     fn oversized_or_duplicate_content_is_rejected_without_truncation() {
-        let store = ExpFs::new();
+        let store = store();
         let mut tx = store.begin();
         let form = Fin::from_u128(1);
         let dimension = Fin::from_u128(2);
@@ -206,7 +241,7 @@ mod tests {
     }
     #[test]
     fn commits_share_one_journal_sequence() {
-        let mut store = ExpFs::new();
+        let mut store = store();
         let mut tx = store.begin();
         tx.stage_form(Fin::from_u128(1), Fin::from_u128(2), 1)
             .unwrap();
@@ -221,5 +256,34 @@ mod tests {
                 .journal_sequence,
             sequence
         );
+    }
+
+    #[test]
+    fn transactions_cannot_cross_cfc_boundaries() {
+        let source = ExpFs::new(&cfc(100));
+        let mut destination = ExpFs::new(&cfc(200));
+        let mut transaction = source.begin();
+        transaction
+            .stage_form(Fin::from_u128(1), Fin::from_u128(2), 1)
+            .unwrap();
+        assert_eq!(destination.commit(transaction), Err(StorageError::WrongCfc));
+        assert!(destination
+            .latest(Fin::from_u128(1), Fin::from_u128(2))
+            .is_none());
+    }
+
+    #[test]
+    fn staging_rejects_forms_and_dimensions_outside_the_cfc_snapshot() {
+        let store = store();
+        let mut transaction = store.begin();
+        assert_eq!(
+            transaction.stage_form(fin(99), fin(2), 1),
+            Err(StorageError::UnownedForm)
+        );
+        assert_eq!(
+            transaction.stage_form(fin(1), fin(99), 1),
+            Err(StorageError::UnownedDimension)
+        );
+        transaction.stage_form(fin(1), fin(2), 1).unwrap();
     }
 }

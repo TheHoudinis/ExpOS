@@ -116,9 +116,9 @@ check: $(ISO)
 	grep -q "signal 7 ready with data=42" $(BUILD)/serial.log
 	grep -Eq "[[:space:]]7[[:space:]]+signal[[:space:]]+42" $(BUILD)/serial.log
 	grep -q "watch added: resource 2" $(BUILD)/serial.log
-	grep -q "EXPOS_RLIMIT_CHANGED resource=scratch-pages soft=2 hard=4" $(BUILD)/serial.log
-	grep -q "rlimit: scratch-pages: resource soft limit reached" $(BUILD)/serial.log
-	grep -q "rlimit: event-watches: resource usage is managed by its owning subsystem" $(BUILD)/serial.log
+	grep -q "EXPOS_EXPBUDGET_CHANGED resource=scratch-pages soft=2 hard=4" $(BUILD)/serial.log
+	grep -q "expbudget: scratch-pages: resource soft limit reached" $(BUILD)/serial.log
+	grep -q "expbudget: event-watches: resource usage is managed by its owning subsystem" $(BUILD)/serial.log
 	grep -q "DIESE denied: register an event watch requires Execute capability" $(BUILD)/serial.log
 	grep -Eq "[[:space:]]2[[:space:]]+resource[[:space:]]+3" $(BUILD)/serial.log
 	grep -q "TSC frequency: .* Hz" $(BUILD)/serial.log

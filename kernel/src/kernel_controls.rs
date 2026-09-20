@@ -18,7 +18,7 @@ const NODE_EVENT_COALESCE: usize = 3;
 const NODE_EVENT_TRACE: usize = 4;
 const NODE_EVENT_DROPPED: usize = 5;
 const NODE_EVENT_COALESCED: usize = 6;
-const NODE_RLIMIT_DENIALS: usize = 7;
+const NODE_EXPBUDGET_DENIALS: usize = 7;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TunableValue {
@@ -135,7 +135,7 @@ impl TunableRegistry {
                 TunableNode::boolean("kern.event.trace", false),
                 TunableNode::read_only("kern.event.dropped", TunableValue::Unsigned(0)),
                 TunableNode::read_only("kern.event.coalesced", TunableValue::Unsigned(0)),
-                TunableNode::read_only("kern.rlimit.denials", TunableValue::Unsigned(0)),
+                TunableNode::read_only("kern.expbudget.denials", TunableValue::Unsigned(0)),
                 TunableNode::read_only(
                     "kern.event.capacity",
                     TunableValue::Unsigned(MAX_WATCHES as u64),
@@ -549,12 +549,15 @@ impl ResourceLimit {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ResourceLedger {
+/// Runtime-local ExpBudget enforcement for the current shell/CFC runtime. The
+/// scheduler migration will move this same checked accounting to every
+/// admitted Form context rather than keeping one shell-owned instance.
+pub struct ExpBudget {
     limits: [ResourceLimit; RESOURCE_COUNT],
     total_denials: u64,
 }
 
-impl ResourceLedger {
+impl ExpBudget {
     pub const fn new() -> Self {
         Self {
             limits: [
@@ -623,7 +626,7 @@ impl ResourceLedger {
     }
 }
 
-impl Default for ResourceLedger {
+impl Default for ExpBudget {
     fn default() -> Self {
         Self::new()
     }
@@ -633,7 +636,7 @@ impl Default for ResourceLedger {
 pub struct KernelControls {
     tunables: TunableRegistry,
     events: EventQueue,
-    resources: ResourceLedger,
+    resources: ExpBudget,
 }
 
 impl KernelControls {
@@ -641,7 +644,7 @@ impl KernelControls {
         Self {
             tunables: TunableRegistry::new(),
             events: EventQueue::new(),
-            resources: ResourceLedger::new(),
+            resources: ExpBudget::new(),
         }
     }
 
@@ -649,7 +652,7 @@ impl KernelControls {
         &self.tunables
     }
 
-    pub const fn resources(&self) -> &ResourceLedger {
+    pub const fn resources(&self) -> &ExpBudget {
         &self.resources
     }
 
@@ -774,7 +777,7 @@ impl KernelControls {
         self.tunables
             .set_counter(NODE_EVENT_COALESCED, stats.coalesced);
         self.tunables
-            .set_counter(NODE_RLIMIT_DENIALS, self.resources.total_denials());
+            .set_counter(NODE_EXPBUDGET_DENIALS, self.resources.total_denials());
     }
 }
 
@@ -977,7 +980,7 @@ mod tests {
         assert_eq!(
             controls
                 .tunables()
-                .get("kern.rlimit.denials")
+                .get("kern.expbudget.denials")
                 .unwrap()
                 .value,
             TunableValue::Unsigned(1)

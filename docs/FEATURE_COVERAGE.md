@@ -13,7 +13,7 @@ tested with `make persistence-check`; live authenticated HTTPS is tested with
 | Forms | `mkform`, `forms/list`, `inspect/fin`, exact `resolve`, `view/cat`, `write`, `append`, `head`, `copy`, `move`, `delete`, `recover`, `retire`, `activate`, guarded `reclaim`, `hexdump`, `du`, `df`, `shasum`, `which`; typed `relate`/`unrelate`/`relationships` |
 | Dimensions and policy | `dimensions`, `makedim`, `policy`, `pimp`, `journal` |
 | Capabilities | `grant`, `revoke`, `handles`, and `handlecheck` with requester-bound, scoped, expiring Form Handles; non-amplifying delegation; parent-linked revocation cascades; explicit Display and Input rights |
-| Kernel controls | Form-native, runtime-local `sysctl` typed tunables; `kqueue`/`kevent` fixed-capacity signal, one-shot/periodic timer and resource-denial watches with sequenced readiness, configurable dispatch batching and optional coalescing; `rlimit` accounting for event watches plus enforced Form mutation attempts and live Form content bytes, with explicit runtime-local IPC-byte and scratch-page reservations with validated soft/hard/ceiling tuples and denial counters/events; DIESE checks the revocable bootstrap Handle, reserves Configure for Operator, grants Execute mutation to Power/Operator and leaves Guest read-only; inspired by FreeBSD interface concepts without source or ABI compatibility |
+| Kernel controls | Form-native, runtime-local `sysctl` typed tunables; `kqueue`/`kevent` fixed-capacity signal, one-shot/periodic timer and resource-denial watches with sequenced readiness, configurable dispatch batching and optional coalescing; `expbudget` accounting (`budget` and legacy `rlimit` aliases) for event watches plus enforced Form mutation attempts and live Form content bytes, with explicit runtime-local IPC-byte and scratch-page reservations with validated soft/hard/ceiling tuples and denial counters/events; DIESE checks the revocable bootstrap Handle, reserves Configure for Operator, grants Execute mutation to Power/Operator and leaves Guest read-only; inspired by FreeBSD interface concepts without source or ABI compatibility |
 | Packages | `Ayo` boot Package Form and Go `ayo v3`; 21-package built-in Prism catalog; searchable TUI; offline/HTTPS catalogs and Ed25519 catalog signatures; SHA-256 artifact verification; raw/tar/tar.gz extraction; owned-file receipts and collision protection; atomic dependency install, uninstall, rollback and crash recovery; no package scripts or links |
 | Graphics | `ExpDisplay` Service Form; fresh-state 480p/60 Hz and Efficient-renderer defaults; runtime 640x480 (480p), 1280x720 (720p) and 1920x1080 (1080p) Bochs/QEMU XRGB scanout with XRGB8888, ARGB8888 and RGB565 client formats; two-page virtual framebuffer with explicit boot/login presentation, verified VBE Y-offset flips, bounded allocation-free damage clipping/coalescing and direct-front recovery when a flip is rejected; submitted/copied region and pixel, collapse and flip-failure counters; rejected modes automatically retry at 480p; selectable 60/75/120/144 Hz compositor targets, optional bounded-retrace VSync, frame/miss/timeout diagnostics; responsive flat dark desktop with compact menu and all-edge taskbar, no default or pinned apps, movable/minimizable/maximizable/closeable windows, configurable bounded off-screen travel and snapping, Notes and eleven surfaces; Form-owned pending surface state, atomic commit, coalesced presentation-bound `FrameDone`, configure/focus/key/pointer events, z-order and hit testing; bounded pure-motion input coalescing that preserves key/button edges; VGA text-mode restoration on exit; `desktop`, `displayinfo`, `displaydiag`, `safevideo/displayreset` |
 | Browser | Native `Browser` Interface Form; fixed-capacity HTML title/heading/paragraph/list/link/button parsing and graphical rendering; tag/class/id/inline CSS subset; deterministic document title/text/style/visibility and click-handler JavaScript subset; local `expos://` navigation plus capability-gated native `http://` and authenticated TLS 1.3 `https://` fetches over DNS/TCP/HTTP; plain address-bar text searches DuckDuckGo's canonical non-JavaScript HTML endpoint, follows at most three redirects without allowing an HTTPS-to-HTTP downgrade, and projects up to eight result titles and links; verified `www.youtube.com` HTML fetch is not video playback |
@@ -35,6 +35,39 @@ clean`. The customization extension is tagged inside the compatible 32-byte
 preference record; invalid IDs sanitize to conservative defaults. Fresh state
 still starts at 480p/60 Hz with Efficient presentation and expensive visual or
 interaction options disabled.
+
+## Approved architecture and landed semantic foundations
+
+The Genesis/CFC target is fixed even though its end-to-end native implementation
+has not landed:
+
+- every CFC has its own typed FIN, required nonempty name, and exactly one
+  Primary Dimension;
+- CFC ownership is exclusive: Forms, data, Dimensions, relationships,
+  capabilities, identities/policy, storage extents, keys, and checkpoints are
+  not shared across CFCs;
+- every encrypted CFC has an independent random storage key, wrapped/unlocked
+  by a key-encryption key derived from its Operator password with Argon2id;
+- persistent state of an encrypted CFC uses authenticated encryption (AEAD),
+  and every CFC retains eight rotating checkpoints plus a protected immutable
+  installation baseline;
+- native UEFI is the default Genesis/normal boot path, with BIOS retained for
+  compatibility, recovery, and development;
+- Architect is the official configurable-installation label; “expert” is only
+  a legacy explanation; and
+- ExpScope names CFC/Dimension-aware confinement, ExpSeal names monotonic
+  capability reduction, and ExpBudget names per-context resource enforcement.
+
+The `expos-core` model now provides a distinct `CfcFin`; a required name and
+non-replaceable Primary Dimension; fixed-capacity CFC ownership/catalog checks;
+CFC-owned ExpFS transactions; CFC-bound recovery descriptors with an
+up-to-eight-entry metadata ring and the baseline descriptor held outside
+rotation; immutable-ownership ExpScope reachability; a broker-lifetime ExpSeal
+root-issuance cutoff with strict attenuation; and fixed-capacity context-keyed
+ExpBudget accounting. These are tested semantic primitives, not a Genesis
+installer, encrypted block store, disk capture/restore engine,
+process/address-space sandbox, durable seal registry, or scheduler-wide
+resource controller.
 
 ## Runnable through Diamond II fallback
 
@@ -59,7 +92,11 @@ Dimension interfaces exist for them.
 Persistent accounts are fixed state records, not yet persistent Account Forms,
 and the PBKDF2 login path does not claim lockout, hardware-backed keys or a
 complete modern identity policy. Mouse wheel input and GPU acceleration are not
-implemented. The new native UEFI path and Operator-only single-user mode are QEMU-tested;
+implemented. The PBKDF2 account verifier is not the approved Argon2id storage-key
+wrapper. The current two-slot CRC state journal remains plaintext and has no CFC
+metadata, AEAD, eight-checkpoint ring, or protected installation baseline.
+The new native UEFI path, retained BIOS fallback, and Operator-only single-user
+mode are QEMU-tested;
 general persistent v8 ExpFS/Form I/O,
 preemptive v8 Form execution, DHCP, IPv6, physical Wi-Fi drivers, USB
 host/Bluetooth data transport, concurrent sockets and the Go execution-context
@@ -90,8 +127,9 @@ limited to 48 nodes, 32 CSS rules, 16 scripts, 24 statements per script and 12
 click handlers. It does not implement arbitrary ECMAScript, external resource
 loading, general Web APIs, cookies, storage, media containers/codecs,
 audio/video output or GPU acceleration. YouTube playback and a
-standards-complete web engine are not claimed. ASL remains intentionally
-unspecified.
+standards-complete web engine are not claimed. ASL's high-level role is defined,
+but its exact interfaces, bootstrap ordering, and cross-architecture
+implementation remain unspecified and unimplemented.
 
 ## Python and native firmware
 

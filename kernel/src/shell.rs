@@ -111,27 +111,11 @@ struct Shell {
 }
 
 impl Shell {
-    fn new(report: BootReport, session: Session) -> Self {
-        let mut forms = [None; MAX_FORMS];
-        forms[0] = Some(Form::new(report.root_fin, "Root", FormKind::Root));
-        forms[1] = Some(Form::new(AYO_FIN, "Ayo", FormKind::Package));
-        forms[2] = Some(Form::new(
-            crate::desktop::DISPLAY_FIN,
-            "ExpDisplay",
-            FormKind::Service,
-        ));
-        forms[3] = Some(Form::new(
-            crate::desktop::BROWSER_FIN,
-            "Browser",
-            FormKind::Interface,
-        ));
-        forms[4] = Some(Form::new(GO_ABI_FIN, "GoABI", FormKind::Interface));
-        let mut network_form = Form::new(crate::network::NETWORK_FIN, "Network", FormKind::Driver);
-        if !crate::network::available() {
-            network_form.lifecycle = Lifecycle::Recoverable;
-        }
-        forms[5] = Some(network_form);
-        let mut broker = CapabilityBroker::new();
+    fn session_capabilities(
+        report: BootReport,
+        session: Session,
+    ) -> (CapabilityBroker, [Option<FormHandle>; MAX_HANDLES]) {
+        let mut broker = CapabilityBroker::new(report.cfc_fin);
         let boot_operations = match session.authority() {
             Authority::Operator => Operations::READ
                 .union(Operations::EXECUTE)
@@ -163,6 +147,30 @@ impl Shell {
                 handles[1] = Some(network_handle);
             }
         }
+        (broker, handles)
+    }
+
+    fn new(report: BootReport, session: Session) -> Self {
+        let mut forms = [None; MAX_FORMS];
+        forms[0] = Some(Form::new(report.root_fin, "Root", FormKind::Root));
+        forms[1] = Some(Form::new(AYO_FIN, "Ayo", FormKind::Package));
+        forms[2] = Some(Form::new(
+            crate::desktop::DISPLAY_FIN,
+            "ExpDisplay",
+            FormKind::Service,
+        ));
+        forms[3] = Some(Form::new(
+            crate::desktop::BROWSER_FIN,
+            "Browser",
+            FormKind::Interface,
+        ));
+        forms[4] = Some(Form::new(GO_ABI_FIN, "GoABI", FormKind::Interface));
+        let mut network_form = Form::new(crate::network::NETWORK_FIN, "Network", FormKind::Driver);
+        if !crate::network::available() {
+            network_form.lifecycle = Lifecycle::Recoverable;
+        }
+        forms[5] = Some(network_form);
+        let (broker, handles) = Self::session_capabilities(report, session);
         let mut dimensions = [None; MAX_DIMENSIONS];
         dimensions[0] = Some(Dimension::new(report.stable_fin, "Stable", true));
         let mut relationships = RelationshipGraph::new();
@@ -464,8 +472,8 @@ impl Shell {
                 self.kqueue(args);
                 true
             }
-            "rlimit" => {
-                self.rlimit(args);
+            "expbudget" | "budget" | "rlimit" => {
+                self.expbudget(args);
                 true
             }
             "ifconfig" => {
@@ -579,6 +587,7 @@ impl Shell {
                     false,
                     self.session,
                     self.desktop_network_allowed(),
+                    self.report.cfc_fin,
                 );
                 true
             }
@@ -588,6 +597,7 @@ impl Shell {
                     true,
                     self.session,
                     self.desktop_network_allowed(),
+                    self.report.cfc_fin,
                 );
                 true
             }
@@ -682,13 +692,15 @@ impl Shell {
                 let requested_mode = crate::session::choose_boot_mode(input);
                 let login = crate::session::login(input, requested_mode);
                 self.session = login.session;
-                self.kernel_controls = KernelControls::new();
+                (self.broker, self.handles) =
+                    Self::session_capabilities(self.report, self.session);
                 if login.mode == crate::session::BootMode::Graphical {
                     crate::desktop::run_with_network(
                         input,
                         false,
                         self.session,
                         self.desktop_network_allowed(),
+                        self.report.cfc_fin,
                     );
                 }
                 true
@@ -816,7 +828,7 @@ impl Shell {
                 true
             }
             "games" | "arcade" => {
-                crate::desktop::run_games(input, self.session);
+                crate::desktop::run_games(input, self.session, self.report.cfc_fin);
                 true
             }
             "legacy" => {
@@ -870,7 +882,7 @@ impl Shell {
             "  date clock timers cpuinfo features kernelcaps lspci neofetch sysinfo mem free env uptime ps"
         );
         println!("  kstat dmesg bootlog ifconfig netstat ping <IPv4-address> [count]");
-        println!("  sysctl [-a|<node>|<node> <value>]  kqueue <action>  rlimit <action>");
+        println!("  sysctl [-a|<node>|<node> <value>]  kqueue <action>  expbudget <action>");
         println!("  dns <host>  fetch <http[s]://host[:port]/path>  mode");
         println!("  calc len hex reverse tolower toupper factor rand sleep true false");
     }
@@ -889,6 +901,10 @@ impl Shell {
             .filter(|handle| !handle.revoked)
             .count();
         println!("architecture: x86_64 Form-native alpha");
+        println!(
+            "CFC: {}  FIN: {}",
+            self.report.cfc_name, self.report.cfc_fin
+        );
         println!(
             "Dimension: Stable  user: {}  authority: {}",
             self.session.name(),
@@ -1169,24 +1185,24 @@ impl Shell {
         }
     }
 
-    fn rlimit(&mut self, arguments: &str) {
+    fn expbudget(&mut self, arguments: &str) {
         let mut words = arguments.split_whitespace();
         match words.next() {
             None => self.print_limits(),
             Some("list") => {
                 if words.next().is_some() {
-                    print_rlimit_usage();
+                    print_expbudget_usage();
                     return;
                 }
                 self.print_limits();
             }
             Some("show") => {
                 let Some(resource) = words.next().and_then(Resource::parse) else {
-                    println!("usage: rlimit show <resource>");
+                    println!("usage: expbudget show <resource>");
                     return;
                 };
                 if words.next().is_some() {
-                    println!("usage: rlimit show <resource>");
+                    println!("usage: expbudget show <resource>");
                     return;
                 }
                 print_limit(self.kernel_controls.resources().get(resource));
@@ -1200,24 +1216,24 @@ impl Shell {
                     words.next().and_then(parse_u64),
                     words.next().and_then(parse_u64),
                 ) else {
-                    println!("usage: rlimit set <resource> <soft> <hard>");
+                    println!("usage: expbudget set <resource> <soft> <hard>");
                     return;
                 };
                 if words.next().is_some() {
-                    println!("usage: rlimit set <resource> <soft> <hard>");
+                    println!("usage: expbudget set <resource> <soft> <hard>");
                     return;
                 }
                 match self.kernel_controls.set_limit(resource, soft, hard) {
                     Ok(limit) => {
                         print_limit(limit);
                         slog!(
-                            "EXPOS_RLIMIT_CHANGED resource={} soft={} hard={}\r\n",
+                            "EXPOS_EXPBUDGET_CHANGED resource={} soft={} hard={}\r\n",
                             resource.name(),
                             soft,
                             hard
                         );
                     }
-                    Err(error) => println!("rlimit: {}", error.message()),
+                    Err(error) => println!("expbudget: {}", error.message()),
                 }
             }
             Some("charge") => {
@@ -1228,16 +1244,16 @@ impl Shell {
                     words.next().and_then(Resource::parse),
                     words.next().and_then(parse_u64),
                 ) else {
-                    println!("usage: rlimit charge <resource> <amount>");
+                    println!("usage: expbudget charge <resource> <amount>");
                     return;
                 };
                 if words.next().is_some() {
-                    println!("usage: rlimit charge <resource> <amount>");
+                    println!("usage: expbudget charge <resource> <amount>");
                     return;
                 }
                 match self.kernel_controls.charge(resource, amount) {
                     Ok(used) => println!("{}: used={}", resource.name(), used),
-                    Err(error) => println!("rlimit: {}: {}", resource.name(), error.message()),
+                    Err(error) => println!("expbudget: {}: {}", resource.name(), error.message()),
                 }
             }
             Some("release") => {
@@ -1248,19 +1264,19 @@ impl Shell {
                     words.next().and_then(Resource::parse),
                     words.next().and_then(parse_u64),
                 ) else {
-                    println!("usage: rlimit release <resource> <amount>");
+                    println!("usage: expbudget release <resource> <amount>");
                     return;
                 };
                 if words.next().is_some() {
-                    println!("usage: rlimit release <resource> <amount>");
+                    println!("usage: expbudget release <resource> <amount>");
                     return;
                 }
                 match self.kernel_controls.release(resource, amount) {
                     Ok(used) => println!("{}: used={}", resource.name(), used),
-                    Err(error) => println!("rlimit: {}: {}", resource.name(), error.message()),
+                    Err(error) => println!("expbudget: {}: {}", resource.name(), error.message()),
                 }
             }
-            Some(_) => print_rlimit_usage(),
+            Some(_) => print_expbudget_usage(),
         }
     }
 
@@ -2354,10 +2370,11 @@ fn print_kqueue_usage() {
     println!("kqueue signal <id> [data]");
 }
 
-fn print_rlimit_usage() {
-    println!("rlimit list|show <resource>");
-    println!("rlimit set <resource> <soft> <hard>");
-    println!("rlimit charge|release <resource> <amount>");
+fn print_expbudget_usage() {
+    println!("expbudget list|show <resource>");
+    println!("expbudget set <resource> <soft> <hard>");
+    println!("expbudget charge|release <resource> <amount>");
+    println!("rlimit remains a compatibility alias.");
 }
 
 fn parse_u32(raw: &str) -> Option<u32> {
@@ -2419,6 +2436,8 @@ fn is_shell_command(name: &str) -> bool {
             | "python3"
             | "kqueue"
             | "kevent"
+            | "expbudget"
+            | "budget"
             | "rlimit"
             | "ifconfig"
             | "netstat"
@@ -2739,7 +2758,14 @@ mod tests {
 
     #[test]
     fn command_registry_includes_native_kernel_controls() {
-        for command in ["sysctl", "kqueue", "kevent", "rlimit"] {
+        for command in [
+            "sysctl",
+            "kqueue",
+            "kevent",
+            "expbudget",
+            "budget",
+            "rlimit",
+        ] {
             assert!(is_shell_command(command), "missing command: {command}");
             assert!(
                 !is_mutating_command(command),

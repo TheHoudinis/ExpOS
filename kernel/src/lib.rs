@@ -181,7 +181,7 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
     }
     let login = session::login(&mut input, requested_mode);
     if login.mode == session::BootMode::Graphical {
-        desktop::run(&mut input, false, login.session);
+        desktop::run(&mut input, false, login.session, report.cfc_fin);
     }
     shell::run(report, input, login.session)
 }

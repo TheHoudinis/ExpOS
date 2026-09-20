@@ -1,6 +1,8 @@
 USER-SUPPLIED DESIGN CONTEXT
 Imported 2026-09-16; branding updated to ExpOS.
-This document records design context and open proposals, not implementation status.
+Architecture decisions recorded on 2026-09-17 are normative where this
+document labels them approved. They describe the target Genesis/CFC model,
+not a claim that the current native disk format or scheduler implements it.
 
 ExpOS — Installer / Genesis Engine / CFC Design Conversation Summary
 for Another AI =====================================================
@@ -70,7 +72,10 @@ The complete ExpOS environment is called a:
 
     CFC — Central Finite Curve
 
-A CFC contains Dimensions.
+A CFC contains Dimensions. Every CFC has its own typed FIN, a required
+nonempty human-readable name, and exactly one Primary Dimension. The CFC
+FIN is its authoritative identity; its name is required for human-facing
+selection but does not replace that identity.
 
 Conceptual hierarchy:
 
@@ -93,8 +98,14 @@ Conceptual hierarchy:
 The Primary Dimension is only the default/primary Dimension inside the
 CFC. It is NOT the entire operating system.
 
-Multiple CFCs are possible, but only through the advanced/expert
-installation path.
+Every Form, Dimension, relationship, identity/policy record, ExpFS state,
+checkpoint, storage key, and capability belongs exclusively to one CFC.
+There is no cross-CFC sharing. Moving or copying material between CFCs must
+therefore create a newly owned destination entity through an explicit import,
+not attach the same entity or storage extent to two CFCs.
+
+Multiple CFCs are possible, but only through the Architect installation
+path.
 
 3. CFC AND EXPFS RELATIONSHIP
 
@@ -114,6 +125,19 @@ Examples of possible user-facing recovery choices: Last successful state
 
 Recovery is therefore an intrinsic property of the CFC + ExpFS
 architecture.
+
+Each encrypted CFC has an independent random storage key. The Operator
+password is processed with Argon2id to derive a key-encryption key (KEK), and that KEK
+unlocks the random storage key; the password does not directly become the
+storage-encryption key. Persistent CFC state uses authenticated encryption
+(AEAD), so confidentiality and tamper detection are both required.
+
+Recovery retains eight rotating checkpoints per CFC plus one protected
+installation baseline. Encrypted-CFC recovery state is authenticated by its
+storage protection. Normal checkpoint rotation and restore operations must
+never overwrite the baseline. The exact AEAD construction, Argon2id parameters,
+on-disk envelope, checkpoint encoding, and crash-consistent update algorithm
+remain implementation specifications rather than being invented here.
 
 4. FORMS — IMPORTANT TERMINOLOGY
 
@@ -179,14 +203,12 @@ into a coherent, bootable ExpOS CFC.
 
 6. TWO INSTALLATION MODES
 
-The design now has TWO installation paths.
+The design has TWO installation paths.
 
-A. BASIC INSTALLATION B. EXPERT / ARCHITECT INSTALLATION
+A. BASIC INSTALLATION B. ARCHITECT INSTALLATION
 
-“Architect” was suggested as a more ExpOS-like user-facing name than
-“Expert”. The user’s original requirement is “expert”; future
-documentation can use “Architect Installation” if desired, but should
-make clear that this corresponds to the expert mode.
+Architect is the official user-facing name. “Expert mode” may appear only
+as a legacy explanation for older design notes; it is not the product label.
 
 7. BASIC INSTALLATION — FINAL REQUIREMENTS
 
@@ -200,14 +222,18 @@ normally be exposed to the user. - Everything else becomes
 ExpOS-managed storage / ExpFS space.
 
 CFC: - Basic mode creates ONE CFC only. - Multiple CFCs are NOT
-available in Basic mode.
+available in Basic mode. - The CFC receives its own typed FIN and a required
+nonempty name. - Genesis creates exactly one Primary Dimension; additional
+Dimensions remain optional.
 
 BOOT: - Basic mode does not expose bootloader configuration. - Basic
 users should not normally see a boot menu. - Boot should proceed
 directly into the created CFC.
 
 ENCRYPTION: - Encryption is mandatory in Basic mode. - There is no
-“disable encryption” option. - Encryption uses the Operator’s password.
+“disable encryption” option. - Genesis generates a random per-CFC storage
+key. - Argon2id derives a KEK from the Operator password to wrap/unlock that
+storage key. - Persistent CFC state uses AEAD.
 
 IDENTITY: - Creating an Operator is mandatory. - The Operator MUST have
 a password. - The installer may optionally allow creation of secondary
@@ -215,7 +241,7 @@ Power and/or Guest users. - Secondary users need their own different
 passwords.
 
 DIMENSIONS: - The Primary Dimension is mandatory. - Both Basic and
-advanced installation modes allow the user to create additional
+Architect installation modes allow the user to create additional
 Dimensions during installation. - The user does not need to wait until
 first boot to create Work/Gaming/etc. Dimensions.
 
@@ -228,45 +254,50 @@ AUTOMATION: - Hardware detection, storage setup, boot configuration,
 ExpFS initialization, FIN creation, driver resolution, and normal
 recovery setup should be automatic.
 
-8. EXPERT / ARCHITECT INSTALLATION — FINAL REQUIREMENTS
+8. ARCHITECT INSTALLATION — FINAL REQUIREMENTS
 
-Advanced mode is for users who want architectural control.
+Architect mode is for users who want architectural control.
 
 STORAGE: - The user can choose whether ExpOS claims the whole disk. -
 Partial-disk/storage allocation must be possible. - The user can control
 how storage is allocated to CFCs.
 
-MULTIPLE CFCS: - Multiple CFCs MUST be supported in advanced
-installation. - This is a major difference from Basic mode.
+MULTIPLE CFCS: - Multiple CFCs MUST be supported in Architect
+installation. - This is a major difference from Basic mode. - Every CFC has
+an independent typed FIN, required name, exactly one Primary Dimension, and
+exclusive entities/state. Every encrypted CFC has its own random storage key.
+- Forms, data, Dimensions, capabilities, checkpoints, and storage extents are
+never shared across CFCs.
 
-BOOT: - Advanced installation exposes boot behavior/configuration. - The
-advanced user must make a choice concerning the boot concept/boot menu
+BOOT: - Architect installation exposes boot behavior/configuration. - The
+Architect user must make a choice concerning the boot concept/boot menu
 rather than having Basic mode’s invisible automatic behavior forced on
 them. - A visible boot menu is relevant particularly when multiple CFCs
 exist.
 
-ENCRYPTION: - Encryption is optional in advanced mode. - If multiple
-CFCs are created, the installer should ask whether: a) one password
-should protect all relevant CFCs, or b) each CFC should use a separate
-password. - Advanced users can therefore create different encryption
-arrangements for different CFCs.
+ENCRYPTION: - Encryption is optional in Architect mode. - If multiple
+CFCs are encrypted, the installer may ask whether one entered password or
+separate passwords should unlock them. - Even when the same password is used,
+each CFC keeps a distinct random storage key, Argon2id salt/key envelope, and
+AEAD domain; a shared password never creates shared CFC storage or keys.
 
 IDENTITIES: - Operator creation remains mandatory. - Operator password
 remains mandatory. - Optional Power and Guest identities can be
 created. - Secondary identities use separate passwords.
 
-DIMENSIONS: - Primary Dimension is mandatory per applicable CFC
-design. - Additional Dimensions can be created during installation. -
-Advanced mode should expose more Dimension controls than Basic mode.
+DIMENSIONS: - Exactly one Primary Dimension is mandatory per CFC. -
+Additional Dimensions can be created during installation. - Architect mode
+should expose more Dimension controls than Basic mode.
 
-DESKTOP / FORMS: - Advanced users should have more detailed choices. -
+DESKTOP / FORMS: - Architect users should have more detailed choices. -
 They may choose not to install a desktop. - They may disable or omit
 specific desktop features/Forms. - More granular Form selection is
 appropriate here.
 
-RECOVERY: - Advanced users may receive more recovery configuration
-options, while still using the fundamental CFC + ExpFS
-snapshot/checkpoint model.
+RECOVERY: - Architect users may receive more recovery configuration
+options, while still using the fundamental CFC + ExpFS checkpoint model. -
+Every CFC retains eight rotating checkpoints and one protected immutable
+installation baseline.
 
 9. IDENTITY AND PRIVILEGE MODEL
 
@@ -282,13 +313,15 @@ Current roles discussed:
     Guest
         Very restricted identity.
 
-During BOTH Basic and advanced installation: - At least one Operator
+During BOTH Basic and Architect installation: - At least one Operator
 must be created. - Operator password is mandatory. - Optional Power and
 Guest identities may be created. - Secondary accounts require separate
 passwords.
 
-The Operator password also serves as the default encryption basis in
-Basic installation.
+In Basic installation the Operator password is the input to Argon2id for
+deriving the KEK that unlocks the CFC’s random storage key. Password changes
+rewrap that storage key; they must not require changing the key that encrypts
+all CFC data.
 
 DIESE remains ExpOS’s privileged/elevation/validation mechanism rather
 than sudo/doas.
@@ -313,9 +346,37 @@ A CFC could conceptually look like:
 Both installation modes allow additional Dimensions to be “drifted” /
 made during installation.
 
+The Primary designation is singular and structural: creating a secondary
+Dimension cannot create a second Primary, and a CFC cannot be finalized or
+booted without its one Primary Dimension.
+
 The exact semantics of Dimensions can later include execution, security,
 namespace, workspace, versioning, or other policies, but they should not
 be presented as ordinary disk partitions.
+
+10A. APPROVED CONFINEMENT AND ENFORCEMENT MODEL
+
+Three names are canonical for the target architecture:
+
+    ExpScope
+        CFC/Dimension-aware confinement. It defines the execution and resource
+        boundary in which a Form may observe, address, and affect state.
+
+    ExpSeal
+        Monotonic capability reduction. Delegation may narrow authority,
+        operations, targets, duration, or scope, but can never amplify them or
+        cross a CFC boundary.
+
+    ExpBudget
+        Per-context resource enforcement. Execution contexts receive explicit
+        limits and accounting, and exceeding a limit fails closed rather than
+        silently borrowing another context’s resources.
+
+These approved names and invariants do not mean the present kernel already has
+complete address-space confinement, scheduler accounting, or enforcement at
+every driver/storage boundary. The existing Dimension/PIMP isolation,
+non-amplifying Handle delegation, and runtime resource ledgers are foundations
+to be integrated into these end-to-end mechanisms.
 
 11. PIMP AND DIESE DURING INSTALLATION
 
@@ -406,10 +467,25 @@ A conceptual pipeline discussed:
     Storage Preparation
           |
           v
-    Initialize ExpFS
+    Construct named CFC and assign its typed FIN
           |
           v
-    Construct CFC
+    Create Operator Identity
+          |
+          v
+    If encryption is selected, generate random CFC storage key
+          |
+          v
+    If encrypted, derive Argon2id KEK and wrap storage key
+          |
+          v
+    Initialize per-CFC ExpFS (AEAD when encrypted)
+          |
+          v
+    Construct Primary Dimension
+          |
+          v
+    Construct Optional Dimensions
           |
           v
     Construct Root Form
@@ -424,22 +500,16 @@ A conceptual pipeline discussed:
     Initialize DIESE
           |
           v
-    Create Operator Identity
-          |
-          v
-    Construct Primary Dimension
-          |
-          v
-    Construct Optional Dimensions
-          |
-          v
     Instantiate Core Forms
           |
           v
     Instantiate Optional Desktop Forms
           |
           v
-    Establish Recovery Baseline
+    Establish protected installation baseline
+          |
+          v
+    Initialize eight-checkpoint rotation
           |
           v
     Final Validation
@@ -456,7 +526,7 @@ A conceptual post-install boot sequence:
     Power On
         |
         v
-    Firmware (typically UEFI)
+    Firmware (native UEFI by default; BIOS compatibility fallback)
         |
         v
     ExpLoader
@@ -466,6 +536,9 @@ A conceptual post-install boot sequence:
         |
         v
     Validate CFC
+        |
+        v
+    Unlock CFC storage key (encrypted CFCs only)
         |
         v
     Initialize ExpFS
@@ -491,8 +564,12 @@ A conceptual post-install boot sequence:
 Basic installation should hide the boot menu and normally enter its
 single CFC directly.
 
-Advanced installation may expose a boot menu, particularly for multiple
+Architect installation may expose a boot menu, particularly for multiple
 CFCs.
+
+Native UEFI is the default Genesis and normal boot path. BIOS/legacy boot is
+retained as a compatibility, recovery, and development fallback rather than as
+the primary architecture.
 
 17. PROPOSED INSTALLER EXPERIENCE
 
@@ -525,7 +602,7 @@ Possible flow:
 BASIC: Create Operator Name Password Confirm Password
 
     Configure CFC
-        CFC name (if the final design exposes this)
+        Required CFC name
 
     Create Primary Dimension
         Name
@@ -547,7 +624,7 @@ BASIC: Create Operator Name Password Confirm Password
 
     Install
 
-Advanced mode expands the same concepts rather than replacing them with
+Architect mode expands the same concepts rather than replacing them with
 Unix terminology.
 
 18. INSTALLATION PROGRESS LANGUAGE
@@ -615,9 +692,14 @@ use known-good CFC states.
 Changes to the CFC may cause ExpFS to preserve appropriate
 state/checkpoints.
 
-The exact snapshot algorithm, retention policy, deduplication strategy,
-and consistency model still require a dedicated ExpFS/CFC
-specification.
+The retained recovery set is exactly eight rotating checkpoints plus the
+protected installation baseline for that CFC. The baseline is immutable to
+normal update, rotation, and restore operations. Replacing it is a distinct,
+explicit Genesis/reinstallation action.
+
+The exact checkpoint encoding, rotation algorithm, deduplication strategy,
+crash-consistency protocol, and restore consistency model still require a
+dedicated ExpFS/CFC specification.
 
 21. UPDATES / AYO
 
@@ -720,10 +802,11 @@ The strongest concepts produced during the conversation were:
     whole disk. Basic mode claims the whole selected disk automatically.
 
 4.  Do NOT add multiple CFC creation to Basic mode. Multiple CFCs belong
-    to advanced/Architect installation.
+    to Architect installation.
 
 5.  Do NOT make encryption optional in Basic mode. It is mandatory and
-    tied to the Operator password.
+    uses a random per-CFC storage key wrapped by an Argon2id-derived KEK from
+    the Operator password. Persistent CFC state requires AEAD.
 
 6.  Do NOT remove mandatory Operator creation. Every installation
     requires an Operator and password.
@@ -742,7 +825,8 @@ The strongest concepts produced during the conversation were:
 
 11. Do NOT assume one encryption password for all CFCs in Architect
     mode. The user may choose one shared password or different passwords
-    per CFC.
+    per CFC, but every encrypted CFC still has an independent random storage
+    key and key envelope.
 
 12. Do NOT force a desktop. Basic can choose desktop/no desktop;
     Architect has even more granular desktop/Form choices.
@@ -759,7 +843,24 @@ The strongest concepts produced during the conversation were:
     hardware information/bootstrap input and resolve driver/capability
     Forms through ExpOS mechanisms.
 
-16. OPEN QUESTIONS / FUTURE SPECIFICATION WORK
+16. Do NOT create a CFC without its own typed FIN, required nonempty name,
+    and exactly one Primary Dimension.
+
+17. Do NOT share Forms, data, Dimensions, capabilities, storage extents,
+    keys, or checkpoints across CFCs. Explicit transfer creates a newly owned
+    destination entity.
+
+18. Do NOT let ordinary checkpoint rotation or restore overwrite the
+    protected installation baseline. Each CFC retains eight rotating
+    checkpoints in addition to that baseline.
+
+19. Use Architect as the official user-facing installation name. “Expert” is
+    only a legacy explanatory synonym.
+
+20. Treat native UEFI as the default boot path while retaining BIOS as a
+    compatibility, recovery, and development fallback.
+
+26. OPEN QUESTIONS / FUTURE SPECIFICATION WORK
 
 These were not completely finalized and another AI should ask before
 making them canonical:
@@ -767,27 +868,21 @@ making them canonical:
 -   Exact on-disk ExpFS format.
 -   Exact CFC metadata layout.
 -   Exact FIN binary representation.
--   Whether a CFC itself has a FIN and how that differs from Form FINs.
+-   Exact typed representation and allocation rules for CFC FINs versus Form
+    and Dimension FINs.
 -   Exact semantics and isolation boundaries of Dimensions.
--   Exact snapshot/checkpoint algorithm.
--   Recovery retention and garbage collection.
--   Exact encryption algorithm and key derivation.
--   Whether Operator password directly derives the storage key or
-    unlocks a randomly generated key (the latter is likely preferable
-    technically, but this was not finalized by the user).
--   Multi-CFC storage sharing rules.
--   Whether multiple CFCs can share Forms/data.
+-   Exact checkpoint encoding, rotation, restore, and crash-consistency
+    algorithm within the approved eight-checkpoint-plus-baseline model.
+-   Garbage collection inside and outside the retained recovery set.
+-   Exact AEAD algorithm, Argon2id parameter set, key-envelope layout, nonce
+    construction, and password-rewrap transaction.
 -   Exact ExpLoader format and boot protocol.
--   BIOS/legacy boot support versus UEFI-only initial releases.
 -   Secure Boot design.
 -   Exact ASL bootstrap ordering.
 -   Exact DIESE bootstrap trust chain.
 -   Network availability requirements during Genesis.
 -   Offline driver/Form repository design.
 -   Exact PIMP grammar.
--   Whether “Architect” officially replaces the name “Expert”.
--   Whether CFC naming is mandatory or optional.
--   Whether each CFC has exactly one Primary Dimension.
 -   How secondary users relate to multiple CFCs and Dimensions.
 -   Whether recovery checkpoints are immutable Forms, special ExpFS
     state, or another mechanism.
