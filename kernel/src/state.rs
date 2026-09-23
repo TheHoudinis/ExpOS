@@ -1,9 +1,7 @@
-//! Versioned, checksummed, disk-backed ExpOS state.
+//! Account/settings schema adapter for the ExpFS system database.
 //!
-//! Two independent slots are alternated on every commit. At boot, the newest
-//! valid generation wins; an interrupted write therefore leaves the previous
-//! slot usable. This is intentionally a compact state journal, not a claim of
-//! a general-purpose filesystem.
+//! Native commits use typed records in the CFC's transactional ExpFS snapshot.
+//! The older EXPOST03 dual-slot decoder remains read-only for migration.
 
 use crate::{println, slog, storage};
 
@@ -153,16 +151,16 @@ pub const CUSTOMIZATION_SELECTABLE_VALUES: usize = FONT_FACE_CHOICES as usize
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StateError {
-    Unavailable,
     Disk(storage::StorageError),
+    ExpFs(crate::expfs_store::StoreError),
     VerificationFailed,
 }
 
 impl StateError {
     pub const fn message(self) -> &'static str {
         match self {
-            Self::Unavailable => "persistent state disk is unavailable",
             Self::Disk(_) => "persistent state disk I/O failed",
+            Self::ExpFs(error) => error.message(),
             Self::VerificationFailed => "persistent state verification failed",
         }
     }
@@ -350,6 +348,7 @@ struct RuntimeState {
     generation: u64,
     active_slot: u8,
     loaded: bool,
+    expfs_source: bool,
 }
 
 impl RuntimeState {
@@ -362,6 +361,7 @@ impl RuntimeState {
             // by writing slot A.
             active_slot: 1,
             loaded: false,
+            expfs_source: false,
         }
     }
 }
@@ -400,13 +400,28 @@ pub fn initialize() {
     let first = read_slot(device, 0).ok();
     let second = read_slot(device, 1).ok();
     let selected = newest_slot(first, second);
+    let expfs_data = decode_expfs_records(crate::expfs_store::system_records());
     let mut state = STATE.lock();
     state.device = Some(device);
-    if let Some(slot) = selected {
+    if let Some(data) = expfs_data {
+        state.data = data;
+        state.generation = crate::expfs_store::generation().unwrap_or(1);
+        state.loaded = true;
+        state.expfs_source = true;
+        println!(
+            "[ok] accounts/settings loaded from ExpFS generation {}",
+            state.generation
+        );
+        slog!(
+            "EXPOS_STATE_READY generation={} slot=expfs loaded=true\r\n",
+            state.generation
+        );
+    } else if let Some(slot) = selected {
         state.data = slot.data;
         state.generation = slot.generation;
         state.active_slot = slot.slot;
         state.loaded = true;
+        state.expfs_source = false;
         println!(
             "[ok] persistent state generation {} loaded from slot {}",
             slot.generation,
@@ -424,7 +439,7 @@ pub fn initialize() {
 }
 
 pub fn persistent_available() -> bool {
-    STATE.lock().device.is_some()
+    crate::expfs_store::available()
 }
 
 pub fn loaded_generation() -> Option<u64> {
@@ -455,6 +470,8 @@ pub fn print_diagnostics() {
         state.generation,
         if !state.loaded {
             "none"
+        } else if state.expfs_source {
+            "expfs"
         } else if state.active_slot == 0 {
             "A"
         } else {
@@ -548,45 +565,61 @@ pub fn save_accounts(accounts: [StoredAccount; MAX_STORED_ACCOUNTS]) -> Result<(
 }
 
 fn commit_locked(state: &mut RuntimeState, candidate: PersistentData) -> Result<(), StateError> {
-    let Some(device) = state.device else {
-        return Err(StateError::Unavailable);
-    };
-    let generation = state.generation.wrapping_add(1).max(1);
-    let target_slot = state.active_slot ^ 1;
-    let mut encoded = [0_u8; SLOT_LEN];
-    encode_slot(&candidate, generation, &mut encoded);
-    let base = slot_lba(target_slot);
-    // Payload tail first, header sector last. Until the final sector lands the
-    // target cannot validate as the new generation, which strengthens the
-    // dual-slot guarantee across power loss.
-    for write_index in 0..SLOT_SECTORS {
-        let sector_index = (write_index + 1) % SLOT_SECTORS;
-        let mut sector = [0_u8; storage::SECTOR_SIZE];
-        let start = sector_index * storage::SECTOR_SIZE;
-        sector.copy_from_slice(&encoded[start..start + storage::SECTOR_SIZE]);
-        device
-            .write_sector(base + sector_index as u32, &sector)
-            .map_err(StateError::Disk)?;
-    }
-
-    let verified = read_slot(device, target_slot).map_err(|error| match error {
-        StateError::Disk(error) => StateError::Disk(error),
-        _ => StateError::VerificationFailed,
-    })?;
-    if verified.generation != generation || verified.data != candidate {
-        return Err(StateError::VerificationFailed);
-    }
-
+    let (settings, accounts) = encode_expfs_records(&candidate);
+    let generation =
+        crate::expfs_store::commit_system_records(settings, accounts).map_err(StateError::ExpFs)?;
     state.data = candidate;
     state.generation = generation;
-    state.active_slot = target_slot;
     state.loaded = true;
+    state.expfs_source = true;
     slog!(
-        "EXPOS_STATE_COMMIT generation={} slot={}\r\n",
-        generation,
-        if target_slot == 0 { "A" } else { "B" }
+        "EXPOS_STATE_COMMIT generation={} slot=expfs\r\n",
+        generation
     );
     Ok(())
+}
+
+fn encode_expfs_records(
+    data: &PersistentData,
+) -> (
+    [u8; crate::expfs_store::SETTINGS_RECORD_CAPACITY],
+    Option<[u8; crate::expfs_store::ACCOUNTS_RECORD_CAPACITY]>,
+) {
+    let mut settings = [0_u8; crate::expfs_store::SETTINGS_RECORD_CAPACITY];
+    encode_preferences(data.preferences, &mut settings);
+    let accounts = data.accounts_initialized.then(|| {
+        let mut encoded = [0_u8; crate::expfs_store::ACCOUNTS_RECORD_CAPACITY];
+        for (index, account) in data.accounts.iter().copied().enumerate() {
+            let start = index * ACCOUNT_RECORD_LEN;
+            encode_account(account, &mut encoded[start..start + ACCOUNT_RECORD_LEN]);
+        }
+        encoded
+    });
+    (settings, accounts)
+}
+
+fn decode_expfs_records(
+    records: (
+        Option<[u8; crate::expfs_store::SETTINGS_RECORD_CAPACITY]>,
+        Option<[u8; crate::expfs_store::ACCOUNTS_RECORD_CAPACITY]>,
+    ),
+) -> Option<PersistentData> {
+    let (settings, accounts) = records;
+    if settings.is_none() && accounts.is_none() {
+        return None;
+    }
+    let mut data = PersistentData::new();
+    if let Some(settings) = settings {
+        data.preferences = decode_preferences(&settings);
+    }
+    if let Some(accounts) = accounts {
+        for index in 0..MAX_STORED_ACCOUNTS {
+            let start = index * ACCOUNT_RECORD_LEN;
+            data.accounts[index] = decode_account(&accounts[start..start + ACCOUNT_RECORD_LEN])?;
+        }
+        data.accounts_initialized = true;
+    }
+    Some(data)
 }
 
 fn read_slot(device: storage::Device, slot: u8) -> Result<DecodedSlot, StateError> {
@@ -629,6 +662,7 @@ fn generation_is_newer(candidate: u64, current: u64) -> bool {
     candidate != current && candidate.wrapping_sub(current) < (1_u64 << 63)
 }
 
+#[cfg(test)]
 fn encode_slot(data: &PersistentData, generation: u64, output: &mut [u8; SLOT_LEN]) {
     output.fill(0);
     output[..8].copy_from_slice(&MAGIC);
@@ -1009,14 +1043,17 @@ fn crc32(input: &[u8]) -> u32 {
     !crc
 }
 
+#[cfg(test)]
 fn put_u16(output: &mut [u8], offset: usize, value: u16) {
     output[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
 }
 
+#[cfg(test)]
 fn put_u32(output: &mut [u8], offset: usize, value: u32) {
     output[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
+#[cfg(test)]
 fn put_u64(output: &mut [u8], offset: usize, value: u64) {
     output[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }

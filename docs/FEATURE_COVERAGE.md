@@ -10,8 +10,10 @@ tested with `make persistence-check`; live authenticated HTTPS is tested with
 
 | Area | Commands / behavior |
 |---|---|
-| Forms | `mkform`, `forms/list`, `inspect/fin`, exact `resolve`, `view/cat`, `write`, `append`, `head`, `copy`, `move`, `delete`, `recover`, `retire`, `activate`, guarded `reclaim`, `hexdump`, `du`, `df`, `shasum`, `which`; typed `relate`/`unrelate`/`relationships` |
+| Forms | `mkform`, `forms/list`, `inspect/fin`, exact `resolve`, `view/cat`, `write`, `append`, `head`, `copy`, `move`, `delete`, `recover`, `retire`, `activate`, guarded `reclaim`, `hexdump`, `du`, `df`, `shasum`, `which`; typed `relate`/`unrelate`/`relationships`; arbitrary Form content and graph state survive reboot through ExpFS |
+| Execution | `execute <Form>` admits an active capability-authorized FIN to the Form-native scheduler; `ps` reports CFC/Dimension/FIN contexts, execution state and dispatches; contexts own address-space/CPU descriptors, bounded Handle and event sets, and an ExpBudget |
 | Dimensions and policy | `dimensions`, `makedim`, `policy`, `pimp`, `journal` |
+| Recovery | `checkpoint` captures the complete current CFC database; `checkpoints` lists the eight-slot rotating ring; `restorepoint <state-id>` transactionally restores a retained snapshot and reboots |
 | Capabilities | `grant`, `revoke`, `handles`, and `handlecheck` with requester-bound, scoped, expiring Form Handles; non-amplifying delegation; parent-linked revocation cascades; explicit Display and Input rights |
 | Kernel controls | Form-native, runtime-local `sysctl` typed tunables; `kqueue`/`kevent` fixed-capacity signal, one-shot/periodic timer and resource-denial watches with sequenced readiness, configurable dispatch batching and optional coalescing; `expbudget` accounting (`budget` and legacy `rlimit` aliases) for event watches plus enforced Form mutation attempts and live Form content bytes, with explicit runtime-local IPC-byte and scratch-page reservations with validated soft/hard/ceiling tuples and denial counters/events; DIESE checks the revocable bootstrap Handle, reserves Configure for Operator, grants Execute mutation to Power/Operator and leaves Guest read-only; inspired by FreeBSD interface concepts without source or ABI compatibility |
 | Packages | `Ayo` boot Package Form and Go `ayo v3`; 21-package built-in Prism catalog; searchable TUI; offline/HTTPS catalogs and Ed25519 catalog signatures; SHA-256 artifact verification; raw/tar/tar.gz extraction; owned-file receipts and collision protection; atomic dependency install, uninstall, rollback and crash recovery; no package scripts or links |
@@ -20,16 +22,20 @@ tested with `make persistence-check`; live authenticated HTTPS is tested with
 | Desktop apps | Dark graphical Terminal, Browser, Form registry, Ayo package catalog, System, Games and Notes; large clickable Settings control center with eleven pages including Appearance, Windows and Taskbar, plus compact category/row viewport scrolling that keeps long pages usable at 480p; 106 directly working Appearance/Windows/Taskbar selectable values and 112 schema-accepted states including 28 reserved interaction states (overlapping counts); six themes, seven procedural wallpapers, four cursor themes, four accents, five bitmap font faces and Light/Regular/Bold rasterized weights; configurable window corners, borders, titlebar height, backdrop/titlebar opacity, bounded off-screen travel, snap distance and click/sloppy/pointer focus; bottom/top/left/right taskbar, nine sizes, three app alignments, edge-reveal auto-hide, translucency, clipped horizontal labels and a live RTC clock with optional seconds; optional cursor shadow; persistent presentation controls and low-cost defaults; Terminal with 40-line scrollback, 24-entry Up/Down history, two-eye `neofetch` and `windowreset`; every app can close and reopen |
 | Go | Shared ABI v1 call numbers and validation in Rust, tested `sdk/go/expos` client and emulator, `GoABI` Interface Form and `goabi` diagnostics |
 | Hardware | `date/clock`, `timers`, `cpuinfo`, `features/kernelcaps`, `lspci`, `neofetch/sysinfo`, `mem/free`, VGA and COM1 consoles, calibrated CPUID/fallback TSC timing, PS/2 keyboard/mouse, dedicated primary-master ATA PIO state transport, RTL8139 bus-master DMA, Ethernet/ARP/static IPv4/ICMP/UDP/DNS/TCP/HTTP/TLS, PCI Wi-Fi/Bluetooth class discovery with honest driver/connection state, ANSI serial input, RDRAND detection and CPUID/control-register reporting |
-| System | Graphical-or-console boot chooser and mutually switchable login, Operator/Power/Guest capability authority, persistent twelve-slot accounts, salted PBKDF2-HMAC-SHA256 password verifiers, persistent desktop/connectivity preferences with fail-safe decoding, dual-slot CRC state recovery, `users`, `useradd`, `userdel`, `passwd`, `login`, `logout`, `status`, `kstat`, `ps`, `dmesg/bootlog`, `stateinfo`, combined `diag/diagnose`, `ifconfig`, `ping`, `dns`, `fetch`, `netstat`, history, `whoami`, `reboot`, `shutdown` |
+| System | Graphical-or-console boot chooser and mutually switchable login, Operator/Power/Guest capability authority, persistent twelve-slot accounts, salted PBKDF2-HMAC-SHA256 password verifiers, persistent desktop/connectivity preferences with fail-safe decoding, ExpFS dual-current-slot plus eight-checkpoint CRC recovery, `users`, `useradd`, `userdel`, `passwd`, `login`, `logout`, `status`, `kstat`, `ps`, `dmesg/bootlog`, `stateinfo`, combined `diag/diagnose`, `ifconfig`, `ping`, `dns`, `fetch`, `netstat`, history, `whoami`, `reboot`, `shutdown` |
 | Utilities | `calc`, `factor`, `len`, `hex`, `reverse/rev`, `tolower`, `toupper`, `rand`, `sleep`, `true`, `false` |
 
-Native Form contents currently use fixed 512-byte in-memory records. Delete is
+Native Form contents use fixed 512-byte records that are transactionally
+persisted with Form metadata, Dimensions, relationships, PIMP network state,
+revisions and allocator state in alternating CRC-verified ExpFS CFC snapshots.
+`make persistence-check` proves `mkform MyNotes; write MyNotes hello` survives a
+shutdown and fresh boot. Delete is
 recovery-aware: it moves a Form to Recoverable; the core only permits final
-reclamation after Dimension bindings are removed. Accounts and desktop
-preferences are the durable exception: a dedicated ATA state image alternates
-two fixed 2 KiB slots, each protected by format/version fields, generation and
-CRC-32. Display rate and VSync selections are included; compatible records
-without the timing extension load as 60 Hz with VSync enabled.
+reclamation after Dimension bindings are removed. Accounts and desktop settings
+are typed records in the same ExpFS current-state transaction. The older two
+fixed 2 KiB EXPOST03 slots remain read-only migration input; compatible records
+without the timing extension load as 60 Hz with VSync enabled and move into
+ExpFS on their next mutation.
 `runtime/expos-state.img` is created by `make run` and is preserved by `make
 clean`. The customization extension is tagged inside the compatible 32-byte
 preference record; invalid IDs sanitize to conservative defaults. Fresh state
@@ -60,14 +66,16 @@ has not landed:
 
 The `expos-core` model now provides a distinct `CfcFin`; a required name and
 non-replaceable Primary Dimension; fixed-capacity CFC ownership/catalog checks;
-CFC-owned ExpFS transactions; CFC-bound recovery descriptors with an
+CFC-owned typed ExpFS system records and disk snapshots; CFC-bound recovery descriptors with an
 up-to-eight-entry metadata ring and the baseline descriptor held outside
 rotation; immutable-ownership ExpScope reachability; a broker-lifetime ExpSeal
 root-issuance cutoff with strict attenuation; and fixed-capacity context-keyed
-ExpBudget accounting. These are tested semantic primitives, not a Genesis
-installer, encrypted block store, disk capture/restore engine,
-process/address-space sandbox, durable seal registry, or scheduler-wide
-resource controller.
+ExpBudget accounting; and Form-native scheduler contexts carrying CFC,
+Dimension, FIN, address-space, Handle, event, CPU and budget state. Cooperative
+admission/dispatch and per-context budget charging are live; these are not yet
+a Genesis installer, encrypted block store, protected-baseline restore engine,
+page-table sandbox, durable seal registry, interrupt scheduler or user-mode
+context switcher.
 
 ## Runnable through Diamond II fallback
 
@@ -89,16 +97,18 @@ Dimension interfaces exist for them.
 
 ## Not claimed complete
 
-Persistent accounts are fixed state records, not yet persistent Account Forms,
+Persistent accounts are typed ExpFS records, not yet executable Account Forms,
 and the PBKDF2 login path does not claim lockout, hardware-backed keys or a
 complete modern identity policy. Mouse wheel input and GPU acceleration are not
 implemented. The PBKDF2 account verifier is not the approved Argon2id storage-key
-wrapper. The current two-slot CRC state journal remains plaintext and has no CFC
-metadata, AEAD, eight-checkpoint ring, or protected installation baseline.
+wrapper. ExpFS current-state snapshots and eight rotating full-state
+checkpoints are CFC-bound and transactional, but still lack AEAD and a
+protected on-disk installation baseline. The old plaintext account/settings slots are accepted
+only as migration input and are no longer the native commit destination.
 The new native UEFI path, retained BIOS fallback, and Operator-only single-user
 mode are QEMU-tested;
-general persistent v8 ExpFS/Form I/O,
-preemptive v8 Form execution, DHCP, IPv6, physical Wi-Fi drivers, USB
+preemptive v8 Form execution, real address-space switching, DHCP, IPv6,
+physical Wi-Fi drivers, USB
 host/Bluetooth data transport, concurrent sockets and the Go execution-context
 loader remain active migration work. The kernel-control layer is not FreeBSD
 code or compatibility: it has no FreeBSD syscall/ABI surface, vnode/socket

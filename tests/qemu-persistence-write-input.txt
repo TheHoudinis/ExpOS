@@ -14,4 +14,8 @@ j
 j
 9
 q
+mkform MyNotes data
+write MyNotes hello
+grant MyNotes execute
+checkpoint
 shutdown

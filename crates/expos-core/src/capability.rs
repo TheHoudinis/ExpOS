@@ -34,6 +34,14 @@ impl Operations {
     pub const fn bits(self) -> u16 {
         self.0
     }
+
+    pub const fn from_bits(bits: u16) -> Option<Self> {
+        if bits & !0x01FF == 0 {
+            Some(Self(bits))
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,6 +74,7 @@ pub enum CapabilityError {
     Sealed,
     AlreadySealed,
     SealTableFull,
+    Duplicate,
 }
 
 /// A monotonic ceiling over ambient capability issuance for one execution
@@ -101,6 +110,49 @@ impl CapabilityBroker {
 
     pub const fn cfc(&self) -> CfcFin {
         self.cfc
+    }
+
+    /// Restore a Handle from an authenticated/persisted capability record.
+    /// Runtime authority is not consulted because this is not ambient
+    /// issuance; structural validity and the complete parent chain are still
+    /// enforced before publication.
+    pub fn restore(&mut self, handle: FormHandle) -> Result<(), CapabilityError> {
+        if handle.cfc != self.cfc {
+            return Err(CapabilityError::WrongCfc);
+        }
+        if handle.id == 0
+            || handle.requester.is_zero()
+            || handle.target.is_zero()
+            || handle.dimension.is_zero()
+            || handle.operations == Operations::NONE
+        {
+            return Err(CapabilityError::Denied);
+        }
+        if self
+            .handles
+            .iter()
+            .flatten()
+            .any(|entry| entry.id == handle.id)
+        {
+            return Err(CapabilityError::Duplicate);
+        }
+        if handle.parent_id != 0
+            && !self
+                .handles
+                .iter()
+                .flatten()
+                .any(|entry| entry.id == handle.parent_id)
+        {
+            return Err(CapabilityError::NotFound);
+        }
+        let slot = self
+            .handles
+            .iter_mut()
+            .find(|slot| slot.is_none())
+            .ok_or(CapabilityError::Full)?;
+        *slot = Some(handle);
+        self.next_id = self.next_id.max(handle.id.wrapping_add(1).max(1));
+        Ok(())
     }
 
     pub fn issue_for(
@@ -610,5 +662,44 @@ mod tests {
         assert!(broker
             .delegate(root.id, fin(13), root.operations, 19, 1)
             .is_ok());
+    }
+
+    #[test]
+    fn persisted_handles_restore_without_reissuing_ambient_authority() {
+        let cfc = cfc_fin(100);
+        let handle = FormHandle {
+            id: 7,
+            parent_id: 0,
+            cfc,
+            requester: fin(10),
+            target: fin(11),
+            dimension: fin(12),
+            operations: Operations::EXECUTE,
+            valid_until_tick: 50,
+            revoked: false,
+        };
+        let mut broker = CapabilityBroker::new(cfc);
+        broker.restore(handle).unwrap();
+        assert!(broker
+            .authorize(
+                handle.id,
+                handle.target,
+                handle.dimension,
+                Operations::EXECUTE,
+                1
+            )
+            .is_ok());
+        assert_eq!(broker.restore(handle), Err(CapabilityError::Duplicate));
+        let next = broker
+            .issue_for(
+                fin(10),
+                Authority::Operator,
+                fin(13),
+                fin(12),
+                Operations::READ,
+                50,
+            )
+            .unwrap();
+        assert_eq!(next.id, 8);
     }
 }

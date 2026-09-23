@@ -2,7 +2,52 @@ use crate::{Cfc, CfcFin, Fin};
 
 const MAX_RECORDS: usize = 32;
 const MAX_STAGED: usize = 8;
+const MAX_SYSTEM_RECORDS: usize = 64;
+const MAX_STAGED_SYSTEM_RECORDS: usize = 16;
 pub const FORM_CONTENT_CAPACITY: usize = 512;
+pub const SYSTEM_RECORD_CAPACITY: usize = 512;
+
+/// Typed system-database namespaces. They are records in ExpFS rather than
+/// side files or subsystem-private persistence formats.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordKind {
+    Cfc,
+    PrimaryDimension,
+    Dimension,
+    Form,
+    Relationship,
+    Pimp,
+    Capability,
+    Account,
+    Revision,
+    Setting,
+    Checkpoint,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecordKey {
+    pub kind: RecordKind,
+    /// FIN for Form/Dimension-scoped records, or a stable schema-local key.
+    pub identity: Fin,
+    /// Zero for CFC-global records; otherwise the owning Dimension.
+    pub dimension: Fin,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SystemRecord {
+    pub cfc: CfcFin,
+    pub key: RecordKey,
+    pub revision: u32,
+    pub journal_sequence: u32,
+    bytes: [u8; SYSTEM_RECORD_CAPACITY],
+    len: u16,
+}
+
+impl SystemRecord {
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes[..self.len as usize]
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PersistentForm {
@@ -28,6 +73,7 @@ pub enum StorageError {
     InvalidRecord,
     ContentTooLarge,
     DuplicateRecord,
+    DuplicateKey,
     StaleRevision,
     SequenceExhausted,
     WrongCfc,
@@ -38,9 +84,61 @@ pub enum StorageError {
 pub struct Transaction {
     cfc: Cfc,
     records: [Option<PersistentForm>; MAX_STAGED],
+    system_records: [Option<SystemRecord>; MAX_STAGED_SYSTEM_RECORDS],
 }
 
 impl Transaction {
+    /// Stage any typed piece of CFC state in the same transaction used for
+    /// Forms. This is the database path for relationships, policy,
+    /// capabilities, accounts, settings, revisions, and checkpoint records.
+    pub fn stage_record(
+        &mut self,
+        key: RecordKey,
+        revision: u32,
+        bytes: &[u8],
+    ) -> Result<(), StorageError> {
+        if key.identity.is_zero() || revision == 0 {
+            return Err(StorageError::InvalidRecord);
+        }
+        if bytes.len() > SYSTEM_RECORD_CAPACITY {
+            return Err(StorageError::ContentTooLarge);
+        }
+        if !key.dimension.is_zero() && !self.cfc.owns_dimension(key.dimension) {
+            return Err(StorageError::UnownedDimension);
+        }
+        if matches!(
+            key.kind,
+            RecordKind::Form | RecordKind::Capability | RecordKind::Pimp
+        ) && !self.cfc.owns_form(key.identity)
+        {
+            return Err(StorageError::UnownedForm);
+        }
+        if self
+            .system_records
+            .iter()
+            .flatten()
+            .any(|record| record.key == key)
+        {
+            return Err(StorageError::DuplicateKey);
+        }
+        let slot = self
+            .system_records
+            .iter_mut()
+            .find(|slot| slot.is_none())
+            .ok_or(StorageError::Full)?;
+        let mut payload = [0; SYSTEM_RECORD_CAPACITY];
+        payload[..bytes.len()].copy_from_slice(bytes);
+        *slot = Some(SystemRecord {
+            cfc: self.cfc.fin(),
+            key,
+            revision,
+            journal_sequence: 0,
+            bytes: payload,
+            len: bytes.len() as u16,
+        });
+        Ok(())
+    }
+
     pub fn stage_form(
         &mut self,
         form: Fin,
@@ -103,6 +201,7 @@ pub struct ExpFs {
     /// and Dimension against this snapshot before a record can be created.
     cfc: Cfc,
     records: [Option<PersistentForm>; MAX_RECORDS],
+    system_records: [Option<SystemRecord>; MAX_SYSTEM_RECORDS],
     next_sequence: u32,
 }
 
@@ -112,6 +211,7 @@ impl ExpFs {
         Self {
             cfc: *cfc,
             records: [None; MAX_RECORDS],
+            system_records: [None; MAX_SYSTEM_RECORDS],
             next_sequence: 1,
         }
     }
@@ -124,6 +224,7 @@ impl ExpFs {
         Transaction {
             cfc: self.cfc,
             records: [None; MAX_STAGED],
+            system_records: [None; MAX_STAGED_SYSTEM_RECORDS],
         }
     }
 
@@ -133,16 +234,33 @@ impl ExpFs {
             return Err(StorageError::WrongCfc);
         }
         let staged_count = transaction.records.iter().flatten().count();
-        if staged_count == 0 {
+        let staged_system_count = transaction.system_records.iter().flatten().count();
+        if staged_count == 0 && staged_system_count == 0 {
             return Err(StorageError::EmptyTransaction);
         }
         let free_count = self.records.iter().filter(|slot| slot.is_none()).count();
         if staged_count > free_count {
             return Err(StorageError::Full);
         }
+        let free_system_count = self
+            .system_records
+            .iter()
+            .filter(|slot| slot.is_none())
+            .count();
+        if staged_system_count > free_system_count {
+            return Err(StorageError::Full);
+        }
         for record in transaction.records.iter().flatten() {
             if self
                 .latest(record.form, record.dimension)
+                .is_some_and(|previous| previous.revision >= record.revision)
+            {
+                return Err(StorageError::StaleRevision);
+            }
+        }
+        for record in transaction.system_records.iter().flatten() {
+            if self
+                .latest_record(record.key)
                 .is_some_and(|previous| previous.revision >= record.revision)
             {
                 return Err(StorageError::StaleRevision);
@@ -162,6 +280,15 @@ impl ExpFs {
                 .expect("capacity preflighted");
             *slot = Some(record);
         }
+        for mut record in transaction.system_records.into_iter().flatten() {
+            record.journal_sequence = sequence;
+            let slot = self
+                .system_records
+                .iter_mut()
+                .find(|slot| slot.is_none())
+                .expect("capacity preflighted");
+            *slot = Some(record);
+        }
         Ok(sequence)
     }
 
@@ -171,6 +298,27 @@ impl ExpFs {
             .flatten()
             .filter(|record| record.form == form && record.dimension == dimension)
             .max_by_key(|record| record.revision)
+    }
+
+    pub fn latest_record(&self, key: RecordKey) -> Option<&SystemRecord> {
+        self.system_records
+            .iter()
+            .flatten()
+            .filter(|record| record.key == key)
+            .max_by_key(|record| record.revision)
+    }
+
+    /// Read the newest version of every record no later than a committed
+    /// sequence. This is the semantic basis of an ExpFS checkpoint view.
+    pub fn records_at(&self, sequence: u32) -> impl Iterator<Item = &SystemRecord> {
+        self.system_records.iter().flatten().filter(move |record| {
+            record.journal_sequence <= sequence
+                && !self.system_records.iter().flatten().any(|candidate| {
+                    candidate.key == record.key
+                        && candidate.journal_sequence <= sequence
+                        && candidate.revision > record.revision
+                })
+        })
     }
 }
 
@@ -285,5 +433,47 @@ mod tests {
             Err(StorageError::UnownedDimension)
         );
         transaction.stage_form(fin(1), fin(2), 1).unwrap();
+    }
+
+    #[test]
+    fn all_system_state_uses_typed_transactional_records() {
+        let mut store = store();
+        let dimension = fin(2);
+        let form = fin(1);
+        let form_key = RecordKey {
+            kind: RecordKind::Form,
+            identity: form,
+            dimension,
+        };
+        let setting_key = RecordKey {
+            kind: RecordKind::Setting,
+            identity: fin(90),
+            dimension: Fin::ZERO,
+        };
+        let mut transaction = store.begin();
+        transaction
+            .stage_record(form_key, 1, b"name=MyNotes")
+            .unwrap();
+        transaction
+            .stage_record(setting_key, 1, b"theme=graphite")
+            .unwrap();
+        assert_eq!(store.commit(transaction), Ok(1));
+        assert_eq!(
+            store.latest_record(form_key).unwrap().bytes(),
+            b"name=MyNotes"
+        );
+        assert_eq!(store.records_at(1).count(), 2);
+
+        let mut transaction = store.begin();
+        transaction
+            .stage_record(form_key, 2, b"name=Notes")
+            .unwrap();
+        assert_eq!(store.commit(transaction), Ok(2));
+        assert_eq!(
+            store.latest_record(form_key).unwrap().bytes(),
+            b"name=Notes"
+        );
+        assert_eq!(store.records_at(1).count(), 2);
+        assert_eq!(store.records_at(2).count(), 2);
     }
 }

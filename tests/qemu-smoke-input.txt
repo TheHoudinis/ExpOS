@@ -65,6 +65,8 @@ delete Notes
 recover Notes
 forms
 grant DemoBrowser execute
+execute DemoBrowser
+ps
 handles
 handlecheck 3 Root execute
 pimp Browser network=restricted

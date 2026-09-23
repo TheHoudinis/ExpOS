@@ -12,6 +12,7 @@ mod capability;
 mod cfc;
 mod diese;
 mod display;
+mod execution;
 mod expfs;
 mod fin;
 mod form;
@@ -40,7 +41,13 @@ pub use display::{
     BufferFormat, BufferHandle, DisplayError, DisplayEvent, DisplayEventKind, DisplayServer, Rect,
     Surface, SurfaceRole, SurfaceState,
 };
-pub use expfs::{ExpFs, StorageError, Transaction};
+pub use execution::{
+    AddressSpace, CpuState, ExecutionContext, ExecutionError, ExecutionEvent, ExecutionIdentity,
+    ExecutionState, Scheduler, MAX_CONTEXT_EVENTS, MAX_CONTEXT_HANDLES, MAX_EXECUTION_CONTEXTS,
+};
+pub use expfs::{
+    ExpFs, RecordKey, RecordKind, StorageError, SystemRecord, Transaction, SYSTEM_RECORD_CAPACITY,
+};
 pub use fin::Fin;
 pub use form::{Dimension, Form, FormKind, FormRegistry, Lifecycle, Visibility};
 pub use pimp::{NetworkPolicy, PimpScope, PimpSpec, PimpValue, SpecKey};

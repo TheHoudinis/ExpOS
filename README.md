@@ -8,7 +8,7 @@ ExpOS is the Form-native operating system described by
 - Operator-authenticated single-user maintenance and normal multi-user startup;
 - ExpPython, a bounded embedded MicroPython interpreter, plus a host Python SDK;
 - FIN identity, Dimensions, PIMP/DIESE policy, capability-scoped Form Handles,
-  typed relationships and transactional ExpFS metadata;
+  typed relationships and a disk-backed transactional ExpFS Form graph;
 - a bounded semantic CFC core with a distinct `CfcFin`, required name and
   non-replaceable Primary Dimension, exclusive cross-CFC identity ownership,
   CFC-owned ExpFS transactions/Handles, and CFC-bound metadata for an
@@ -16,6 +16,9 @@ ExpOS is the Form-native operating system described by
 - core ExpScope deny-by-default reachability, broker-lifetime ExpSeal
   root-handle cutoff with strictly attenuated delegation, and fixed-capacity
   ExpBudget accounting;
+- Form-native execution contexts and cooperative scheduler admission keyed by
+  CFC/Dimension/FIN, carrying an address-space descriptor, Handle set,
+  ExpBudget, event queue, memory/CPU state, and dispatch accounting;
 - bounded Form-native kernel controls: typed tunables, signal/timer/resource
   readiness watches, and shell-runtime-local resource accounting with DIESE-gated
   mutation;
@@ -42,7 +45,10 @@ ExpOS is the Form-native operating system described by
   DOM-mutation/click-handler JavaScript subset, and searches DuckDuckGo's
   non-JavaScript HTML endpoint from the address bar;
 - graphical and console login for Operator, Power and Guest authority;
-- dedicated ATA PIO persistent state for accounts and desktop preferences.
+- dedicated ATA PIO persistence with alternating verified ExpFS CFC snapshots
+  for arbitrary Forms/content/Dimensions/relationships/revisions/PIMP state,
+  accounts, and desktop settings; the old EXPOST03 slots are read-only migration
+  input; eight full-state rotating checkpoints can be listed and restored.
 
 ## Approved Genesis target
 
@@ -58,8 +64,9 @@ a key-encryption key (KEK) from the Operator password to wrap and unlock that
 storage key, and persistent CFC state uses authenticated encryption (AEAD).
 Recovery retains eight rotating checkpoints plus a protected immutable
 installation baseline per CFC. Exact AEAD selection, Argon2id parameters,
-key-envelope/nonce layout, checkpoint encoding, and crash-consistent rotation
-remain implementation work.
+key-envelope/nonce layout and authenticated/protected checkpoint encoding remain
+implementation work; the current CRC format already performs header-last
+rotation for current state and eight full-state checkpoint slots.
 
 Native UEFI is the default Genesis and normal boot path; BIOS remains a
 compatibility, recovery, and development fallback. **Architect** is the official
@@ -71,11 +78,16 @@ and **ExpBudget** for per-context resource enforcement.
 These are approved target invariants, not claims about the current image. The
 bounded `Cfc`/`CfcCatalog` model enforces exclusive ownership of registered
 Form and Dimension FINs. ExpScope snapshots that ownership, recovery artifacts
-and ExpFS records are CFC-bound, and Handles carry a CFC identity. The general
-Form/relationship registries and privileged runtime boundaries are not yet
-fully CFC-integrated. Genesis construction, native disk capture/restore,
-Argon2id key wrapping, AEAD storage, process/address-space confinement, and
-scheduler-wide budget enforcement also remain implementation work.
+and ExpFS records are CFC-bound, and Handles carry a CFC identity. Native Form
+mutations now commit and recover a complete bounded Form graph through ExpFS,
+so a newly created Form and its content survive a reboot without a Form-specific
+persistence path. Accounts and settings now load from and commit through the
+same ExpFS current-state transaction; EXPOST03 is only a boot-time migration
+fallback. Typed execution contexts now reach scheduler admission and
+per-context budget accounting. Native checkpoint capture/restore is live;
+Genesis construction, the protected installation baseline, Argon2id key
+wrapping, AEAD storage, real page-table switching, interrupts/preemption, and
+user-mode CPU context switching remain implementation work.
 
 The 32-bit Diamond II source remains isolated under `legacy/alpha32/` as a
 buildable migration reference.
@@ -100,7 +112,7 @@ make network-check  # verify ICMP, TCP, HTTP and Browser against a local fixture
 make internet-check # verify live DNS and public HTTP (requires Internet access)
 make https-check    # verify TLS and fetch youtube.com HTML (requires Internet)
 make search-check   # verify DuckDuckGo HTML address-bar search (requires Internet)
-make persistence-check # verify accounts/settings across two boots
+make persistence-check # verify Forms, Handles, settings and checkpoints across boots
 make ayo            # test and build Ayo v3
 make all            # run the complete native test suite
 ```
@@ -112,7 +124,8 @@ make run
 ```
 
 `make run` creates `runtime/expos-state.img` once and attaches it as the
-primary ATA disk. Account and customization changes are journaled there. The
+primary ATA disk. ExpFS Form state, accounts, and customization changes are
+journaled there. The
 image is intentionally preserved by `make clean`; copy it to back up the
 current local state.
 
@@ -351,12 +364,12 @@ and accounting primitives, not FreeBSD compatibility, a preemptive scheduler,
 or persistent system configuration. `budget` and `rlimit` remain compatibility
 aliases for `expbudget`.
 
-Accounts and Settings preferences are persisted through the dedicated state
-disk. General Form contents and PIMP changes remain in memory until native
-ExpFS block persistence is connected. The current state disk alternates two
-plaintext CRC-protected slots; it is not the approved AEAD CFC store and does
-not yet provide eight rotating checkpoints or a protected installation
-baseline.
+The dedicated state disk now carries alternating, CFC-bound ExpFS database
+snapshots containing Forms, content, Dimensions, relationships, revisions,
+PIMP network state, accounts and Settings preferences. The current format is
+CRC-protected rather than AEAD-protected. It captures and restores eight
+rotating full-state checkpoints; the separate protected installation baseline
+is not yet stored on disk.
 
 ## Preserved implementation
 

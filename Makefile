@@ -144,6 +144,8 @@ check: $(ISO)
 	grep -q "Reclaimed 'Scratch'" $(BUILD)/serial.log
 	grep -q "Created and bound 'DemoBrowser'" $(BUILD)/serial.log
 	grep -q "Granted Handle" $(BUILD)/serial.log
+	grep -q "EXPOS_FORM_SCHEDULED context=.*fin=.*dimension=" $(BUILD)/serial.log
+	grep -q "Scheduled 'DemoBrowser' as context" $(BUILD)/serial.log
 	grep -q "Handle #3 authorizes execute for requester 'Root'" $(BUILD)/serial.log
 	grep -q "^42" $(BUILD)/serial.log
 	grep -q "ExpOS Forms can carry structured state and revisions" $(BUILD)/serial.log
@@ -319,10 +321,18 @@ persistence-check: $(ISO)
 	grep -q "EXPOS_SETTING_CHANGED key=presentation-policy value=Responsive" $(BUILD)/persistence-write.log
 	grep -q "EXPOS_SETTING_CHANGED key=taskbar-placement value=Top" $(BUILD)/persistence-write.log
 	grep -q "EXPOS_STATE_COMMIT generation=" $(BUILD)/persistence-write.log
+	grep -q "EXPOS_EXPFS_COMMIT generation=" $(BUILD)/persistence-write.log
+	grep -q "Created and bound 'MyNotes'" $(BUILD)/persistence-write.log
+	grep -q "Granted Handle .* execute on MyNotes" $(BUILD)/persistence-write.log
+	grep -q "Created ExpFS checkpoint 1" $(BUILD)/persistence-write.log
 	! grep -q "violetmemory" $(BUILD)/persistence-write.log
 	! LC_ALL=C grep -a -q "violetmemory" $(BUILD)/persistence-state.img
-	grep -q "EXPOS_STATE_READY generation=.*loaded=true" $(BUILD)/persistence-read.log
+	grep -q "EXPOS_STATE_READY generation=.*slot=expfs loaded=true" $(BUILD)/persistence-read.log
 	grep -q "EXPOS_ACCOUNTS_READY source=disk persisted=true" $(BUILD)/persistence-read.log
+	grep -q "EXPOS_EXPFS_FORMS_RESTORED" $(BUILD)/persistence-read.log
+	grep -q "^hello" $(BUILD)/persistence-read.log
+	grep -q "Scheduled 'MyNotes' as context" $(BUILD)/persistence-read.log
+	grep -Eq "^1[[:space:]]+[0-9]+[[:space:]]+0" $(BUILD)/persistence-read.log
 	grep -q "EXPOS_LOGIN_OK user=keeper" $(BUILD)/persistence-read.log
 	grep -q "keeper (Power authority)" $(BUILD)/persistence-read.log
 	grep -q "DIESE denied 'safevideo' for Power authority" $(BUILD)/persistence-read.log

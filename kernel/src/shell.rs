@@ -9,9 +9,10 @@ use crate::{
     slog, vga,
 };
 use expos_core::{
-    Authority, BootReport, CapabilityBroker, Dimension, Fin, Form, FormHandle, FormKind, Lifecycle,
-    NetworkPolicy, Operations, PimpScope, PimpSpec, PimpValue, Relationship, RelationshipGraph,
-    RelationshipKind, SpecKey, Text, GO_ABI_VERSION,
+    AddressSpace, Authority, BootReport, CapabilityBroker, Dimension, ExecutionContext,
+    ExecutionIdentity, ExecutionState, Fin, Form, FormHandle, FormKind, Lifecycle, NetworkPolicy,
+    Operations, PimpScope, PimpSpec, PimpValue, Relationship, RelationshipGraph, RelationshipKind,
+    Scheduler, SpecKey, Text, GO_ABI_VERSION,
 };
 
 const MAX_LINE: usize = 128;
@@ -108,6 +109,7 @@ struct Shell {
     journal_sequence: u32,
     network_policy: NetworkPolicy,
     kernel_controls: KernelControls,
+    scheduler: Scheduler,
 }
 
 impl Shell {
@@ -150,6 +152,25 @@ impl Shell {
         (broker, handles)
     }
 
+    fn restore_capabilities(
+        report: BootReport,
+        broker: &mut CapabilityBroker,
+        handles: &mut [Option<FormHandle>; MAX_HANDLES],
+    ) {
+        let Some(snapshot) = crate::expfs_store::loaded_snapshot(report.cfc_fin) else {
+            return;
+        };
+        for handle in snapshot.handles.into_iter().flatten() {
+            if broker.restore(handle).is_err() {
+                println!("[warn] ignored invalid capability record #{}", handle.id);
+                continue;
+            }
+            if let Some(slot) = handles.iter_mut().skip(2).find(|slot| slot.is_none()) {
+                *slot = Some(handle);
+            }
+        }
+    }
+
     fn new(report: BootReport, session: Session) -> Self {
         let mut forms = [None; MAX_FORMS];
         forms[0] = Some(Form::new(report.root_fin, "Root", FormKind::Root));
@@ -170,7 +191,8 @@ impl Shell {
             network_form.lifecycle = Lifecycle::Recoverable;
         }
         forms[5] = Some(network_form);
-        let (broker, handles) = Self::session_capabilities(report, session);
+        let (mut broker, mut handles) = Self::session_capabilities(report, session);
+        Self::restore_capabilities(report, &mut broker, &mut handles);
         let mut dimensions = [None; MAX_DIMENSIONS];
         dimensions[0] = Some(Dimension::new(report.stable_fin, "Stable", true));
         let mut relationships = RelationshipGraph::new();
@@ -258,10 +280,57 @@ impl Shell {
             &mut content[5],
             b"Network Driver Form: RTL8139, Ethernet, ARP, IPv4, ICMP, UDP, DNS, TCP, HTTP and verified TLS 1.3 HTTPS",
         );
+        let mut next_fin = 2;
+        let mut next_dimension_fin = 2;
+        let mut journal_sequence = report.journal_sequence;
+        let mut network_policy = NetworkPolicy::Restricted;
+        if let Some(snapshot) = crate::expfs_store::loaded_snapshot(report.cfc_fin) {
+            forms = [None; MAX_FORMS];
+            content = [FormContent::empty(); MAX_FORMS];
+            dimensions = snapshot.dimensions;
+            relationships = RelationshipGraph::new();
+            for (index, stored) in snapshot.forms.into_iter().enumerate() {
+                if let Some(stored) = stored {
+                    forms[index] = Some(stored.form);
+                    content[index].bytes = stored.content;
+                    content[index].length = stored.content_len;
+                }
+            }
+            for relationship in snapshot.relationships.into_iter().flatten() {
+                if relationships.relate(relationship).is_err() {
+                    println!("[warn] ignored invalid relationship in ExpFS snapshot");
+                }
+            }
+            next_fin = snapshot.next_fin;
+            next_dimension_fin = snapshot.next_dimension_fin;
+            journal_sequence = snapshot.journal_sequence;
+            network_policy = snapshot.network_policy;
+            slog!(
+                "EXPOS_EXPFS_FORMS_RESTORED count={} sequence={}\r\n",
+                forms.iter().flatten().count(),
+                journal_sequence
+            );
+        }
         let mut kernel_controls = KernelControls::new();
         kernel_controls
             .resize_form_content(0, content.iter().map(|entry| entry.length as usize).sum())
             .expect("built-in Form content fits its budget");
+        let mut scheduler = Scheduler::new();
+        let mut root_context = ExecutionContext::new(
+            ExecutionIdentity::new(report.cfc_fin, report.stable_fin, report.root_fin),
+            AddressSpace::kernel_bootstrap(),
+            u64::MAX,
+        )
+        .expect("the boot execution identity is valid");
+        root_context
+            .attach_handle(handles[0].expect("the boot Handle exists"))
+            .expect("the boot Handle belongs to the Root context");
+        scheduler
+            .admit(root_context)
+            .expect("the Root execution context must fit");
+        scheduler
+            .dispatch_next()
+            .expect("the Root execution context must run");
         Self {
             report,
             session,
@@ -275,11 +344,12 @@ impl Shell {
             history_next: 0,
             history_count: 0,
             boot_tsc: crate::hardware::timestamp(),
-            next_fin: 2,
-            next_dimension_fin: 2,
-            journal_sequence: report.journal_sequence,
-            network_policy: NetworkPolicy::Restricted,
+            next_fin,
+            next_dimension_fin,
+            journal_sequence,
+            network_policy,
             kernel_controls,
+            scheduler,
         }
     }
 
@@ -373,18 +443,65 @@ impl Shell {
             }
             "journal" => {
                 println!(
-                    "Form metadata journal sequence #{} (current boot)",
+                    "ExpFS system database journal sequence #{}",
                     self.journal_sequence
                 );
-                match crate::state::loaded_generation() {
-                    Some(generation) => println!(
-                        "persistent account/settings journal generation #{}",
-                        generation
-                    ),
-                    None if crate::state::persistent_available() => {
-                        println!("persistent account/settings disk is blank")
+                match crate::expfs_store::generation() {
+                    Some(generation) => println!("ExpFS disk generation #{}", generation),
+                    None if crate::expfs_store::available() => {
+                        println!("ExpFS disk is blank until the first mutation")
                     }
-                    None => println!("persistent account/settings disk is unavailable"),
+                    None => println!("ExpFS disk is unavailable; state is volatile"),
+                }
+                match crate::state::loaded_generation() {
+                    Some(generation) => {
+                        println!("ExpFS account/settings record generation #{}", generation)
+                    }
+                    None if crate::state::persistent_available() => {
+                        println!("ExpFS account/settings records are not initialized")
+                    }
+                    None => println!("ExpFS account/settings records are unavailable"),
+                }
+                true
+            }
+            "checkpoint" => {
+                self.commit_action();
+                match crate::expfs_store::record_checkpoint() {
+                    Ok(checkpoint) => println!(
+                        "Created ExpFS checkpoint {} at journal sequence {}.",
+                        checkpoint.state_id, checkpoint.journal_sequence
+                    ),
+                    Err(error) => println!("checkpoint: {}", error.message()),
+                }
+                true
+            }
+            "checkpoints" => {
+                println!("STATE  JOURNAL  SLOT");
+                let mut count = 0;
+                for checkpoint in crate::expfs_store::checkpoints().into_iter().flatten() {
+                    println!(
+                        "{:<6} {:<8} {}",
+                        checkpoint.state_id, checkpoint.journal_sequence, checkpoint.slot
+                    );
+                    count += 1;
+                }
+                if count == 0 {
+                    println!("(no ExpFS checkpoints)");
+                }
+                true
+            }
+            "restorepoint" => {
+                let Some(state_id) = words.next().and_then(|value| value.parse::<u64>().ok())
+                else {
+                    println!("usage: restorepoint <state-id>");
+                    return;
+                };
+                match crate::expfs_store::restore_checkpoint(state_id) {
+                    Ok(_) => {
+                        println!("Restored checkpoint {}; rebooting into it.", state_id);
+                        port::reboot();
+                    }
+                    Err(error) => println!("restorepoint: {}", error.message()),
                 }
                 true
             }
@@ -400,9 +517,18 @@ impl Shell {
                 true
             }
             "ps" => {
-                println!("CTX  FORM             STATE");
-                println!("0    Kernel           running");
-                println!("1    Root/Shell       running (bootstrap CPU)");
+                println!("CTX  FORM FIN                              DIMENSION FIN                         STATE          DISPATCHES");
+                self.scheduler.visit(|context| {
+                    let identity = context.identity();
+                    println!(
+                        "{:<4} {}  {}  {:<14} {}",
+                        context.id(),
+                        identity.form,
+                        identity.dimension,
+                        execution_state_name(context.state()),
+                        context.dispatches()
+                    );
+                });
                 true
             }
             "kstat" => {
@@ -692,8 +818,8 @@ impl Shell {
                 let requested_mode = crate::session::choose_boot_mode(input);
                 let login = crate::session::login(input, requested_mode);
                 self.session = login.session;
-                (self.broker, self.handles) =
-                    Self::session_capabilities(self.report, self.session);
+                (self.broker, self.handles) = Self::session_capabilities(self.report, self.session);
+                Self::restore_capabilities(self.report, &mut self.broker, &mut self.handles);
                 if login.mode == crate::session::BootMode::Graphical {
                     crate::desktop::run_with_network(
                         input,
@@ -707,6 +833,10 @@ impl Shell {
             }
             "mkform" => {
                 self.mkform(words.next(), words.next());
+                true
+            }
+            "execute" => {
+                self.execute_form(words.next());
                 true
             }
             "view" | "cat" => {
@@ -865,7 +995,9 @@ impl Shell {
         println!("  useradd <name> <operator|power|guest> <password>");
         println!("  userdel <name>  passwd <name> <new-password>");
         println!("  forms packages dimensions makedim inspect journal policy handles history");
+        println!("  checkpoint checkpoints restorepoint <state-id>");
         println!("  mkform <name> [service|interface|package|driver|data|policy]");
+        println!("  execute <Form-name>   (admit a FIN context to the scheduler)");
         println!("  view/cat write append head delete recover move copy");
         println!("  hexdump du shasum df which resolve retire activate reclaim");
         println!(
@@ -912,7 +1044,12 @@ impl Shell {
         );
         println!("active Forms: {}  active Handles: {}", active, handle_count);
         println!("typed relationships: {}", self.relationships.count());
-        println!("journal sequence: {}", self.journal_sequence);
+        println!("ExpFS journal sequence: {}", self.journal_sequence);
+        match crate::expfs_store::generation() {
+            Some(generation) => println!("ExpFS database generation: {}", generation),
+            None if crate::expfs_store::available() => println!("ExpFS database: blank disk"),
+            None => println!("ExpFS database: volatile"),
+        }
         match crate::state::loaded_generation() {
             Some(generation) => println!("saved state generation: {}", generation),
             None if crate::state::persistent_available() => println!("saved state: blank disk"),
@@ -1710,6 +1847,84 @@ impl Shell {
         println!("FIN={}", fin);
     }
 
+    fn execute_form(&mut self, identity: Option<&str>) {
+        let Some(identity) = identity else {
+            println!("usage: execute <Form-name>");
+            return;
+        };
+        let Some(form) = self.find_form(identity).copied() else {
+            println!("No Form named '{}'.", identity);
+            return;
+        };
+        if form.lifecycle != Lifecycle::Active {
+            println!("DIESE denied: '{}' is not an active Form.", identity);
+            return;
+        }
+        let Some(handle) = self.handles.iter().flatten().copied().find(|handle| {
+            !handle.revoked
+                && handle.target == form.fin
+                && handle.dimension == self.report.stable_fin
+                && handle.operations.contains(Operations::EXECUTE)
+        }) else {
+            println!(
+                "DIESE denied: grant '{}' execute capability before scheduling it.",
+                identity
+            );
+            return;
+        };
+        if self
+            .broker
+            .authorize(
+                handle.id,
+                form.fin,
+                self.report.stable_fin,
+                Operations::EXECUTE,
+                crate::hardware::timestamp(),
+            )
+            .is_err()
+        {
+            println!("DIESE denied: the Execute Handle is no longer valid.");
+            return;
+        }
+        let mut context = match ExecutionContext::new(
+            ExecutionIdentity::new(self.report.cfc_fin, self.report.stable_fin, form.fin),
+            AddressSpace::kernel_bootstrap(),
+            256,
+        ) {
+            Ok(context) => context,
+            Err(error) => {
+                println!("Scheduler rejected the execution context: {:?}.", error);
+                return;
+            }
+        };
+        if let Err(error) = context.attach_handle(handle) {
+            println!("Scheduler rejected the Form Handle set: {:?}.", error);
+            return;
+        }
+        let context_id = match self.scheduler.admit(context) {
+            Ok(id) => id,
+            Err(error) => {
+                println!("Scheduler admission failed: {:?}.", error);
+                return;
+            }
+        };
+        let dispatched = self.scheduler.dispatch_next().unwrap_or(context_id);
+        println!(
+            "Scheduled '{}' as context #{}; current context #{}.",
+            identity, context_id, dispatched
+        );
+        println!(
+            "FIN={} Dimension={} CFC={} Handles=1 ExpBudget=256.",
+            form.fin, self.report.stable_fin, self.report.cfc_fin
+        );
+        slog!(
+            "EXPOS_FORM_SCHEDULED context={} fin={} dimension={}\r\n",
+            context_id,
+            form.fin,
+            self.report.stable_fin
+        );
+    }
+
     fn inspect(&self, identity: Option<&str>) {
         let Some(identity) = identity else {
             println!("usage: inspect <Form-name>");
@@ -2088,7 +2303,7 @@ impl Shell {
             println!("DIESE denied the Handle request.");
             return;
         };
-        let Some(slot) = self.handles.iter_mut().find(|slot| slot.is_none()) else {
+        let Some(slot) = self.handles.iter_mut().skip(2).find(|slot| slot.is_none()) else {
             println!("The bootstrap Handle table is full.");
             return;
         };
@@ -2220,6 +2435,44 @@ impl Shell {
 
     fn commit_action(&mut self) {
         self.journal_sequence = self.journal_sequence.wrapping_add(1).max(1);
+        let mut snapshot = crate::expfs_store::Snapshot::empty(
+            self.report.cfc_fin,
+            self.report.cfc_name,
+            self.report.stable_fin,
+        );
+        snapshot.next_fin = self.next_fin;
+        snapshot.next_dimension_fin = self.next_dimension_fin;
+        snapshot.journal_sequence = self.journal_sequence;
+        snapshot.network_policy = self.network_policy;
+        snapshot.dimensions = self.dimensions;
+        for index in 0..MAX_FORMS {
+            if let Some(form) = self.forms[index] {
+                snapshot.forms[index] = Some(crate::expfs_store::StoredForm {
+                    form,
+                    content: self.content[index].bytes,
+                    content_len: self.content[index].length,
+                });
+            }
+        }
+        let mut relationship_index = 0;
+        self.relationships.visit(|relationship| {
+            if relationship_index < snapshot.relationships.len() {
+                snapshot.relationships[relationship_index] = Some(relationship);
+                relationship_index += 1;
+            }
+        });
+        for (index, handle) in self.handles.iter().skip(2).flatten().copied().enumerate() {
+            if index < snapshot.handles.len() {
+                snapshot.handles[index] = Some(handle);
+            }
+        }
+        match crate::expfs_store::commit(snapshot) {
+            Ok(sequence) => self.journal_sequence = sequence,
+            Err(error) => {
+                println!("[warn] ExpFS commit failed: {}", error.message());
+                slog!("EXPOS_EXPFS_COMMIT_FAILED error={:?}\r\n", error);
+            }
+        }
     }
 
     fn record_history(&mut self, line: &str) {
@@ -2426,6 +2679,9 @@ fn is_shell_command(name: &str) -> bool {
             | "inspect"
             | "fin"
             | "journal"
+            | "checkpoint"
+            | "checkpoints"
+            | "restorepoint"
             | "history"
             | "uptime"
             | "ps"
@@ -2460,6 +2716,7 @@ fn is_shell_command(name: &str) -> bool {
             | "policy"
             | "handles"
             | "mkform"
+            | "execute"
             | "view"
             | "cat"
             | "head"
@@ -2502,6 +2759,8 @@ fn is_mutating_command(name: &str) -> bool {
             | "useradd"
             | "userdel"
             | "passwd"
+            | "checkpoint"
+            | "restorepoint"
             | "mkform"
             | "write"
             | "append"
@@ -2564,6 +2823,8 @@ fn is_operator_command(name: &str) -> bool {
             | "useradd"
             | "userdel"
             | "passwd"
+            | "checkpoint"
+            | "restorepoint"
             | "delete"
             | "retire"
             | "reclaim"
@@ -2720,6 +2981,16 @@ const fn lifecycle_name(lifecycle: Lifecycle) -> &'static str {
         Lifecycle::Retired => "retired",
         Lifecycle::Recoverable => "recoverable",
         Lifecycle::Removed => "removed",
+    }
+}
+
+const fn execution_state_name(state: ExecutionState) -> &'static str {
+    match state {
+        ExecutionState::Ready => "ready",
+        ExecutionState::Running => "running",
+        ExecutionState::Waiting => "waiting",
+        ExecutionState::BudgetBlocked => "budget-blocked",
+        ExecutionState::Exited => "exited",
     }
 }
 

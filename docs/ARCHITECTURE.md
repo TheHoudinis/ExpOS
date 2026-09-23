@@ -13,7 +13,7 @@ native UEFI / BIOS compatibility fallback
 CfcFin -> CFC ownership/catalog (semantic core)
           |
           v
- FIN -> Form Registry -> Dimension Binding (runtime integration partial)
+ FIN -> ExpFS current Form graph -> Dimension Binding
           |                    |
           v                    v
  CFC-scoped Handle <--- capability decision
@@ -22,7 +22,12 @@ CfcFin -> CFC ownership/catalog (semantic core)
  PIMP specification -> DIESE resolution
           |
           v
- ExpFS transaction + journal sequence
+ ExpFS transaction -> alternating current-state snapshots
+          |
+          +-> checkpoint record/view semantics
+          |
+          v
+ Form Execution Context -> cooperative scheduler admission
 ```
 
 ## Approved target architecture (not yet complete)
@@ -41,17 +46,19 @@ encrypted CFC requires AEAD. Every CFC retains eight rotating checkpoints plus
 a protected immutable installation baseline; encrypted CFC recovery state is
 authenticated by its storage protection. Normal writes, rotation, and restore
 may not replace that baseline. Exact AEAD choice, Argon2id parameters,
-key-envelope layout, nonce construction, checkpoint format, and
-crash-consistency protocol remain to be specified and implemented.
+key-envelope layout, nonce construction, authenticated checkpoint format, and
+encrypted crash-consistency protocol remain to be specified and implemented.
+The current plaintext/CRC adapter already uses header-last current-state commits
+and an eight-slot full-database checkpoint ring.
 
 The approved confinement/enforcement names are `ExpScope` for CFC/Dimension-
 aware confinement, `ExpSeal` for monotonic capability reduction, and
 `ExpBudget` for per-context resource enforcement. The semantic core now has a
 deny-by-default fixed reachability scope, a broker-lifetime root-handle
 issuance cutoff with strict attenuation, and fixed-capacity checked budgets.
-Complete address-space/execution confinement, enforcement at every
-driver/storage boundary, durable execution-context seals, and
-scheduler/resource-owner accounting have not landed. The
+Complete address-space confinement, enforcement at every driver/storage
+boundary, durable execution-context seals, and hardware context switching have
+not landed. Scheduler admission and per-context accounting have landed. The
 official configurable-installer label is **Architect**; “expert” is only a
 legacy explanation. Native UEFI is the default boot path, while BIOS is
 retained for compatibility, recovery, and development.
@@ -69,7 +76,7 @@ retained for compatibility, recovery, and development.
    same-scope conflicts with a diagnostic.
 6. The capability broker returns a time-limited, Dimension-scoped Form Handle
    that authorizes only read and execution.
-7. ExpFS preflights and atomically publishes a journaled metadata transaction.
+7. ExpFS preflights and atomically publishes typed system-database records.
 8. The kernel starts a graphical Session Manager and maps the selected identity
    to Operator, Power or Guest authority before opening the command environment.
    Polling COM1, PS/2 keyboard and PS/2 mouse input work before the interrupt
@@ -77,8 +84,11 @@ retained for compatibility, recovery, and development.
    create and inspect Forms, change lifecycle state, grant or revoke Handles,
    validate PIMP specifications, inspect system state, reboot, and shut down.
 9. A bounded primary-master ATA PIO driver loads a dedicated ExpOS state image.
-   Accounts and desktop preferences are recovered from the newest valid of two
-   CRC-protected journal slots and mutations alternate slots by generation.
+   The native ExpFS adapter recovers the newest valid of two CRC-protected CFC
+   database snapshots and commits the inactive payload before its header. A
+   snapshot contains arbitrary Form identity/content, revisions, Dimensions,
+   relationships, PIMP network state, allocator state, accounts and desktop
+   settings. The older account/preference slots are read-only migration input.
 10. A fixed-capacity kernel-control service exposes typed tunables, readiness
     watches and resource ledgers to the console. DIESE checks the session's
     revocable bootstrap Handle before every mutation.
@@ -86,14 +96,20 @@ retained for compatibility, recovery, and development.
     non-replaceable Primary Dimension, seven optional secondary Dimensions,
     sixteen owned Forms and thirty-two bindings. A four-CFC catalog rejects
     every cross-CFC Form/Dimension FIN reuse, including cross-kind collisions.
-12. Capability brokers, Handles, and in-memory ExpFS transactions carry a CFC
+12. Capability brokers, Handles, and ExpFS transactions carry a CFC
     identity. ExpScope, ExpSeal, and ExpBudget provide bounded, allocation-free
     policy primitives; kernel integration remains partial.
-13. CFC-bound recovery metadata stores an installation-baseline descriptor
-    outside an up-to-eight-entry rotating checkpoint ring. Publication and
-    batch validation are atomic and restore selection is non-destructive. This
-    code does not capture, protect, encrypt, authenticate, persist, or restore
-    disk contents.
+13. Form-native execution contexts carry CFC, Dimension, FIN, address-space
+    identity, a bounded Handle set, event queue, CPU state, and ExpBudget.
+    Cooperative scheduler admission/dispatch is live through `execute`; actual
+    page-table/register switching, interrupts, and user mode remain pending.
+14. CFC-bound recovery metadata stores an installation-baseline descriptor
+    outside an up-to-eight-entry rotating checkpoint ring. The native ExpFS
+    adapter now persists eight complete CFC database checkpoints, rotates the
+    oldest slot, lists retained state IDs and restores a selected checkpoint
+    into the alternating current-state slots before reboot. Checkpoints are
+    CRC-verified but not yet encrypted/authenticated, and the protected
+    installation-baseline payload is not yet on disk.
 
 ## Trust boundaries
 

@@ -14,6 +14,7 @@ mod compat;
 mod crypto;
 mod desktop;
 pub mod display_timing;
+mod expfs_store;
 mod framebuffer;
 mod games;
 mod hardware;
@@ -155,6 +156,7 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
         }
         Err(error) => panic!("Form-native bootstrap failed: {:?}", error),
     };
+    expfs_store::initialize(report.cfc_fin, report.cfc_name, report.stable_fin);
     state::initialize();
     let preferences = state::preferences();
     if let Some(mode) = framebuffer::DisplayMode::from_persisted(preferences.display_mode) {

@@ -6,6 +6,9 @@ safevideo
 displayreset
 desktop
 q
+view MyNotes
+execute MyNotes
+checkpoints
 shutdown
 logout
 2222

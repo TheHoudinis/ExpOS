@@ -105,6 +105,12 @@ impl RelationshipGraph {
     pub fn count(&self) -> usize {
         self.entries.iter().flatten().count()
     }
+
+    pub fn visit(&self, mut visitor: impl FnMut(Relationship)) {
+        for relationship in self.entries.iter().flatten().copied() {
+            visitor(relationship);
+        }
+    }
 }
 
 impl Default for RelationshipGraph {
