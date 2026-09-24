@@ -146,6 +146,9 @@ check: $(ISO)
 	grep -q "Granted Handle" $(BUILD)/serial.log
 	grep -q "EXPOS_FORM_SCHEDULED context=.*fin=.*dimension=" $(BUILD)/serial.log
 	grep -q "Scheduled 'DemoBrowser' as context" $(BUILD)/serial.log
+	grep -q "hello from scheduled Form" $(BUILD)/serial.log
+	grep -q "EXPOS_FORM_EXITED context=.*result=0" $(BUILD)/serial.log
+	grep -q "Executable Form 'Hello' exited with result 0" $(BUILD)/serial.log
 	grep -q "Handle #3 authorizes execute for requester 'Root'" $(BUILD)/serial.log
 	grep -q "^42" $(BUILD)/serial.log
 	grep -q "ExpOS Forms can carry structured state and revisions" $(BUILD)/serial.log
@@ -256,7 +259,9 @@ network-check: $(ISO)
 	trap 'kill $$fixture_pid 2>/dev/null || true' EXIT; \
 	set +e; timeout 35 $(QEMU) -drive file=$(BUILD)/network-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-network-input.txt > $(BUILD)/network-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
 	grep -q "EXPOS_NET_READY driver=rtl8139" $(BUILD)/network-serial.log
+	grep -q "EXPOS_DHCP_BOUND address=10.0.2.15 gateway=10.0.2.2 dns=10.0.2.3" $(BUILD)/network-serial.log
 	grep -q "ether0  up" $(BUILD)/network-serial.log
+	grep -q "ipv4=dhcp dns=10.0.2.3" $(BUILD)/network-serial.log
 	grep -q "EXPOS_HTTP_OK status=200 bytes=38 peer=10.0.2.2" $(BUILD)/network-serial.log
 	grep -q "ExpOS native TCP and HTTP are online." $(BUILD)/network-serial.log
 	grep -q "EXPOS_BROWSER_ENGINE nodes=4 css_rules=5 scripts=1 executed=1 rejected=0 handlers=1" $(BUILD)/network-serial.log

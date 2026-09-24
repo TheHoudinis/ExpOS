@@ -180,10 +180,10 @@ pub fn print_kernel_features() {
     println!(
         "desktop: empty-start taskbar shell, window controls, pointer hit-testing, routed input"
     );
-    println!("network: Ethernet, ARP, IPv4, ICMP, UDP, DNS, TCP, HTTP and verified TLS 1.3");
+    println!("network: Ethernet, ARP, DHCP/IPv4, ICMP, UDP, DNS, TCP, HTTP and verified TLS 1.3");
     println!("radio: capability policy plus PCI Wi-Fi/Bluetooth class discovery");
     println!(
-        "pending: interrupts, general filesystem/audio, DHCP, IPv6, Wi-Fi drivers and USB/Bluetooth"
+        "pending: interrupts, general filesystem/audio, IPv6, Wi-Fi drivers and USB/Bluetooth"
     );
 }
 

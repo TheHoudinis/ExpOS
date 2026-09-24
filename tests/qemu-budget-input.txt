@@ -1,7 +1,7 @@
 2222
 operator
 expos
-expbudget set form-bytes 490 6144
+expbudget set form-bytes 495 6144
 mkform BudgetProof data
 write BudgetProof 1234
 append BudgetProof forbidden

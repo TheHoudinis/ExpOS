@@ -66,6 +66,10 @@ recover Notes
 forms
 grant DemoBrowser execute
 execute DemoBrowser
+mkform Hello executable
+write Hello print("hello from scheduled Form")
+grant Hello execute
+execute Hello
 ps
 handles
 handlecheck 3 Root execute

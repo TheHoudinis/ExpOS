@@ -18,7 +18,9 @@ ExpOS is the Form-native operating system described by
   ExpBudget accounting;
 - Form-native execution contexts and cooperative scheduler admission keyed by
   CFC/Dimension/FIN, carrying an address-space descriptor, Handle set,
-  ExpBudget, event queue, memory/CPU state, and dispatch accounting;
+  ExpBudget, event queue, memory/CPU state, runtime and dispatch accounting;
+  persisted `executable` Forms run bounded ExpPython payloads while their FIN
+  context owns the cooperative scheduler slice and retain an exit result;
 - bounded Form-native kernel controls: typed tunables, signal/timer/resource
   readiness watches, and shell-runtime-local resource accounting with DIESE-gated
   mutation;
@@ -37,7 +39,7 @@ ExpOS is the Form-native operating system described by
 - readable case-sensitive 8x8 framebuffer text with runtime face/weight
   rasterization and an expanded 8x16 VGA console font;
 - Ayo v3 package installation, verification, ownership, rollback and recovery;
-- a capability-gated RTL8139 network path with Ethernet, ARP, static IPv4,
+- a capability-gated RTL8139 network path with Ethernet, ARP, DHCP IPv4,
   ICMP, UDP, DNS A lookup, one bounded TCP client and HTTP/1.0 GET over plain
   TCP or authenticated TLS 1.3;
 - a graphical Browser that fetches and renders bounded `http://` and
@@ -52,7 +54,7 @@ ExpOS is the Form-native operating system described by
 
 ## Approved Genesis target
 
-The architecture now defines every Central Finite Curve (CFC) as an exclusively
+The architecture now defines every Central Inflation Fabric (CFC) as an exclusively
 owned ExpOS environment with its own typed FIN, required nonempty name, and
 exactly one Primary Dimension. Forms, data, Dimensions, relationships,
 capabilities, identities/policy, storage extents, keys, and checkpoints cannot
@@ -257,14 +259,15 @@ input and mouse-button transitions are retained in order.
 
 ## Network and Browser
 
-QEMU provides the current static guest configuration: `10.0.2.15/24`, gateway
-`10.0.2.2`, and DNS server `10.0.2.3`. Network I/O is authorized at the Driver
-Form boundary with a requester-bound Network Handle.
+The RTL8139 Driver Form negotiates its IPv4 address, netmask, gateway, DNS
+server and lease through DHCP. A conservative QEMU-user fallback remains if no
+DHCP server replies. Network I/O and manual `dhcp` renewal are authorized at
+the Driver Form boundary with a requester-bound Network Handle.
 
 The native stack supports:
 
 - RTL8139 polling DMA, Ethernet and ARP;
-- static IPv4 and ICMP echo;
+- DHCP-configured IPv4 and ICMP echo;
 - checksum-validated UDP and DNS A records;
 - one synchronous, bounded outbound TCP connection;
 - bounded HTTP/1.0 GET requests and Browser rendering for `http://` URLs;
@@ -278,7 +281,7 @@ The native stack supports:
   rejection of HTTPS-to-HTTP downgrades, and projection of up to eight result
   titles and links into the bounded document model.
 
-Use `ifconfig`, `ping`, `dns`, `fetch` and `netstat` in the console to inspect
+Use `ifconfig`, `dhcp`, `ping`, `dns`, `fetch` and `netstat` in the console to inspect
 and exercise the network. Type an `http://` or `https://` URL in Browser to
 fetch it through the same native stack. `make https-check` performs a verified
 fetch of the HTML returned by `https://www.youtube.com/`.
@@ -300,7 +303,7 @@ local/session storage, media containers/codecs, audio/video output and GPU
 acceleration are absent. Consequently, fetching YouTube HTML does **not** make
 YouTube playback work.
 
-DHCP, IPv6, physical Wi-Fi drivers, a USB host/Bluetooth data path, concurrent
+IPv6, physical Wi-Fi drivers, a USB host/Bluetooth data path, concurrent
 sockets, TCP servers and downloads are also absent. HTTP, TLS record and
 certificate-chain buffers are fixed and bounded. The embedded Web PKI store is
 not a general CA bundle: GlobalSign Root R1 is the default anchor, while

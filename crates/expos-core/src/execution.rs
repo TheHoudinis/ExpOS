@@ -85,6 +85,14 @@ pub enum ExecutionState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExecutionRuntime {
+    /// Entrypoint is implemented by a trusted native kernel subsystem.
+    KernelNative,
+    /// Content is executed by the bounded in-kernel ExpPython runtime.
+    ExpPython,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExecutionError {
     InvalidIdentity,
     InvalidAddressSpace,
@@ -110,6 +118,7 @@ pub struct ExecutionContext {
     event_len: u8,
     budget: ExpBudget<ExecutionIdentity>,
     cpu: CpuState,
+    runtime: ExecutionRuntime,
     state: ExecutionState,
     dispatches: u64,
 }
@@ -136,6 +145,7 @@ impl ExecutionContext {
             event_len: 0,
             budget: ExpBudget::uniform(identity, budget_ceiling),
             cpu: CpuState::default(),
+            runtime: ExecutionRuntime::KernelNative,
             state: ExecutionState::Ready,
             dispatches: 0,
         })
@@ -159,6 +169,14 @@ impl ExecutionContext {
 
     pub fn set_cpu_state(&mut self, cpu: CpuState) {
         self.cpu = cpu;
+    }
+
+    pub const fn runtime(&self) -> ExecutionRuntime {
+        self.runtime
+    }
+
+    pub fn set_runtime(&mut self, runtime: ExecutionRuntime) {
+        self.runtime = runtime;
     }
 
     pub const fn state(&self) -> ExecutionState {
@@ -260,7 +278,10 @@ impl Scheduler {
         let slot = self
             .contexts
             .iter_mut()
-            .find(|slot| slot.is_none())
+            .find(|slot| {
+                slot.as_ref()
+                    .is_none_or(|context| context.state == ExecutionState::Exited)
+            })
             .ok_or(ExecutionError::ContextTableFull)?;
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
@@ -351,7 +372,14 @@ impl Scheduler {
     }
 
     pub fn exit(&mut self, id: u32) -> Result<(), ExecutionError> {
+        self.finish(id, 0)
+    }
+
+    /// Finish a dispatched Form and retain its bounded result in the modeled
+    /// CPU accumulator for diagnostics. The context remains inspectable.
+    pub fn finish(&mut self, id: u32, result: u64) -> Result<(), ExecutionError> {
         let context = self.context_mut(id).ok_or(ExecutionError::UnknownContext)?;
+        context.cpu.accumulator = result;
         context.state = ExecutionState::Exited;
         if self.current().is_some_and(|current| current.id == id) {
             self.current_slot = None;
@@ -433,5 +461,29 @@ mod tests {
         assert_eq!(context.pending_events(), 1);
         assert_eq!(context.pop_event(), Some(event));
         let _ = Authority::Operator;
+    }
+
+    #[test]
+    fn executable_runtime_finishes_with_an_inspectable_result_and_reuses_capacity() {
+        let mut scheduler = Scheduler::new();
+        let mut context =
+            ExecutionContext::new(identity(10), AddressSpace::kernel_bootstrap(), 8).unwrap();
+        context.set_runtime(ExecutionRuntime::ExpPython);
+        let first = scheduler.admit(context).unwrap();
+        assert_eq!(scheduler.dispatch_next(), Ok(first));
+        scheduler.finish(first, 7).unwrap();
+        let completed = scheduler.context(first).unwrap();
+        assert_eq!(completed.runtime(), ExecutionRuntime::ExpPython);
+        assert_eq!(completed.state(), ExecutionState::Exited);
+        assert_eq!(completed.cpu_state().accumulator, 7);
+
+        for form in 20..(20 + MAX_EXECUTION_CONTEXTS as u128) {
+            scheduler
+                .admit(
+                    ExecutionContext::new(identity(form), AddressSpace::kernel_bootstrap(), 8)
+                        .unwrap(),
+                )
+                .unwrap();
+        }
     }
 }

@@ -1,10 +1,10 @@
 //! Minimal native IPv4 networking for the transitional x86_64 kernel.
 //!
 //! The stack is deliberately small and allocation-free: a polling RTL8139
-//! driver, Ethernet/ARP, static IPv4, ICMP echo, checksum-correct UDP, DNS A
+//! driver, Ethernet/ARP, DHCP-configured IPv4, ICMP echo, checksum-correct UDP, DNS A
 //! queries, a single synchronous TCP client, and bounded HTTP/1.0 GET. TLS 1.3
-//! is layered over the streaming TCP interface in `crate::tls`; DHCP, IPv6,
-//! TCP servers, and concurrent sockets are not implemented.
+//! is layered over the streaming TCP interface in `crate::tls`; IPv6, TCP
+//! servers, and concurrent sockets are not implemented.
 
 use crate::{port, println, slog};
 use core::sync::atomic::{compiler_fence, Ordering};
@@ -43,15 +43,27 @@ const RX_BUFFER_SIZE: usize = RX_RING_SIZE + 16 + MAX_FRAME_SIZE;
 const TX_BUFFER_COUNT: usize = 4;
 const ETHERNET_HEADER_SIZE: usize = 14;
 
-const LOCAL_IP: [u8; 4] = [10, 0, 2, 15];
-const NETMASK: [u8; 4] = [255, 255, 255, 0];
-const GATEWAY: [u8; 4] = [10, 0, 2, 2];
-const DNS_SERVER: [u8; 4] = [10, 0, 2, 3];
+const FALLBACK_LOCAL_IP: [u8; 4] = [10, 0, 2, 15];
+const FALLBACK_NETMASK: [u8; 4] = [255, 255, 255, 0];
+const FALLBACK_GATEWAY: [u8; 4] = [10, 0, 2, 2];
+const FALLBACK_DNS_SERVER: [u8; 4] = [10, 0, 2, 3];
+const IPV4_BROADCAST: [u8; 4] = [255; 4];
+const IPV4_UNSPECIFIED: [u8; 4] = [0; 4];
 const BROADCAST_MAC: [u8; 6] = [0xFF; 6];
 
 const IO_WAIT_LIMIT: usize = 2_000_000;
 const RECEIVE_WAIT_LIMIT: usize = 12_000_000;
 const TRANSPORT_RETRIES: usize = 3;
+const DHCP_RETRIES: usize = 2;
+const DHCP_WAIT_LIMIT: usize = 4_000_000;
+const DHCP_PACKET_CAPACITY: usize = 576;
+const DHCP_CLIENT_PORT: u16 = 68;
+const DHCP_SERVER_PORT: u16 = 67;
+const DHCP_DISCOVER: u8 = 1;
+const DHCP_OFFER: u8 = 2;
+const DHCP_REQUEST: u8 = 3;
+const DHCP_ACK: u8 = 5;
+const DHCP_NAK: u8 = 6;
 const UDP_HEADER_SIZE: usize = 8;
 const TCP_HEADER_SIZE: usize = 20;
 const TCP_SYN_HEADER_SIZE: usize = 24;
@@ -86,6 +98,9 @@ pub enum NetworkError {
     DnsRefused,
     DnsNoAddress,
     MalformedDns,
+    DhcpTimeout,
+    DhcpNak,
+    MalformedDhcp,
     TcpTimeout,
     TcpReset,
     EntropyUnavailable,
@@ -113,6 +128,9 @@ impl NetworkError {
             Self::DnsRefused => "DNS server returned an error",
             Self::DnsNoAddress => "DNS response contains no IPv4 address",
             Self::MalformedDns => "malformed DNS response",
+            Self::DhcpTimeout => "DHCP lease negotiation timed out",
+            Self::DhcpNak => "DHCP server rejected the requested lease",
+            Self::MalformedDhcp => "malformed DHCP response",
             Self::TcpTimeout => "TCP peer timed out",
             Self::TcpReset => "TCP peer reset the connection",
             Self::EntropyUnavailable => "secure hardware entropy is unavailable",
@@ -131,6 +149,48 @@ impl core::fmt::Display for NetworkError {
 }
 
 impl core::error::Error for NetworkError {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ipv4Origin {
+    Dhcp,
+    StaticFallback,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ipv4Configuration {
+    pub address: [u8; 4],
+    pub netmask: [u8; 4],
+    pub gateway: [u8; 4],
+    pub dns_server: [u8; 4],
+    pub server: [u8; 4],
+    pub lease_seconds: u32,
+    pub origin: Ipv4Origin,
+}
+
+impl Ipv4Configuration {
+    const fn static_fallback() -> Self {
+        Self {
+            address: FALLBACK_LOCAL_IP,
+            netmask: FALLBACK_NETMASK,
+            gateway: FALLBACK_GATEWAY,
+            dns_server: FALLBACK_DNS_SERVER,
+            server: IPV4_UNSPECIFIED,
+            lease_seconds: 0,
+            origin: Ipv4Origin::StaticFallback,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DhcpReply {
+    message_type: u8,
+    address: [u8; 4],
+    netmask: Option<[u8; 4]>,
+    gateway: Option<[u8; 4]>,
+    dns_server: Option<[u8; 4]>,
+    server: Option<[u8; 4]>,
+    lease_seconds: Option<u32>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UdpReply {
@@ -268,6 +328,7 @@ struct NetworkStack {
     next_ip_identification: u16,
     next_ephemeral_port: u16,
     next_dns_identifier: u16,
+    configuration: Ipv4Configuration,
     dma: DmaBuffers,
 }
 
@@ -291,6 +352,7 @@ impl NetworkStack {
             next_ip_identification: 1,
             next_ephemeral_port: 49_152,
             next_dns_identifier: 1,
+            configuration: Ipv4Configuration::static_fallback(),
             dma: DmaBuffers::new(),
         }
     }
@@ -469,10 +531,11 @@ impl NetworkStack {
     }
 
     fn resolve_neighbor(&mut self, destination: [u8; 4]) -> Result<[u8; 6], PingError> {
-        let next_hop = if same_subnet(destination, LOCAL_IP, NETMASK) {
+        let configuration = self.configuration;
+        let next_hop = if same_subnet(destination, configuration.address, configuration.netmask) {
             destination
         } else {
-            GATEWAY
+            configuration.gateway
         };
         if self.neighbor_valid && self.cached_neighbor_ip == next_hop {
             return Ok(self.cached_neighbor_mac);
@@ -488,7 +551,7 @@ impl NetworkStack {
         request[19] = 4;
         request[20..22].copy_from_slice(&1_u16.to_be_bytes()); // request
         request[22..28].copy_from_slice(&self.mac);
-        request[28..32].copy_from_slice(&LOCAL_IP);
+        request[28..32].copy_from_slice(&configuration.address);
         request[32..38].fill(0);
         request[38..42].copy_from_slice(&next_hop);
         if !self.send_frame(&request) {
@@ -499,7 +562,9 @@ impl NetworkStack {
         for _ in 0..RECEIVE_WAIT_LIMIT {
             if let Some(length) = self.receive_frame(&mut frame) {
                 self.answer_local_requests(&frame[..length]);
-                if let Some((sender_ip, sender_mac)) = arp_reply(&frame[..length], next_hop) {
+                if let Some((sender_ip, sender_mac)) =
+                    arp_reply(&frame[..length], next_hop, self.configuration.address)
+                {
                     self.cached_neighbor_ip = sender_ip;
                     self.cached_neighbor_mac = sender_mac;
                     self.neighbor_valid = true;
@@ -541,7 +606,7 @@ impl NetworkStack {
         ip[8] = 64;
         ip[9] = 1; // ICMP
         ip[10..12].fill(0);
-        ip[12..16].copy_from_slice(&LOCAL_IP);
+        ip[12..16].copy_from_slice(&self.configuration.address);
         ip[16..20].copy_from_slice(&destination);
         let ip_checksum = internet_checksum(ip);
         ip[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
@@ -565,9 +630,13 @@ impl NetworkStack {
         for _ in 0..RECEIVE_WAIT_LIMIT {
             if let Some(length) = self.receive_frame(&mut received) {
                 self.answer_local_requests(&received[..length]);
-                if let Some((source, ttl, data_length)) =
-                    icmp_echo_reply(&received[..length], destination, identifier, sequence)
-                {
+                if let Some((source, ttl, data_length)) = icmp_echo_reply(
+                    &received[..length],
+                    destination,
+                    self.configuration.address,
+                    identifier,
+                    sequence,
+                ) {
                     return Ok(PingReply {
                         address: source,
                         bytes: data_length,
@@ -604,6 +673,134 @@ impl NetworkStack {
         identifier
     }
 
+    fn send_dhcp_datagram(&mut self, payload: &[u8]) -> Result<(), NetworkError> {
+        if payload.len() > 1500 - 20 - UDP_HEADER_SIZE {
+            return Err(NetworkError::TransmitFailed);
+        }
+        let udp_length = UDP_HEADER_SIZE + payload.len();
+        let mut segment = [0_u8; 1500 - 20];
+        segment[0..2].copy_from_slice(&DHCP_CLIENT_PORT.to_be_bytes());
+        segment[2..4].copy_from_slice(&DHCP_SERVER_PORT.to_be_bytes());
+        segment[4..6].copy_from_slice(&(udp_length as u16).to_be_bytes());
+        segment[6..8].fill(0);
+        segment[8..udp_length].copy_from_slice(payload);
+        let checksum =
+            transport_checksum(IPV4_UNSPECIFIED, IPV4_BROADCAST, 17, &segment[..udp_length]);
+        segment[6..8].copy_from_slice(&nonzero_checksum(checksum).to_be_bytes());
+
+        let ip_length = 20 + udp_length;
+        let frame_length = ETHERNET_HEADER_SIZE + ip_length;
+        let mut frame = [0_u8; MAX_FRAME_SIZE];
+        frame[0..6].copy_from_slice(&BROADCAST_MAC);
+        frame[6..12].copy_from_slice(&self.mac);
+        frame[12..14].copy_from_slice(&0x0800_u16.to_be_bytes());
+        let identification = self.next_ip_identification;
+        self.next_ip_identification = identification.wrapping_add(1).max(1);
+        build_ipv4_header(
+            &mut frame[ETHERNET_HEADER_SIZE..ETHERNET_HEADER_SIZE + 20],
+            ip_length,
+            identification,
+            17,
+            IPV4_UNSPECIFIED,
+            IPV4_BROADCAST,
+        );
+        frame[ETHERNET_HEADER_SIZE + 20..frame_length].copy_from_slice(&segment[..udp_length]);
+        if self.send_frame(&frame[..frame_length]) {
+            Ok(())
+        } else {
+            Err(NetworkError::TransmitFailed)
+        }
+    }
+
+    fn exchange_dhcp(
+        &mut self,
+        request: &[u8],
+        transaction_id: u32,
+        expected_type: u8,
+    ) -> Result<DhcpReply, NetworkError> {
+        let mut frame = [0_u8; MAX_FRAME_SIZE];
+        for _ in 0..DHCP_RETRIES {
+            self.send_dhcp_datagram(request)?;
+            for _ in 0..DHCP_WAIT_LIMIT {
+                let Some(length) = self.receive_frame(&mut frame) else {
+                    core::hint::spin_loop();
+                    continue;
+                };
+                let Some(reply) = parse_dhcp_reply(&frame[..length], transaction_id, self.mac)
+                else {
+                    self.answer_local_requests(&frame[..length]);
+                    continue;
+                };
+                if reply.message_type == DHCP_NAK {
+                    return Err(NetworkError::DhcpNak);
+                }
+                if reply.message_type == expected_type {
+                    return Ok(reply);
+                }
+            }
+        }
+        Err(NetworkError::DhcpTimeout)
+    }
+
+    fn configure_dhcp(&mut self) -> Result<Ipv4Configuration, NetworkError> {
+        self.prepare_transport()?;
+        let transaction_id = ((crate::hardware::timestamp() as u32)
+            ^ u32::from_be_bytes([self.mac[2], self.mac[3], self.mac[4], self.mac[5]]))
+        .max(1);
+        let mut discover = [0_u8; DHCP_PACKET_CAPACITY];
+        let discover_len = build_dhcp_message(
+            DHCP_DISCOVER,
+            transaction_id,
+            self.mac,
+            None,
+            None,
+            &mut discover,
+        )?;
+        let offer = self.exchange_dhcp(&discover[..discover_len], transaction_id, DHCP_OFFER)?;
+        let server = offer.server.ok_or(NetworkError::MalformedDhcp)?;
+        if offer.address == IPV4_UNSPECIFIED {
+            return Err(NetworkError::MalformedDhcp);
+        }
+
+        let mut request = [0_u8; DHCP_PACKET_CAPACITY];
+        let request_len = build_dhcp_message(
+            DHCP_REQUEST,
+            transaction_id,
+            self.mac,
+            Some(offer.address),
+            Some(server),
+            &mut request,
+        )?;
+        let acknowledgement =
+            self.exchange_dhcp(&request[..request_len], transaction_id, DHCP_ACK)?;
+        let address = if acknowledgement.address == IPV4_UNSPECIFIED {
+            offer.address
+        } else {
+            acknowledgement.address
+        };
+        let configuration = Ipv4Configuration {
+            address,
+            netmask: acknowledgement
+                .netmask
+                .or(offer.netmask)
+                .unwrap_or(FALLBACK_NETMASK),
+            gateway: acknowledgement.gateway.or(offer.gateway).unwrap_or(server),
+            dns_server: acknowledgement
+                .dns_server
+                .or(offer.dns_server)
+                .unwrap_or(server),
+            server: acknowledgement.server.unwrap_or(server),
+            lease_seconds: acknowledgement
+                .lease_seconds
+                .or(offer.lease_seconds)
+                .unwrap_or(0),
+            origin: Ipv4Origin::Dhcp,
+        };
+        self.configuration = configuration;
+        self.neighbor_valid = false;
+        Ok(configuration)
+    }
+
     fn send_ipv4(
         &mut self,
         destination_mac: [u8; 6],
@@ -629,7 +826,7 @@ impl NetworkStack {
             ip_length,
             identification,
             protocol,
-            LOCAL_IP,
+            self.configuration.address,
             destination,
         );
         frame[ETHERNET_HEADER_SIZE + 20..frame_length].copy_from_slice(payload);
@@ -662,7 +859,12 @@ impl NetworkStack {
         segment[4..6].copy_from_slice(&(udp_length as u16).to_be_bytes());
         segment[6..8].fill(0);
         segment[8..udp_length].copy_from_slice(request);
-        let checksum = transport_checksum(LOCAL_IP, destination, 17, &segment[..udp_length]);
+        let checksum = transport_checksum(
+            self.configuration.address,
+            destination,
+            17,
+            &segment[..udp_length],
+        );
         segment[6..8].copy_from_slice(&nonzero_checksum(checksum).to_be_bytes());
 
         let mut frame = [0_u8; MAX_FRAME_SIZE];
@@ -673,6 +875,7 @@ impl NetworkStack {
                     self.answer_local_requests(&frame[..length]);
                     let Some(packet) = parse_udp_packet(
                         &frame[..length],
+                        self.configuration.address,
                         destination,
                         destination_port,
                         source_port,
@@ -703,7 +906,12 @@ impl NetworkStack {
         let mut request = [0_u8; DNS_PACKET_CAPACITY];
         let request_length = build_dns_query(identifier, hostname, &mut request)?;
         let mut response = [0_u8; DNS_PACKET_CAPACITY];
-        match self.udp_exchange(DNS_SERVER, 53, &request[..request_length], &mut response) {
+        match self.udp_exchange(
+            self.configuration.dns_server,
+            53,
+            &request[..request_length],
+            &mut response,
+        ) {
             Ok(reply) => parse_dns_a_response(identifier, &response[..reply.bytes]),
             Err(NetworkError::ReplyTimeout) => Err(NetworkError::DnsTimeout),
             Err(error) => Err(error),
@@ -747,7 +955,12 @@ impl NetworkStack {
             segment[20..24].copy_from_slice(&[2, 4, 0x05, 0xB4]);
         }
         segment[header_length..length].copy_from_slice(payload);
-        let checksum = transport_checksum(LOCAL_IP, destination, 6, &segment[..length]);
+        let checksum = transport_checksum(
+            self.configuration.address,
+            destination,
+            6,
+            &segment[..length],
+        );
         segment[16..18].copy_from_slice(&checksum.to_be_bytes());
         self.send_ipv4(destination_mac, destination, 6, &segment[..length])
     }
@@ -787,6 +1000,7 @@ impl NetworkStack {
                     self.answer_local_requests(&frame[..length]);
                     let Some(packet) = parse_tcp_packet(
                         &frame[..length],
+                        self.configuration.address,
                         destination,
                         destination_port,
                         source_port,
@@ -875,6 +1089,7 @@ impl NetworkStack {
                     self.answer_local_requests(&frame[..length]);
                     let Some(packet) = parse_tcp_packet(
                         &frame[..length],
+                        self.configuration.address,
                         destination,
                         destination_port,
                         source_port,
@@ -966,9 +1181,13 @@ impl NetworkStack {
                 continue;
             };
             self.answer_local_requests(&frame[..length]);
-            let Some(packet) =
-                parse_tcp_packet(&frame[..length], destination, destination_port, source_port)
-            else {
+            let Some(packet) = parse_tcp_packet(
+                &frame[..length],
+                self.configuration.address,
+                destination,
+                destination_port,
+                source_port,
+            ) else {
                 continue;
             };
             idle = 0;
@@ -1028,7 +1247,7 @@ impl NetworkStack {
         if frame.len() < 42 || frame[12..14] != [0x08, 0x06] {
             return;
         }
-        if frame[20..22] != [0, 1] || frame[38..42] != LOCAL_IP {
+        if frame[20..22] != [0, 1] || frame[38..42] != self.configuration.address {
             return;
         }
         let mut reply = [0_u8; 42];
@@ -1038,7 +1257,7 @@ impl NetworkStack {
         reply[14..20].copy_from_slice(&frame[14..20]);
         reply[20..22].copy_from_slice(&2_u16.to_be_bytes());
         reply[22..28].copy_from_slice(&self.mac);
-        reply[28..32].copy_from_slice(&LOCAL_IP);
+        reply[28..32].copy_from_slice(&self.configuration.address);
         reply[32..38].copy_from_slice(&frame[22..28]);
         reply[38..42].copy_from_slice(&frame[28..32]);
         let _ = self.send_frame(&reply);
@@ -1127,6 +1346,7 @@ impl TcpConnection<'_> {
     fn receive_into_pending(&mut self, frame: &[u8]) -> Result<(bool, bool), NetworkError> {
         let Some(packet) = parse_tcp_packet(
             frame,
+            self.stack.configuration.address,
             self.destination,
             self.destination_port,
             self.source_port,
@@ -1187,6 +1407,7 @@ impl TcpConnection<'_> {
                 self.stack.answer_local_requests(&frame[..length]);
                 let acknowledgement = parse_tcp_packet(
                     &frame[..length],
+                    self.stack.configuration.address,
                     self.destination,
                     self.destination_port,
                     self.source_port,
@@ -1316,6 +1537,32 @@ pub fn initialize() -> bool {
             mac[4],
             mac[5]
         );
+        match network.configure_dhcp() {
+            Ok(configuration) => slog!(
+                "EXPOS_DHCP_BOUND address={}.{}.{}.{} gateway={}.{}.{}.{} dns={}.{}.{}.{} lease={}\r\n",
+                configuration.address[0],
+                configuration.address[1],
+                configuration.address[2],
+                configuration.address[3],
+                configuration.gateway[0],
+                configuration.gateway[1],
+                configuration.gateway[2],
+                configuration.gateway[3],
+                configuration.dns_server[0],
+                configuration.dns_server[1],
+                configuration.dns_server[2],
+                configuration.dns_server[3],
+                configuration.lease_seconds
+            ),
+            Err(error) => slog!(
+                "EXPOS_DHCP_FALLBACK error={:?} address={}.{}.{}.{}\r\n",
+                error,
+                network.configuration.address[0],
+                network.configuration.address[1],
+                network.configuration.address[2],
+                network.configuration.address[3]
+            ),
+        }
     } else {
         slog!("EXPOS_NET_UNAVAILABLE driver=rtl8139\r\n");
     }
@@ -1338,22 +1585,36 @@ pub fn print_configuration() {
         println!("supported virtual NIC: Realtek RTL8139 (10ec:8139)");
         return;
     }
+    let configuration = network.configuration;
     println!("NAME    STATE  ADDRESS       NETMASK         GATEWAY");
     println!(
         "ether0  {:<5}  {}.{}.{}.{}   {}.{}.{}.{}  {}.{}.{}.{}",
         if network.link_up() { "up" } else { "down" },
-        LOCAL_IP[0],
-        LOCAL_IP[1],
-        LOCAL_IP[2],
-        LOCAL_IP[3],
-        NETMASK[0],
-        NETMASK[1],
-        NETMASK[2],
-        NETMASK[3],
-        GATEWAY[0],
-        GATEWAY[1],
-        GATEWAY[2],
-        GATEWAY[3]
+        configuration.address[0],
+        configuration.address[1],
+        configuration.address[2],
+        configuration.address[3],
+        configuration.netmask[0],
+        configuration.netmask[1],
+        configuration.netmask[2],
+        configuration.netmask[3],
+        configuration.gateway[0],
+        configuration.gateway[1],
+        configuration.gateway[2],
+        configuration.gateway[3]
+    );
+    println!(
+        "        ipv4={} dns={}.{}.{}.{} lease={}s",
+        if configuration.origin == Ipv4Origin::Dhcp {
+            "dhcp"
+        } else {
+            "fallback"
+        },
+        configuration.dns_server[0],
+        configuration.dns_server[1],
+        configuration.dns_server[2],
+        configuration.dns_server[3],
+        configuration.lease_seconds
     );
     println!(
         "        mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} mtu=1500 driver=rtl8139-poll",
@@ -1381,9 +1642,19 @@ pub fn print_statistics() {
         network.received_packets,
         network.dropped_packets
     );
-    println!("transport: Ethernet + ARP + static IPv4 + ICMP + UDP/DNS + TCP");
+    println!("transport: Ethernet + ARP + DHCP/IPv4 + ICMP + UDP/DNS + TCP");
     println!("application: HTTP/1.0 + verified TLS 1.3 HTTPS");
-    println!("dhcp/ipv6: not implemented");
+    println!("ipv6: not implemented");
+}
+
+pub fn renew_dhcp(
+    broker: &CapabilityBroker,
+    handle_id: u32,
+    requester: Fin,
+    dimension: Fin,
+) -> Result<Ipv4Configuration, NetworkError> {
+    authorize_network(broker, handle_id, requester, dimension)?;
+    NETWORK.lock().configure_dhcp()
 }
 
 pub fn ping_text(
@@ -1726,6 +1997,159 @@ fn transport_checksum(source: [u8; 4], destination: [u8; 4], protocol: u8, segme
     finish_checksum(checksum_sum(&pseudo_header) + checksum_sum(segment))
 }
 
+fn build_dhcp_message(
+    message_type: u8,
+    transaction_id: u32,
+    mac: [u8; 6],
+    requested_address: Option<[u8; 4]>,
+    server: Option<[u8; 4]>,
+    output: &mut [u8],
+) -> Result<usize, NetworkError> {
+    if output.len() < 264 || !matches!(message_type, DHCP_DISCOVER | DHCP_REQUEST) {
+        return Err(NetworkError::MalformedDhcp);
+    }
+    output.fill(0);
+    output[0] = 1; // BOOTREQUEST
+    output[1] = 1; // Ethernet
+    output[2] = 6;
+    output[4..8].copy_from_slice(&transaction_id.to_be_bytes());
+    output[10..12].copy_from_slice(&0x8000_u16.to_be_bytes()); // broadcast reply
+    output[28..34].copy_from_slice(&mac);
+    output[236..240].copy_from_slice(&[99, 130, 83, 99]);
+
+    let mut cursor = 240;
+    append_dhcp_option(output, &mut cursor, 53, &[message_type])?;
+    let client_identifier = [1, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]];
+    append_dhcp_option(output, &mut cursor, 61, &client_identifier)?;
+    if let Some(address) = requested_address {
+        append_dhcp_option(output, &mut cursor, 50, &address)?;
+    }
+    if let Some(server) = server {
+        append_dhcp_option(output, &mut cursor, 54, &server)?;
+    }
+    append_dhcp_option(output, &mut cursor, 55, &[1, 3, 6, 51, 54])?;
+    if cursor >= output.len() {
+        return Err(NetworkError::MalformedDhcp);
+    }
+    output[cursor] = 255;
+    Ok(cursor + 1)
+}
+
+fn append_dhcp_option(
+    output: &mut [u8],
+    cursor: &mut usize,
+    code: u8,
+    value: &[u8],
+) -> Result<(), NetworkError> {
+    let end = cursor
+        .checked_add(2 + value.len())
+        .ok_or(NetworkError::MalformedDhcp)?;
+    if value.len() > u8::MAX as usize || end > output.len() {
+        return Err(NetworkError::MalformedDhcp);
+    }
+    output[*cursor] = code;
+    output[*cursor + 1] = value.len() as u8;
+    output[*cursor + 2..end].copy_from_slice(value);
+    *cursor = end;
+    Ok(())
+}
+
+fn parse_dhcp_reply(frame: &[u8], transaction_id: u32, mac: [u8; 6]) -> Option<DhcpReply> {
+    if frame.len() < ETHERNET_HEADER_SIZE + 20 + UDP_HEADER_SIZE + 240 || frame[12..14] != [0x08, 0]
+    {
+        return None;
+    }
+    let ip = &frame[ETHERNET_HEADER_SIZE..];
+    let header_length = ((ip[0] & 0x0F) as usize) * 4;
+    if ip[0] >> 4 != 4 || header_length < 20 || ip.len() < header_length + UDP_HEADER_SIZE {
+        return None;
+    }
+    let total_length = u16::from_be_bytes([ip[2], ip[3]]) as usize;
+    if total_length > ip.len()
+        || total_length < header_length + UDP_HEADER_SIZE + 240
+        || ip[9] != 17
+        || internet_checksum(&ip[..header_length]) != 0
+    {
+        return None;
+    }
+    let mut source = [0_u8; 4];
+    source.copy_from_slice(&ip[12..16]);
+    let mut destination = [0_u8; 4];
+    destination.copy_from_slice(&ip[16..20]);
+    let udp = &ip[header_length..total_length];
+    let udp_length = u16::from_be_bytes([udp[4], udp[5]]) as usize;
+    if udp[0..2] != DHCP_SERVER_PORT.to_be_bytes()
+        || udp[2..4] != DHCP_CLIENT_PORT.to_be_bytes()
+        || udp_length < UDP_HEADER_SIZE + 240
+        || udp_length > udp.len()
+    {
+        return None;
+    }
+    let udp = &udp[..udp_length];
+    let checksum = u16::from_be_bytes([udp[6], udp[7]]);
+    if checksum != 0 && transport_checksum(source, destination, 17, udp) != 0 {
+        return None;
+    }
+    let payload = &udp[UDP_HEADER_SIZE..];
+    if payload[0] != 2
+        || payload[1] != 1
+        || payload[2] != 6
+        || payload[4..8] != transaction_id.to_be_bytes()
+        || payload[28..34] != mac
+        || payload[236..240] != [99, 130, 83, 99]
+    {
+        return None;
+    }
+
+    let mut address = [0_u8; 4];
+    address.copy_from_slice(&payload[16..20]);
+    let mut message_type = None;
+    let mut netmask = None;
+    let mut gateway = None;
+    let mut dns_server = None;
+    let mut server = None;
+    let mut lease_seconds = None;
+    let mut cursor = 240;
+    while cursor < payload.len() {
+        let code = payload[cursor];
+        cursor += 1;
+        if code == 255 {
+            break;
+        }
+        if code == 0 {
+            continue;
+        }
+        let length = *payload.get(cursor)? as usize;
+        cursor += 1;
+        let value = payload.get(cursor..cursor.checked_add(length)?)?;
+        cursor += length;
+        match code {
+            1 if value.len() == 4 => netmask = Some(copy_ipv4(value)),
+            3 if value.len() >= 4 => gateway = Some(copy_ipv4(&value[..4])),
+            6 if value.len() >= 4 => dns_server = Some(copy_ipv4(&value[..4])),
+            51 if value.len() == 4 => {
+                lease_seconds = Some(u32::from_be_bytes([value[0], value[1], value[2], value[3]]))
+            }
+            53 if value.len() == 1 => message_type = Some(value[0]),
+            54 if value.len() == 4 => server = Some(copy_ipv4(value)),
+            _ => {}
+        }
+    }
+    Some(DhcpReply {
+        message_type: message_type?,
+        address,
+        netmask,
+        gateway,
+        dns_server,
+        server: server.or(Some(source)),
+        lease_seconds,
+    })
+}
+
+fn copy_ipv4(bytes: &[u8]) -> [u8; 4] {
+    [bytes[0], bytes[1], bytes[2], bytes[3]]
+}
+
 struct Ipv4Packet<'a> {
     source: [u8; 4],
     destination: [u8; 4],
@@ -1733,7 +2157,7 @@ struct Ipv4Packet<'a> {
     payload: &'a [u8],
 }
 
-fn parse_ipv4_packet(frame: &[u8]) -> Option<Ipv4Packet<'_>> {
+fn parse_ipv4_packet(frame: &[u8], local_address: [u8; 4]) -> Option<Ipv4Packet<'_>> {
     if frame.len() < ETHERNET_HEADER_SIZE + 20 || frame[12..14] != [0x08, 0] {
         return None;
     }
@@ -1758,7 +2182,7 @@ fn parse_ipv4_packet(frame: &[u8]) -> Option<Ipv4Packet<'_>> {
     source.copy_from_slice(&ip[12..16]);
     let mut destination = [0_u8; 4];
     destination.copy_from_slice(&ip[16..20]);
-    if destination != LOCAL_IP {
+    if destination != local_address {
         return None;
     }
     Some(Ipv4Packet {
@@ -1777,11 +2201,12 @@ struct ParsedUdp<'a> {
 
 fn parse_udp_packet<'a>(
     frame: &'a [u8],
+    local_address: [u8; 4],
     expected_source: [u8; 4],
     expected_source_port: u16,
     expected_destination_port: u16,
 ) -> Option<ParsedUdp<'a>> {
-    let ip = parse_ipv4_packet(frame)?;
+    let ip = parse_ipv4_packet(frame, local_address)?;
     if ip.protocol != 17 || ip.source != expected_source || ip.payload.len() < UDP_HEADER_SIZE {
         return None;
     }
@@ -1816,11 +2241,12 @@ struct ParsedTcp<'a> {
 
 fn parse_tcp_packet<'a>(
     frame: &'a [u8],
+    local_address: [u8; 4],
     expected_source: [u8; 4],
     expected_source_port: u16,
     expected_destination_port: u16,
 ) -> Option<ParsedTcp<'a>> {
-    let ip = parse_ipv4_packet(frame)?;
+    let ip = parse_ipv4_packet(frame, local_address)?;
     if ip.protocol != 6 || ip.source != expected_source || ip.payload.len() < TCP_HEADER_SIZE {
         return None;
     }
@@ -2204,7 +2630,11 @@ fn same_subnet(left: [u8; 4], right: [u8; 4], mask: [u8; 4]) -> bool {
     (0..4).all(|index| left[index] & mask[index] == right[index] & mask[index])
 }
 
-fn arp_reply(frame: &[u8], expected_ip: [u8; 4]) -> Option<([u8; 4], [u8; 6])> {
+fn arp_reply(
+    frame: &[u8],
+    expected_ip: [u8; 4],
+    local_address: [u8; 4],
+) -> Option<([u8; 4], [u8; 6])> {
     if frame.len() < 42
         || frame[12..14] != [0x08, 0x06]
         || frame[14..16] != [0, 1]
@@ -2213,7 +2643,7 @@ fn arp_reply(frame: &[u8], expected_ip: [u8; 4]) -> Option<([u8; 4], [u8; 6])> {
         || frame[19] != 4
         || frame[20..22] != [0, 2]
         || frame[28..32] != expected_ip
-        || frame[38..42] != LOCAL_IP
+        || frame[38..42] != local_address
     {
         return None;
     }
@@ -2227,6 +2657,7 @@ fn arp_reply(frame: &[u8], expected_ip: [u8; 4]) -> Option<([u8; 4], [u8; 6])> {
 fn icmp_echo_reply(
     frame: &[u8],
     expected_ip: [u8; 4],
+    local_address: [u8; 4],
     identifier: u16,
     sequence: u16,
 ) -> Option<([u8; 4], u8, usize)> {
@@ -2244,7 +2675,7 @@ fn icmp_echo_reply(
     }
     if frame[ip_start + 9] != 1
         || frame[ip_start + 12..ip_start + 16] != expected_ip
-        || frame[ip_start + 16..ip_start + 20] != LOCAL_IP
+        || frame[ip_start + 16..ip_start + 20] != local_address
     {
         return None;
     }
@@ -2298,6 +2729,49 @@ fn copy_wrapped(buffer: &[u8; RX_BUFFER_SIZE], offset: usize, output: &mut [u8])
 mod tests {
     use super::*;
 
+    fn dhcp_reply_frame(
+        transaction_id: u32,
+        mac: [u8; 6],
+        message_type: u8,
+    ) -> ([u8; MAX_FRAME_SIZE], usize) {
+        let server = [10, 0, 2, 2];
+        let mut payload = [0_u8; DHCP_PACKET_CAPACITY];
+        payload[0] = 2;
+        payload[1] = 1;
+        payload[2] = 6;
+        payload[4..8].copy_from_slice(&transaction_id.to_be_bytes());
+        payload[16..20].copy_from_slice(&[10, 0, 2, 15]);
+        payload[28..34].copy_from_slice(&mac);
+        payload[236..240].copy_from_slice(&[99, 130, 83, 99]);
+        let mut cursor = 240;
+        append_dhcp_option(&mut payload, &mut cursor, 53, &[message_type]).unwrap();
+        append_dhcp_option(&mut payload, &mut cursor, 1, &[255, 255, 255, 0]).unwrap();
+        append_dhcp_option(&mut payload, &mut cursor, 3, &server).unwrap();
+        append_dhcp_option(&mut payload, &mut cursor, 6, &[10, 0, 2, 3]).unwrap();
+        append_dhcp_option(&mut payload, &mut cursor, 51, &3600_u32.to_be_bytes()).unwrap();
+        append_dhcp_option(&mut payload, &mut cursor, 54, &server).unwrap();
+        payload[cursor] = 255;
+        let payload_length = cursor + 1;
+
+        let udp_length = UDP_HEADER_SIZE + payload_length;
+        let ip_length = 20 + udp_length;
+        let frame_length = ETHERNET_HEADER_SIZE + ip_length;
+        let mut frame = [0_u8; MAX_FRAME_SIZE];
+        frame[0..6].copy_from_slice(&BROADCAST_MAC);
+        frame[6..12].copy_from_slice(&[0x52, 0x54, 0, 0x12, 0x35, 0x02]);
+        frame[12..14].copy_from_slice(&[0x08, 0]);
+        build_ipv4_header(&mut frame[14..34], ip_length, 1, 17, server, IPV4_BROADCAST);
+        let udp = &mut frame[34..34 + udp_length];
+        udp[0..2].copy_from_slice(&DHCP_SERVER_PORT.to_be_bytes());
+        udp[2..4].copy_from_slice(&DHCP_CLIENT_PORT.to_be_bytes());
+        udp[4..6].copy_from_slice(&(udp_length as u16).to_be_bytes());
+        udp[6..8].fill(0);
+        udp[8..].copy_from_slice(&payload[..payload_length]);
+        let checksum = transport_checksum(server, IPV4_BROADCAST, 17, udp);
+        udp[6..8].copy_from_slice(&nonzero_checksum(checksum).to_be_bytes());
+        (frame, frame_length)
+    }
+
     #[test]
     fn parses_ipv4_strictly() {
         assert_eq!(parse_ipv4("10.0.2.2"), Some([10, 0, 2, 2]));
@@ -2305,6 +2779,51 @@ mod tests {
         assert_eq!(parse_ipv4("256.1.1.1"), None);
         assert_eq!(parse_ipv4("1.2.3"), None);
         assert_eq!(parse_ipv4("1.2.3.4.5"), None);
+    }
+
+    #[test]
+    fn builds_discover_and_request_with_required_dhcp_identity() {
+        let mac = [0x52, 0x54, 0, 0x12, 0x34, 0x56];
+        let mut packet = [0_u8; DHCP_PACKET_CAPACITY];
+        let discover = build_dhcp_message(DHCP_DISCOVER, 7, mac, None, None, &mut packet).unwrap();
+        assert!(discover > 240);
+        assert_eq!(&packet[4..8], &7_u32.to_be_bytes());
+        assert_eq!(&packet[28..34], &mac);
+        assert!(packet[..discover]
+            .windows(3)
+            .any(|bytes| bytes == [53, 1, 1]));
+
+        let requested = [10, 0, 2, 15];
+        let server = [10, 0, 2, 2];
+        let request = build_dhcp_message(
+            DHCP_REQUEST,
+            7,
+            mac,
+            Some(requested),
+            Some(server),
+            &mut packet,
+        )
+        .unwrap();
+        assert!(packet[..request]
+            .windows(6)
+            .any(|bytes| bytes == [50, 4, 10, 0, 2, 15]));
+        assert!(packet[..request]
+            .windows(6)
+            .any(|bytes| bytes == [54, 4, 10, 0, 2, 2]));
+    }
+
+    #[test]
+    fn parses_dhcp_offer_and_rejects_another_transaction() {
+        let mac = [0x52, 0x54, 0, 0x12, 0x34, 0x56];
+        let (frame, length) = dhcp_reply_frame(0x1234_5678, mac, DHCP_OFFER);
+        let reply = parse_dhcp_reply(&frame[..length], 0x1234_5678, mac).unwrap();
+        assert_eq!(reply.message_type, DHCP_OFFER);
+        assert_eq!(reply.address, [10, 0, 2, 15]);
+        assert_eq!(reply.netmask, Some([255, 255, 255, 0]));
+        assert_eq!(reply.gateway, Some([10, 0, 2, 2]));
+        assert_eq!(reply.dns_server, Some([10, 0, 2, 3]));
+        assert_eq!(reply.lease_seconds, Some(3600));
+        assert!(parse_dhcp_reply(&frame[..length], 1, mac).is_none());
     }
 
     #[test]

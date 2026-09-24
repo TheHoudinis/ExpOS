@@ -842,6 +842,7 @@ fn encode_kind(value: FormKind) -> u8 {
         FormKind::Driver => 4,
         FormKind::Data => 5,
         FormKind::Policy => 6,
+        FormKind::Executable => 7,
     }
 }
 
@@ -854,6 +855,7 @@ fn decode_kind(value: u8) -> Option<FormKind> {
         4 => FormKind::Driver,
         5 => FormKind::Data,
         6 => FormKind::Policy,
+        7 => FormKind::Executable,
         _ => return None,
     })
 }

@@ -10,9 +10,9 @@ use crate::{
 };
 use expos_core::{
     AddressSpace, Authority, BootReport, CapabilityBroker, Dimension, ExecutionContext,
-    ExecutionIdentity, ExecutionState, Fin, Form, FormHandle, FormKind, Lifecycle, NetworkPolicy,
-    Operations, PimpScope, PimpSpec, PimpValue, Relationship, RelationshipGraph, RelationshipKind,
-    Scheduler, SpecKey, Text, GO_ABI_VERSION,
+    ExecutionIdentity, ExecutionRuntime, ExecutionState, Fin, Form, FormHandle, FormKind,
+    Lifecycle, NetworkPolicy, Operations, PimpScope, PimpSpec, PimpValue, Relationship,
+    RelationshipGraph, RelationshipKind, Scheduler, SpecKey, Text, GO_ABI_VERSION,
 };
 
 const MAX_LINE: usize = 128;
@@ -278,7 +278,7 @@ impl Shell {
         );
         seed_content(
             &mut content[5],
-            b"Network Driver Form: RTL8139, Ethernet, ARP, IPv4, ICMP, UDP, DNS, TCP, HTTP and verified TLS 1.3 HTTPS",
+            b"Network Driver Form: RTL8139, Ethernet, ARP, DHCP/IPv4, ICMP, UDP, DNS, TCP, HTTP and verified TLS 1.3 HTTPS",
         );
         let mut next_fin = 2;
         let mut next_dimension_fin = 2;
@@ -517,16 +517,18 @@ impl Shell {
                 true
             }
             "ps" => {
-                println!("CTX  FORM FIN                              DIMENSION FIN                         STATE          DISPATCHES");
+                println!("CTX  FORM FIN                              DIMENSION FIN                         RUNTIME  STATE          DISPATCHES RESULT");
                 self.scheduler.visit(|context| {
                     let identity = context.identity();
                     println!(
-                        "{:<4} {}  {}  {:<14} {}",
+                        "{:<4} {}  {}  {:<8} {:<14} {:<10} {}",
                         context.id(),
                         identity.form,
                         identity.dimension,
+                        execution_runtime_name(context.runtime()),
                         execution_state_name(context.state()),
-                        context.dispatches()
+                        context.dispatches(),
+                        context.cpu_state().accumulator
                     );
                 });
                 true
@@ -604,6 +606,28 @@ impl Shell {
             }
             "ifconfig" => {
                 crate::network::print_configuration();
+                true
+            }
+            "dhcp" => {
+                let Some(handle_id) = self.network_handle("dhcp") else {
+                    return;
+                };
+                match crate::network::renew_dhcp(
+                    &self.broker,
+                    handle_id,
+                    self.report.root_fin,
+                    self.report.stable_fin,
+                ) {
+                    Ok(configuration) => println!(
+                        "DHCP bound ether0 to {}.{}.{}.{} for {} seconds.",
+                        configuration.address[0],
+                        configuration.address[1],
+                        configuration.address[2],
+                        configuration.address[3],
+                        configuration.lease_seconds
+                    ),
+                    Err(error) => println!("dhcp: {}", error.message()),
+                }
                 true
             }
             "netstat" => {
@@ -996,8 +1020,8 @@ impl Shell {
         println!("  userdel <name>  passwd <name> <new-password>");
         println!("  forms packages dimensions makedim inspect journal policy handles history");
         println!("  checkpoint checkpoints restorepoint <state-id>");
-        println!("  mkform <name> [service|interface|package|driver|data|policy]");
-        println!("  execute <Form-name>   (admit a FIN context to the scheduler)");
+        println!("  mkform <name> [service|interface|package|driver|data|policy|executable]");
+        println!("  execute <Form-name>   (schedule and run executable Form payloads)");
         println!("  view/cat write append head delete recover move copy");
         println!("  hexdump du shasum df which resolve retire activate reclaim");
         println!(
@@ -1013,7 +1037,7 @@ impl Shell {
         println!(
             "  date clock timers cpuinfo features kernelcaps lspci neofetch sysinfo mem free env uptime ps"
         );
-        println!("  kstat dmesg bootlog ifconfig netstat ping <IPv4-address> [count]");
+        println!("  kstat dmesg bootlog ifconfig dhcp netstat ping <IPv4-address> [count]");
         println!("  sysctl [-a|<node>|<node> <value>]  kqueue <action>  expbudget <action>");
         println!("  dns <host>  fetch <http[s]://host[:port]/path>  mode");
         println!("  calc len hex reverse tolower toupper factor rand sleep true false");
@@ -1830,6 +1854,7 @@ impl Shell {
             "driver" => FormKind::Driver,
             "data" => FormKind::Data,
             "policy" => FormKind::Policy,
+            "executable" | "exec" => FormKind::Executable,
             other => {
                 println!("Unknown Form kind '{}'.", other);
                 return;
@@ -1897,6 +1922,9 @@ impl Shell {
                 return;
             }
         };
+        if form.kind == FormKind::Executable {
+            context.set_runtime(ExecutionRuntime::ExpPython);
+        }
         if let Err(error) = context.attach_handle(handle) {
             println!("Scheduler rejected the Form Handle set: {:?}.", error);
             return;
@@ -1923,6 +1951,37 @@ impl Shell {
             form.fin,
             self.report.stable_fin
         );
+        if form.kind == FormKind::Executable {
+            if dispatched != context_id {
+                println!(
+                    "Executable Form is ready; another context owns the current cooperative slice."
+                );
+                return;
+            }
+            let index = self
+                .forms
+                .iter()
+                .position(|candidate| candidate.is_some_and(|candidate| candidate.fin == form.fin))
+                .expect("scheduled Form remains registered");
+            let content = self.content[index];
+            let succeeded = core::str::from_utf8(&content.bytes[..content.length as usize])
+                .is_ok_and(crate::python::execute);
+            let result = u64::from(!succeeded);
+            self.scheduler
+                .finish(context_id, result)
+                .expect("the dispatched Form context remains admitted");
+            println!(
+                "Executable Form '{}' exited with result {}.",
+                identity, result
+            );
+            slog!(
+                "EXPOS_FORM_EXITED context={} fin={} result={}\r\n",
+                context_id,
+                form.fin,
+                result
+            );
+            let _ = self.scheduler.dispatch_next();
+        }
     }
 
     fn inspect(&self, identity: Option<&str>) {
@@ -2696,6 +2755,7 @@ fn is_shell_command(name: &str) -> bool {
             | "budget"
             | "rlimit"
             | "ifconfig"
+            | "dhcp"
             | "netstat"
             | "ping"
             | "dns"
@@ -2778,6 +2838,7 @@ fn is_mutating_command(name: &str) -> bool {
             | "displayreset"
             | "relate"
             | "unrelate"
+            | "dhcp"
             | "ping"
             | "dns"
             | "fetch"
@@ -2812,7 +2873,7 @@ fn is_form_mutation(name: &str) -> bool {
 fn unavailable_in_single_user(name: &str) -> bool {
     matches!(
         name,
-        "desktop" | "browser" | "games" | "arcade" | "ping" | "dns" | "fetch"
+        "desktop" | "browser" | "games" | "arcade" | "dhcp" | "ping" | "dns" | "fetch"
     )
 }
 
@@ -2972,6 +3033,7 @@ const fn kind_name(kind: FormKind) -> &'static str {
         FormKind::Driver => "driver",
         FormKind::Data => "data",
         FormKind::Policy => "policy",
+        FormKind::Executable => "executable",
     }
 }
 
@@ -2991,6 +3053,13 @@ const fn execution_state_name(state: ExecutionState) -> &'static str {
         ExecutionState::Waiting => "waiting",
         ExecutionState::BudgetBlocked => "budget-blocked",
         ExecutionState::Exited => "exited",
+    }
+}
+
+const fn execution_runtime_name(runtime: ExecutionRuntime) -> &'static str {
+    match runtime {
+        ExecutionRuntime::KernelNative => "native",
+        ExecutionRuntime::ExpPython => "python",
     }
 }
 

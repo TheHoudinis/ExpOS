@@ -43,7 +43,8 @@ pub use display::{
 };
 pub use execution::{
     AddressSpace, CpuState, ExecutionContext, ExecutionError, ExecutionEvent, ExecutionIdentity,
-    ExecutionState, Scheduler, MAX_CONTEXT_EVENTS, MAX_CONTEXT_HANDLES, MAX_EXECUTION_CONTEXTS,
+    ExecutionRuntime, ExecutionState, Scheduler, MAX_CONTEXT_EVENTS, MAX_CONTEXT_HANDLES,
+    MAX_EXECUTION_CONTEXTS,
 };
 pub use expfs::{
     ExpFs, RecordKey, RecordKind, StorageError, SystemRecord, Transaction, SYSTEM_RECORD_CAPACITY,

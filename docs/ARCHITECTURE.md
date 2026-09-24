@@ -32,7 +32,7 @@ CfcFin -> CFC ownership/catalog (semantic core)
 
 ## Approved target architecture (not yet complete)
 
-Genesis constructs a Central Finite Curve (CFC) as the complete ExpOS
+Genesis constructs a Central Inflation Fabric (CFC) as the complete ExpOS
 environment. Every CFC has its own typed FIN, a required nonempty name, and
 exactly one Primary Dimension. Forms, Dimensions, relationships,
 identity/policy records, capabilities, ExpFS state, keys, checkpoints, and
@@ -62,6 +62,33 @@ not landed. Scheduler admission and per-context accounting have landed. The
 official configurable-installer label is **Architect**; “expert” is only a
 legacy explanation. Native UEFI is the default boot path, while BIOS is
 retained for compatibility, recovery, and development.
+
+### Current enforcement and execution flow
+
+- `ExpScope` snapshots the owning CFC's Form set when a context is constructed.
+  Sharing a Dimension grants nothing: a target must be CFC-owned and explicitly
+  added to the fixed allowlist before `authorize` succeeds.
+- `ExpSeal` permanently closes new root-Handle issuance for one
+  requester/Dimension in a broker lifetime. Delegation preserves CFC, target
+  and Dimension, can only remove operation bits or shorten expiry, and parent
+  revocation cascades. The current network right is the coarse `NETWORK` bit;
+  `Connect`, `DNS`, and `RawPacket` have not yet been split into distinct bits.
+- Core `ExpBudget` charges context-owned resource accounts before work and
+  rejects overflow or a soft-limit breach atomically. Scheduler dispatches
+  charge execution checkpoints. Kernel controls separately enforce live Form
+  bytes/operations, event watches, IPC reservations, and scratch pages. PIMP
+  does not yet compile budget keys directly into every context's limits.
+- `execute` requires an active target-scoped Execute Handle and admits a
+  CFC/Dimension/FIN context. Kernel-native Forms retain trusted entrypoints;
+  persisted `executable` Forms run their content through bounded ExpPython
+  while their context owns the cooperative slice, then transition to `Exited`
+  with the result retained in modeled CPU state. Hardware page-table/register
+  switching and preemption remain later stages.
+- The Network Driver Form uses bounded DHCP Discover/Offer/Request/ACK over
+  the existing Ethernet/IPv4/UDP path. The accepted lease supplies address,
+  netmask, gateway, DNS server, server identity and duration; `dhcp` performs a
+  Handle-gated renewal. A conservative static fallback keeps recovery usable
+  when no DHCP server answers.
 
 ## Implemented vertical slice
 
@@ -101,8 +128,10 @@ retained for compatibility, recovery, and development.
     policy primitives; kernel integration remains partial.
 13. Form-native execution contexts carry CFC, Dimension, FIN, address-space
     identity, a bounded Handle set, event queue, CPU state, and ExpBudget.
-    Cooperative scheduler admission/dispatch is live through `execute`; actual
-    page-table/register switching, interrupts, and user mode remain pending.
+    Cooperative scheduler admission/dispatch is live through `execute`;
+    persisted `executable` Forms now run bounded ExpPython payloads in their
+    admitted context and retain their exit result. Actual page-table/register
+    switching, interrupts, and user mode remain pending.
 14. CFC-bound recovery metadata stores an installation-baseline descriptor
     outside an up-to-eight-entry rotating checkpoint ring. The native ExpFS
     adapter now persists eight complete CFC database checkpoints, rotates the
@@ -293,7 +322,8 @@ retained for compatibility, recovery, and development.
   eight-checkpoint ring and protected installation baseline.
 - Network is a Driver Form protected by requester-bound Network Handles and
   PIMP policy. Its current polling RTL8139 path implements Ethernet, ARP,
-  static QEMU-user IPv4, ICMP echo, checksum-validated UDP, DNS A lookup, one
+  DHCP-configured IPv4 with a conservative fallback, ICMP echo,
+  checksum-validated UDP, DNS A lookup, one
   bounded synchronous TCP client and HTTP/1.0 GET over plain TCP or
   authenticated TLS 1.3. The TLS client requires hardware RDRAND entropy,
   sends SNI, verifies the requested hostname, certificate time validity from
@@ -301,7 +331,7 @@ retained for compatibility, recovery, and development.
   suite. TLS record and chain storage are fixed-size. Its Web PKI trust store
   is not a general operating-system CA bundle: GlobalSign Root R1 is the
   default anchor, and DigiCert Global Root G2 is selected only for
-  `duckduckgo.com` and its subdomains. DHCP, IPv6, physical Wi-Fi, concurrent
+  `duckduckgo.com` and its subdomains. IPv6, physical Wi-Fi, concurrent
   sockets, TCP servers and interrupt-driven I/O are explicitly future work.
 - Connectivity settings target a distinct Radio FIN through a requester-bound
   Configure Handle. The manager keeps software policy, PCI/USB presence, driver

@@ -13,6 +13,8 @@ pub enum FormKind {
     Driver,
     Data,
     Policy,
+    /// Content executed by a bounded Form runtime under scheduler ownership.
+    Executable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

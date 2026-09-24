@@ -13,7 +13,7 @@ ExpOS is an experimental operating system designed around concepts that are not 
 
 Its central model is:
 
-    A complete ExpOS environment is a Central Finite Curve (CFC).
+    A complete ExpOS environment is a Central Inflation Fabric (CFC).
     Functionality exists through Forms.
     Forms are identified by FINs.
     Forms operate and appear through Dimensions.

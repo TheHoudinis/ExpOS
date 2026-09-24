@@ -9,7 +9,7 @@ pub const MAX_CFC_FORMS: usize = 16;
 pub const MAX_CFC_BINDINGS: usize = 32;
 pub const MAX_CFCS: usize = 4;
 
-/// Stable identity for a Central Finite Curve.
+/// Stable identity for a Central Inflation Fabric.
 ///
 /// This is intentionally not a [`Fin`]. A FIN identifies a Form (and is also
 /// used by the existing Dimension model); a `CfcFin` identifies the containing

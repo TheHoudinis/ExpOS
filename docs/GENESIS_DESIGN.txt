@@ -11,7 +11,7 @@ PURPOSE
 
 This file summarizes the design discussion about how ExpOS should be
 installed, how a new ExpOS system comes into existence, and how the
-installer relates to the Central Finite Curve (CFC), ExpFS, Forms,
+installer relates to the Central Inflation Fabric (CFC), ExpFS, Forms,
 FINs, Dimensions, DIESE, PIMP, ASL, identities, encryption, recovery,
 and booting.
 
@@ -70,7 +70,7 @@ THE WHOLE SYSTEM IS NOT A DIMENSION.
 
 The complete ExpOS environment is called a:
 
-    CFC — Central Finite Curve
+    CFC — Central Inflation Fabric
 
 A CFC contains Dimensions. Every CFC has its own typed FIN, a required
 nonempty human-readable name, and exactly one Primary Dimension. The CFC
@@ -81,7 +81,7 @@ Conceptual hierarchy:
 
     Physical Machine
         |
-        +-- CFC (Central Finite Curve)
+        +-- CFC (Central Inflation Fabric)
               |
               +-- Primary Dimension
               |
@@ -191,12 +191,12 @@ Suggested distinction:
 Suggested UI title:
 
     ExpOS Genesis Engine
-    Initializing a Central Finite Curve
+    Initializing a Central Inflation Fabric
 
 The central philosophical statement is:
 
     Genesis does not merely copy an operating system.
-    Genesis constructs a Central Finite Curve.
+    Genesis constructs a Central Inflation Fabric.
 
 The Genesis Engine is responsible for transforming bare hardware/storage
 into a coherent, bootable ExpOS CFC.
@@ -640,7 +640,7 @@ Instead it should speak ExpOS language.
 
 Example:
 
-    Initializing Central Finite Curve...
+    Initializing Central Inflation Fabric...
     Preparing persistent storage...
     Initializing ExpFS...
     Constructing Root Form...
@@ -728,7 +728,7 @@ separately from the main ExpOS Philosophy document.
 Proposed publication:
 
     ExpOS
-    Genesis Engine & Central Finite Curve Initialization
+    Genesis Engine & Central Inflation Fabric Initialization
     Version 1.0
     Architecture Specification
 
@@ -776,7 +776,7 @@ The strongest concepts produced during the conversation were:
 
     "The whole system is a CFC. A Dimension is inside the CFC."
 
-    "Genesis does not deploy an operating system. It constructs a Central Finite Curve."
+    "Genesis does not deploy an operating system. It constructs a Central Inflation Fabric."
 
     "Forms are fundamental."
 
