@@ -89,12 +89,27 @@ pub enum BootError {
 /// kernel smoke test: create the Root Form and Stable Dimension, bind them,
 /// evaluate early policy, grant a scoped handle, and journal the result.
 pub fn bootstrap_demo() -> Result<BootReport, BootError> {
-    let cfc_fin = DEVELOPMENT_CFC_FIN;
+    bootstrap_with_identity(
+        DEVELOPMENT_CFC_FIN,
+        Text::new("ExpOS Development").expect("static CFC name is valid"),
+        Fin::from_u128(0x4449_4d00_0000_0000_0000_0000_0000_0001),
+        Text::new("Stable").expect("static Dimension name is valid"),
+    )
+}
+
+/// Bootstrap a Genesis-created installation with identities minted and
+/// persisted by the installer. Runtime policy remains identical to the
+/// development bootstrap; only installation identity is supplied externally.
+pub fn bootstrap_with_identity(
+    cfc_fin: CfcFin,
+    cfc_name: Text,
+    stable_fin: Fin,
+    stable_name: Text,
+) -> Result<BootReport, BootError> {
     let root_fin = Fin::from_u128(0x4845_5841_0000_0000_0000_0000_0000_0001);
-    let stable_fin = Fin::from_u128(0x4449_4d00_0000_0000_0000_0000_0000_0001);
 
     let mut cfc =
-        Cfc::new(cfc_fin, "ExpOS Development", stable_fin).map_err(|_| BootError::CfcRejected)?;
+        Cfc::new(cfc_fin, cfc_name.as_str(), stable_fin).map_err(|_| BootError::CfcRejected)?;
     cfc.own_form(root_fin).map_err(|_| BootError::CfcRejected)?;
     cfc.bind(root_fin, stable_fin)
         .map_err(|_| BootError::CfcRejected)?;
@@ -107,7 +122,7 @@ pub fn bootstrap_demo() -> Result<BootReport, BootError> {
             _ => BootError::RegistryFull,
         })?;
     registry
-        .add_dimension(Dimension::new(stable_fin, "Stable", true))
+        .add_dimension(Dimension::new(stable_fin, stable_name.as_str(), true))
         .map_err(|_| BootError::RegistryFull)?;
     registry
         .bind(root_fin, stable_fin, 1, Visibility::Visible)
@@ -203,5 +218,21 @@ mod tests {
         assert_eq!(report.cfc_name.as_str(), "ExpOS Development");
         assert_eq!(report.handle_id, 1);
         assert_eq!(report.journal_sequence, 1);
+    }
+
+    #[test]
+    fn genesis_identity_replaces_development_identity() {
+        let cfc = CfcFin::from_u128(0x4745_4e45_5349_5300_0000_0000_0000_0001);
+        let dimension = Fin::from_u128(0x4745_4e45_5349_5300_0000_0000_0000_0002);
+        let report = bootstrap_with_identity(
+            cfc,
+            Text::new("Studio Fabric").unwrap(),
+            dimension,
+            Text::new("Primary").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(report.cfc_fin, cfc);
+        assert_eq!(report.cfc_name.as_str(), "Studio Fabric");
+        assert_eq!(report.stable_fin, dimension);
     }
 }

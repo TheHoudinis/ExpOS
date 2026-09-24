@@ -69,6 +69,19 @@ impl Device {
     }
 
     pub fn write_sector(self, lba: u32, input: &[u8; SECTOR_SIZE]) -> Result<(), StorageError> {
+        self.write_sector_unflushed(lba, input)?;
+        self.flush()
+    }
+
+    /// Write one sector without issuing a cache flush. Bulk constructors such
+    /// as Genesis use this for every sector, then flush once at the atomic
+    /// installation boundary. ExpFS continues to use `write_sector` and keeps
+    /// its per-sector durability behavior.
+    pub(crate) fn write_sector_unflushed(
+        self,
+        lba: u32,
+        input: &[u8; SECTOR_SIZE],
+    ) -> Result<(), StorageError> {
         if lba >= self.sectors || lba > 0x0FFF_FFFF {
             return Err(StorageError::OutOfRange);
         }
@@ -84,6 +97,10 @@ impl Device {
             };
         }
         wait_not_busy()?;
+        Ok(())
+    }
+
+    pub(crate) fn flush(self) -> Result<(), StorageError> {
         unsafe { port::outb(STATUS_COMMAND, COMMAND_FLUSH) };
         wait_not_busy()?;
         Ok(())

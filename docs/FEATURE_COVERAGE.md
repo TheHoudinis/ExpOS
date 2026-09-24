@@ -23,6 +23,7 @@ tested with `make persistence-check`; live authenticated HTTPS is tested with
 | Go | Shared ABI v1 call numbers and validation in Rust, tested `sdk/go/expos` client and emulator, `GoABI` Interface Form and `goabi` diagnostics |
 | Hardware | `date/clock`, `timers`, `cpuinfo`, `features/kernelcaps`, `lspci`, `neofetch/sysinfo`, `mem/free`, VGA and COM1 consoles, calibrated CPUID/fallback TSC timing, PS/2 keyboard/mouse, dedicated primary-master ATA PIO state transport, RTL8139 bus-master DMA, Ethernet/ARP/DHCP/IPv4/ICMP/UDP/DNS/TCP/HTTP/TLS, PCI Wi-Fi/Bluetooth class discovery with honest driver/connection state, ANSI serial input, RDRAND detection and CPUID/control-register reporting |
 | System | Graphical-or-console boot chooser and mutually switchable login, Operator/Power/Guest capability authority, persistent twelve-slot accounts, salted PBKDF2-HMAC-SHA256 password verifiers, persistent desktop/connectivity preferences with fail-safe decoding, ExpFS dual-current-slot plus eight-checkpoint CRC recovery, `users`, `useradd`, `userdel`, `passwd`, `login`, `logout`, `status`, `kstat`, `ps`, `dmesg/bootlog`, `stateinfo`, combined `diag/diagnose`, `ifconfig`, `ping`, `dns`, `fetch`, `netstat`, history, `whoami`, `reboot`, `shutdown` |
+| Genesis | Native-UEFI hybrid `ExpOS-0.9-x86_64.iso`; explicitly unencrypted whole-disk Architect flow with destructive confirmation; primary/backup GPT, FAT32 ESP and `EFI/BOOT/BOOTX64.EFI`; minted CFC/Primary Dimension identities and hashed initial Operator seed; automated install, disk-only reboot, login and shutdown proof. Basic is security-gated until mandatory Argon2id + AEAD storage lands |
 | Utilities | `calc`, `factor`, `len`, `hex`, `reverse/rev`, `tolower`, `toupper`, `rand`, `sleep`, `true`, `false` |
 
 Native Form contents use fixed 512-byte records that are transactionally
@@ -44,8 +45,8 @@ interaction options disabled.
 
 ## Approved architecture and landed semantic foundations
 
-The Genesis/CFC target is fixed even though its end-to-end native implementation
-has not landed:
+The Genesis/CFC target is fixed, and its unencrypted Architect vertical slice
+has landed, while the protected Basic path remains incomplete:
 
 - every CFC has its own typed FIN, required nonempty name, and exactly one
   Primary Dimension;
@@ -72,8 +73,9 @@ rotation; immutable-ownership ExpScope reachability; a broker-lifetime ExpSeal
 root-issuance cutoff with strict attenuation; and fixed-capacity context-keyed
 ExpBudget accounting; and Form-native scheduler contexts carrying CFC,
 Dimension, FIN, address-space, Handle, event, CPU and budget state. Cooperative
-admission/dispatch and per-context budget charging are live; these are not yet
-a Genesis installer, encrypted block store, protected-baseline restore engine,
+admission/dispatch and per-context budget charging are live. Genesis now builds
+and verifies a bootable UEFI Architect installer; it is not yet an encrypted
+Basic installer, protected-baseline restore engine,
 page-table sandbox, durable seal registry, interrupt scheduler or user-mode
 context switcher.
 

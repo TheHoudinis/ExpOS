@@ -77,8 +77,23 @@ explanation). The approved enforcement model names are **ExpScope** for
 CFC/Dimension-aware confinement, **ExpSeal** for monotonic capability reduction,
 and **ExpBudget** for per-context resource enforcement.
 
-These are approved target invariants, not claims about the current image. The
-bounded `Cfc`/`CfcCatalog` model enforces exclusive ownership of registered
+These invariants now have a first end-to-end Genesis vertical slice. `make
+genesis-iso` builds `build/ExpOS-0.9-x86_64.iso`, a native-UEFI hybrid image.
+Its Architect path requires exact `ERASE` confirmation, constructs primary and
+backup GPT metadata, creates a FAT32 EFI System Partition, installs the runtime
+at `EFI/BOOT/BOOTX64.EFI`, mints and persists CFC/Primary Dimension identities,
+and stores only a salted password verifier for the initial Operator. `make
+genesis-check` installs to a blank disk, reboots without the ISO, logs in with
+that Operator, and shuts down.
+
+This is deliberately not yet the Basic installer: Basic remains gated because
+its mandatory Argon2id-wrapped storage key and AEAD ExpFS are not implemented.
+The current Architect slice claims the whole ATA primary-master disk and is
+explicitly unencrypted. It is QEMU/OVMF-tested; safe physical-disk selection,
+AHCI/NVMe/VirtIO-block, USB input/media, BIOS installation, Secure Boot, and a
+graphical installer remain open.
+
+The bounded `Cfc`/`CfcCatalog` model enforces exclusive ownership of registered
 Form and Dimension FINs. ExpScope snapshots that ownership, recovery artifacts
 and ExpFS records are CFC-bound, and Handles carry a CFC identity. Native Form
 mutations now commit and recover a complete bounded Form graph through ExpFS,
@@ -86,8 +101,8 @@ so a newly created Form and its content survive a reboot without a Form-specific
 persistence path. Accounts and settings now load from and commit through the
 same ExpFS current-state transaction; EXPOST03 is only a boot-time migration
 fallback. Typed execution contexts now reach scheduler admission and
-per-context budget accounting. Native checkpoint capture/restore is live;
-Genesis construction, the protected installation baseline, Argon2id key
+per-context budget accounting. Native checkpoint capture/restore and the
+Architect Genesis construction path are live; the protected installation baseline, Argon2id key
 wrapping, AEAD storage, real page-table switching, interrupts/preemption, and
 user-mode CPU context switching remain implementation work.
 
@@ -103,6 +118,8 @@ UEFI builds/tests. Python also supplies the host SDK and test harnesses.
 
 ```sh
 make uefi           # build build/esp/EFI/BOOT/BOOTX64.EFI
+make genesis-iso    # build build/ExpOS-0.9-x86_64.iso
+make genesis-check  # install, disk-boot, log in and shut down under OVMF
 make run-uefi       # boot the native firmware path with OVMF
 make bootmode-check # verify single-user account/service restrictions
 make startup-check  # verify visible UEFI/BIOS screens and real keyboard login

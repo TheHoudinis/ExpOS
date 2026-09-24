@@ -5,6 +5,7 @@
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(not(test), no_main)]
+#![cfg_attr(feature = "genesis-installer", allow(dead_code))]
 
 extern crate alloc;
 
@@ -17,6 +18,7 @@ pub mod display_timing;
 mod expfs_store;
 mod framebuffer;
 mod games;
+mod genesis;
 mod hardware;
 mod input;
 mod kernel_controls;
@@ -144,46 +146,62 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
 
     println!();
 
-    let report = match expos_core::bootstrap_demo() {
-        Ok(report) => {
-            println!("[ok] Root Form FIN {}", report.root_fin);
-            println!("[ok] Stable Dimension FIN {}", report.stable_fin);
-            println!("[ok] PIMP accepted; DIESE resolved policy");
-            println!("[ok] scoped Form Handle #{}", report.handle_id);
-            println!("[ok] ExpFS journal commit #{}", report.journal_sequence);
-            slog!("EXPOS_BOOT_OK form-native bootstrap complete\r\n");
-            report
+    #[cfg(feature = "genesis-installer")]
+    genesis::run();
+
+    #[cfg(not(feature = "genesis-installer"))]
+    {
+        let genesis_config = genesis::load();
+        let report = match genesis_config {
+            Some(config) => expos_core::bootstrap_with_identity(
+                config.cfc_fin,
+                config.cfc_name,
+                config.primary_fin,
+                config.primary_name,
+            ),
+            None => expos_core::bootstrap_demo(),
+        };
+        let report = match report {
+            Ok(report) => {
+                println!("[ok] Root Form FIN {}", report.root_fin);
+                println!("[ok] Stable Dimension FIN {}", report.stable_fin);
+                println!("[ok] PIMP accepted; DIESE resolved policy");
+                println!("[ok] scoped Form Handle #{}", report.handle_id);
+                println!("[ok] ExpFS journal commit #{}", report.journal_sequence);
+                slog!("EXPOS_BOOT_OK form-native bootstrap complete\r\n");
+                report
+            }
+            Err(error) => panic!("Form-native bootstrap failed: {:?}", error),
+        };
+        expfs_store::initialize(report.cfc_fin, report.cfc_name, report.stable_fin);
+        state::initialize();
+        let preferences = state::preferences();
+        if let Some(mode) = framebuffer::DisplayMode::from_persisted(preferences.display_mode) {
+            let _ = framebuffer::request_mode(mode);
         }
-        Err(error) => panic!("Form-native bootstrap failed: {:?}", error),
-    };
-    expfs_store::initialize(report.cfc_fin, report.cfc_name, report.stable_fin);
-    state::initialize();
-    let preferences = state::preferences();
-    if let Some(mode) = framebuffer::DisplayMode::from_persisted(preferences.display_mode) {
-        let _ = framebuffer::request_mode(mode);
+        session::initialize_with_seed(genesis_config.map(|config| config.operator.0));
+        println!();
+        println!("Core architecture online. Starting session manager.");
+        let mut input = input::Input::new();
+        let requested_mode = session::choose_boot_mode(&mut input);
+        boot::set_single_user(requested_mode == session::BootMode::SingleUser);
+        if boot::single_user() {
+            slog!("EXPOS_SERVICE_MODE single-user network=disabled desktop=disabled operator-only=true\r\n");
+            radio::initialize(false, false);
+        } else {
+            let ethernet_ready = network::initialize();
+            radio::initialize(ethernet_ready, network::link_up());
+            radio::restore_persisted_policy(
+                preferences.flags & state::PREF_NETWORK_ENABLED != 0,
+                preferences.flags & state::PREF_WIFI_ENABLED != 0,
+                preferences.flags & state::PREF_BLUETOOTH_ENABLED != 0,
+            );
+            slog!("EXPOS_SERVICE_MODE multi-user\r\n");
+        }
+        let login = session::login(&mut input, requested_mode);
+        if login.mode == session::BootMode::Graphical {
+            desktop::run(&mut input, false, login.session, report.cfc_fin);
+        }
+        shell::run(report, input, login.session)
     }
-    session::initialize();
-    println!();
-    println!("Core architecture online. Starting session manager.");
-    let mut input = input::Input::new();
-    let requested_mode = session::choose_boot_mode(&mut input);
-    boot::set_single_user(requested_mode == session::BootMode::SingleUser);
-    if boot::single_user() {
-        slog!("EXPOS_SERVICE_MODE single-user network=disabled desktop=disabled operator-only=true\r\n");
-        radio::initialize(false, false);
-    } else {
-        let ethernet_ready = network::initialize();
-        radio::initialize(ethernet_ready, network::link_up());
-        radio::restore_persisted_policy(
-            preferences.flags & state::PREF_NETWORK_ENABLED != 0,
-            preferences.flags & state::PREF_WIFI_ENABLED != 0,
-            preferences.flags & state::PREF_BLUETOOTH_ENABLED != 0,
-        );
-        slog!("EXPOS_SERVICE_MODE multi-user\r\n");
-    }
-    let login = session::login(&mut input, requested_mode);
-    if login.mode == session::BootMode::Graphical {
-        desktop::run(&mut input, false, login.session, report.cfc_fin);
-    }
-    shell::run(report, input, login.session)
 }

@@ -9,10 +9,19 @@ STATE_SIZE := 4M
 QEMU       := qemu-system-x86_64 -machine pc -cpu max -m 256M -vga std -global VGA.vgamem_mb=16 -netdev user,id=net0 -device rtl8139,netdev=net0
 UEFI_DIR   := $(BUILD)/esp
 UEFI_APP   := $(UEFI_DIR)/EFI/BOOT/BOOTX64.EFI
+UEFI_BOOT_IMG := $(BUILD)/uefi-boot.img
+GENESIS_DIR := $(BUILD)/genesis
+GENESIS_RUNTIME := $(GENESIS_DIR)/runtime-BOOTX64.EFI
+GENESIS_RUST_LIB := target/genesis/$(TARGET)/release/libexpos_kernel.a
+GENESIS_KERNEL := $(GENESIS_DIR)/kernel.elf
+GENESIS_PAYLOAD_OBJ := $(GENESIS_DIR)/uefi-payload.obj
+GENESIS_APP := $(GENESIS_DIR)/BOOTX64.EFI
+GENESIS_EFI_IMG := $(GENESIS_DIR)/efiboot.img
+GENESIS_ISO := $(BUILD)/ExpOS-0.9-x86_64.iso
 OVMF_CODE  ?= /usr/share/edk2/x64/OVMF_CODE.4m.fd
 OVMF_VARS  ?= /usr/share/edk2/x64/OVMF_VARS.4m.fd
 
-.PHONY: all iso test check display-check session-check network-check internet-check https-check search-check persistence-check run debug clean legacy-alpha-check run-alpha ayo go-sdk kernel-build
+.PHONY: all iso genesis-iso genesis-check test check display-check session-check network-check internet-check https-check search-check persistence-check run debug clean legacy-alpha-check run-alpha ayo go-sdk kernel-build genesis-kernel-build
 
 all: test check display-check session-check network-check persistence-check ayo go-sdk python-sdk python-runtime-check python-check budget-check uefi-check bootmode-check startup-check
 
@@ -41,6 +50,39 @@ $(ISO): $(KERNEL_ELF) iso/boot/grub/grub.cfg | $(BUILD)
 
 iso: $(ISO)
 
+# Genesis installation media is a separate UEFI build. It embeds the normal
+# native runtime application, then writes that application to the selected
+# disk's standards-based EFI/BOOT fallback path.
+$(GENESIS_RUNTIME): $(UEFI_APP)
+	mkdir -p $(dir $@)
+	cp $< $@
+
+genesis-kernel-build: $(GENESIS_RUNTIME)
+	CARGO_TARGET_DIR=target/genesis cargo build --release -p expos-kernel --target $(TARGET) --features genesis-installer
+
+$(GENESIS_KERNEL): linker.ld $(BUILD)/boot.o genesis-kernel-build
+	ld --defsym=KERNEL_LOAD_BASE=0x2000000 -T linker.ld -e _uefi_start -o $@ $(BUILD)/boot.o $(GENESIS_RUST_LIB)
+
+$(GENESIS_PAYLOAD_OBJ): boot/uefi/genesis-payload.asm $(GENESIS_KERNEL)
+	nasm -f win64 $< -o $@
+
+$(GENESIS_APP): $(BUILD)/uefi-loader.obj $(GENESIS_PAYLOAD_OBJ)
+	ld -mi386pep --subsystem 10 --entry efi_main --image-base 0 --enable-reloc-section -o $@ $^
+
+$(GENESIS_EFI_IMG): $(GENESIS_APP) tools/make-efi-fat.py
+	python3 tools/make-efi-fat.py $(GENESIS_APP) $@
+
+$(GENESIS_ISO): $(GENESIS_EFI_IMG)
+	mkdir -p $(GENESIS_DIR)/iso/boot $(GENESIS_DIR)/iso/EFI/BOOT
+	cp $(GENESIS_EFI_IMG) $(GENESIS_DIR)/iso/boot/efiboot.img
+	cp $(GENESIS_APP) $(GENESIS_DIR)/iso/EFI/BOOT/BOOTX64.EFI
+	xorriso -as mkisofs -R -J -V EXPOS_GENESIS -e boot/efiboot.img -no-emul-boot -append_partition 2 0xef $(GENESIS_EFI_IMG) -appended_part_as_gpt -o $@ $(GENESIS_DIR)/iso
+
+genesis-iso: $(GENESIS_ISO)
+
+genesis-check: $(GENESIS_ISO)
+	OVMF_CODE=$(OVMF_CODE) OVMF_VARS=$(OVMF_VARS) python3 tests/check-genesis.py
+
 # Native firmware image: the validated ELF payload is embedded in a relocatable
 # PE32+ UEFI application. No third-party bootloader runs in this path.
 $(BUILD)/kernel-uefi.elf: linker.ld $(BUILD)/boot.o kernel-build
@@ -56,6 +98,9 @@ $(UEFI_APP): $(BUILD)/uefi-loader.obj $(BUILD)/uefi-payload.obj
 	mkdir -p $(dir $@)
 	ld -mi386pep --subsystem 10 --entry efi_main --image-base 0 --enable-reloc-section -o $@ $^
 
+$(UEFI_BOOT_IMG): $(UEFI_APP) tools/make-efi-fat.py
+	python3 tools/make-efi-fat.py $(UEFI_APP) $@
+
 .PHONY: uefi run-uefi uefi-check bootmode-check startup-check
 uefi: $(UEFI_APP)
 
@@ -63,27 +108,27 @@ run-uefi: $(UEFI_APP) $(STATE_IMG)
 	cp $(OVMF_VARS) $(BUILD)/OVMF-run-vars.fd
 	$(QEMU) -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) -drive if=pflash,format=raw,file=$(BUILD)/OVMF-run-vars.fd -drive file=$(STATE_IMG),format=raw,if=ide,index=0 -drive file=fat:rw:$(UEFI_DIR),format=raw,if=ide,index=1 -serial stdio -no-reboot
 
-startup-check: $(ISO) $(UEFI_APP)
-	OVMF_CODE=$(OVMF_CODE) OVMF_VARS=$(OVMF_VARS) python3 tests/check-startup.py uefi
+startup-check: $(ISO) $(UEFI_BOOT_IMG)
+	TMPDIR=/tmp OVMF_CODE=$(OVMF_CODE) OVMF_VARS=$(OVMF_VARS) python3 tests/check-startup.py uefi
 	python3 tests/check-startup.py bios
 	@echo ">>> EXPOS VISIBLE STARTUP TESTS PASSED <<<"
 
-uefi-check: $(UEFI_APP)
+uefi-check: $(UEFI_BOOT_IMG)
 	cp $(OVMF_VARS) $(BUILD)/OVMF-uefi-vars.fd
 	truncate -s 0 $(BUILD)/uefi-state.img
 	truncate -s $(STATE_SIZE) $(BUILD)/uefi-state.img
-	OVMF_CODE=$(OVMF_CODE) python3 tests/check-uefi.py uefi
+	TMPDIR=/tmp OVMF_CODE=$(OVMF_CODE) python3 tests/check-uefi.py uefi
 	grep -q 'EXPOS_UEFI_HANDOFF version=1 boot_services=exited' $(BUILD)/uefi-serial.log
 	grep -q 'EXPOS_BOOT_OK' $(BUILD)/uefi-serial.log
 	grep -q 'EXPOS_LOGIN_OK user=operator' $(BUILD)/uefi-serial.log
 	grep -q 'EXPOS_COMMAND_OK shutdown' $(BUILD)/uefi-serial.log
 	@echo ">>> EXPOS NATIVE UEFI TEST PASSED <<<"
 
-bootmode-check: $(UEFI_APP)
+bootmode-check: $(UEFI_BOOT_IMG)
 	cp $(OVMF_VARS) $(BUILD)/OVMF-single-vars.fd
 	truncate -s 0 $(BUILD)/single-state.img
 	truncate -s $(STATE_SIZE) $(BUILD)/single-state.img
-	OVMF_CODE=$(OVMF_CODE) python3 tests/check-uefi.py single
+	TMPDIR=/tmp OVMF_CODE=$(OVMF_CODE) python3 tests/check-uefi.py single
 	grep -q 'EXPOS_SERVICE_MODE single-user network=disabled desktop=disabled operator-only=true' $(BUILD)/single-serial.log
 	grep -q 'EXPOS_SINGLE_USER_DENIED non-operator' $(BUILD)/single-serial.log
 	grep -q 'EXPOS_LOGIN_OK user=operator' $(BUILD)/single-serial.log

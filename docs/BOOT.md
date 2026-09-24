@@ -16,6 +16,8 @@ make run-uefi      # boot with OVMF and the existing runtime state image
 make uefi-check    # firmware handoff, login and shutdown
 make bootmode-check # reject Guest in single-user, test service restrictions
 make startup-check # capture visible UEFI/BIOS screens and exercise PS/2 login
+make genesis-iso   # native UEFI installer at build/ExpOS-0.9-x86_64.iso
+make genesis-check # install to a blank disk, boot it, log in, shut down
 ```
 
 ## Approved Genesis boot and unlock model
@@ -34,8 +36,8 @@ baseline. Even if an
 Architect installation reuses one entered password, CFC keys, key envelopes,
 AEAD domains, and storage remain independent.
 
-This is an approved target flow, not the behavior of the current development
-image. Exact loader/key-envelope exchange, AEAD algorithm, Argon2id parameters,
+The encrypted portion remains an approved target flow, not behavior of the
+current development image. Exact loader/key-envelope exchange, AEAD algorithm, Argon2id parameters,
 nonce format, checkpoint format, and recovery selection UI remain implementation
 work.
 
@@ -63,10 +65,18 @@ reported video memory before drawing; it does not assume the BIOS BAR address.
 Hardware drivers, interrupts and memory isolation retain their current
 limitations. This build is unsigned and does not implement Secure Boot.
 
-The development chooser and development accounts are not the Genesis Basic
-installer. The current state image is still a plaintext dual-slot CRC journal;
-it does not implement the approved CFC key envelope, AEAD, eight rotating
-checkpoints, protected installation baseline, or password-driven unlock flow.
-Basic's automatic boot, mandatory encryption, Operator creation, and CFC
-selection remain to be connected to Genesis. No host disks are modified by
-these build/test targets.
+Genesis now has a separate native-UEFI installation build. Its first supported
+vertical slice is Architect, whole-disk and explicitly unencrypted. It writes
+primary/backup GPT structures, a FAT32 EFI System Partition, the runtime at
+`EFI/BOOT/BOOTX64.EFI`, and a checksummed manifest with new CFC and Primary
+Dimension identities plus a salted Operator password verifier. On first
+installed boot those identities drive core bootstrap and the Operator becomes
+an ExpFS account record. `make genesis-check` proves ISO install, ISO-free disk
+boot, Operator login, and shutdown.
+
+Basic remains gated rather than silently weakened. The current state database
+is still plaintext and does not implement the approved CFC key envelope, AEAD,
+protected installation baseline, or password-driven unlock flow. The Architect
+slice currently sees only the ATA primary master and does not enumerate model
+or serial identities, so it is not yet approved for physical-disk use. The
+automated check modifies only its generated blank image.

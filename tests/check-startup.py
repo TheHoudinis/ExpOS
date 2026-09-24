@@ -93,13 +93,13 @@ class Startup:
             code = os.environ.get("OVMF_CODE", "/usr/share/edk2/x64/OVMF_CODE.4m.fd")
             variables = os.environ.get("OVMF_VARS", "/usr/share/edk2/x64/OVMF_VARS.4m.fd")
             shutil.copyfile(variables, scratch / "vars.fd")
-            # Keep firmware and the writable virtual FAT backend away from
-            # both runtime state and the build's original boot payload.
-            source = Path(os.environ.get("EXPOS_EFI_DIR", str(ROOT / "build/esp")))
-            shutil.copytree(source, scratch / "esp")
+            # Keep firmware and the writable FAT image away from both runtime
+            # state and the build's original boot payload.
+            source = Path(os.environ.get("EXPOS_EFI_IMG", str(ROOT / "build/uefi-boot.img")))
+            shutil.copyfile(source, scratch / "uefi-boot.img")
             command += ["-drive", f"if=pflash,format=raw,readonly=on,file={code}",
                         "-drive", f"if=pflash,format=raw,file={scratch}/vars.fd",
-                        "-drive", f"file=fat:rw:{scratch}/esp,format=raw,if=ide,index=1"]
+                        "-drive", f"file={scratch}/uefi-boot.img,format=raw,if=ide,index=1"]
         else:
             command += ["-boot", "once=d", "-cdrom", str(ROOT / "build/expos.iso")]
         self.log = (self.artifacts / "qemu.log").open("w")

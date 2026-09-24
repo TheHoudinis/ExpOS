@@ -25,7 +25,10 @@ const HEADER_LEN: usize = 64;
 const SLOT_SECTORS: usize = 24;
 const SLOT_LEN: usize = SLOT_SECTORS * storage::SECTOR_SIZE;
 const PAYLOAD_LEN: usize = SLOT_LEN - HEADER_LEN;
-const SLOT_A_LBA: u32 = 32;
+// GPT reserves LBAs 0..33. Genesis stores its immutable identity manifest at
+// LBA 40, so the transactional ExpFS region begins at 64 and remains outside
+// the EFI System Partition, which begins at LBA 2048.
+const SLOT_A_LBA: u32 = 64;
 const SLOT_B_LBA: u32 = SLOT_A_LBA + SLOT_SECTORS as u32;
 const CHECKPOINT_LBA: u32 = SLOT_B_LBA + SLOT_SECTORS as u32;
 const MINIMUM_DISK_SECTORS: u32 = CHECKPOINT_LBA + (CHECKPOINT_CAPACITY * SLOT_SECTORS) as u32;

@@ -92,6 +92,11 @@ pub struct LoginResult {
     pub mode: BootMode,
 }
 
+/// Opaque hashed Operator credential passed from Genesis into first-boot
+/// account initialization. Plaintext passwords never cross this boundary.
+#[derive(Clone, Copy)]
+pub struct StoredGenesisAccount(pub(crate) state::StoredAccount);
+
 impl Session {
     pub fn name(&self) -> &str {
         self.name.as_str()
@@ -265,26 +270,50 @@ impl AccountStore {
 static ACCOUNTS: crate::sync::SpinMutex<AccountStore> =
     crate::sync::SpinMutex::new(AccountStore::new());
 
-/// Load hashed accounts from the state journal, or create and journal the
-/// protected defaults on a blank/corrupt/unavailable store.
-pub fn initialize() {
+/// Initialize accounts, using the Operator credential prepared by Genesis
+/// only when the ExpFS account record is still blank. Once journaled, ExpFS is
+/// authoritative and the seed is ignored on every later boot.
+pub fn initialize_with_seed(operator: Option<state::StoredAccount>) {
     let loaded = state::load_accounts().and_then(AccountStore::from_persistent);
     let (accounts, source) = match loaded {
         Some(accounts) => (accounts, "disk"),
-        None => (AccountStore::builtins(), "defaults"),
+        None => match operator.and_then(|record| {
+            let mut stored = [state::StoredAccount::EMPTY; MAX_ACCOUNTS];
+            stored[0] = record;
+            AccountStore::from_persistent(stored)
+        }) {
+            Some(accounts) => (accounts, "genesis"),
+            None => (AccountStore::builtins(), "defaults"),
+        },
     };
     *ACCOUNTS.lock() = accounts;
-    if source == "defaults" {
+    if source != "disk" {
         match state::save_accounts(accounts.persistent()) {
-            Ok(()) => slog!("EXPOS_ACCOUNTS_READY source=defaults persisted=true\r\n"),
+            Ok(()) => slog!("EXPOS_ACCOUNTS_READY source={} persisted=true\r\n", source),
             Err(error) => slog!(
-                "EXPOS_ACCOUNTS_READY source=defaults persisted=false error={:?}\r\n",
+                "EXPOS_ACCOUNTS_READY source={} persisted=false error={:?}\r\n",
+                source,
                 error
             ),
         }
     } else {
         slog!("EXPOS_ACCOUNTS_READY source=disk persisted=true\r\n");
     }
+}
+
+/// Produce the hashed Operator record stored by Genesis. The installer never
+/// writes the plaintext password to disk.
+#[cfg(any(test, feature = "genesis-installer"))]
+pub fn genesis_operator(password: &[u8]) -> Result<state::StoredAccount, AccountError> {
+    if !valid_password(password) {
+        return Err(AccountError::InvalidPassword);
+    }
+    Ok(Account::with_password(
+        Field::from_static(b"operator"),
+        password,
+        Authority::Operator,
+    )
+    .stored())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
