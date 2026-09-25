@@ -30,8 +30,7 @@ pub fn run(report: BootReport, mut input: Input, session: Session) -> ! {
     let mut length = 0;
     let mut history_cursor = None;
 
-    println!();
-    println!("ExpOS shell. Type 'help'.");
+    shell.welcome();
     slog!("EXPOS_SHELL_READY\r\n");
     prompt(shell.session);
 
@@ -1013,34 +1012,44 @@ impl Shell {
     }
 
     fn help(&self) {
-        println!("ExpOS commands:");
-        println!("  help clear echo about status bootmode whoami users login logout");
-        println!("  python/python3 <code> | -f <Form>   (ExpPython)");
-        println!("  useradd <name> <operator|power|guest> <password>");
-        println!("  userdel <name>  passwd <name> <new-password>");
-        println!("  forms packages dimensions makedim inspect journal policy handles history");
-        println!("  checkpoint checkpoints restorepoint <state-id>");
-        println!("  mkform <name> [service|interface|package|driver|data|policy|executable]");
-        println!("  execute <Form-name>   (schedule and run executable Form payloads)");
-        println!("  view/cat write append head delete recover move copy");
-        println!("  hexdump du shasum df which resolve retire activate reclaim");
+        shell_heading("COMMAND INDEX");
+        println!("  CORE       help clear echo about status bootmode whoami history");
+        println!("  SESSION    users login logout useradd userdel passwd");
+        println!("  FORMS      forms inspect resolve mkform execute retire activate reclaim");
+        println!("  DATA       view/cat write append head delete recover move copy");
+        println!("  STORAGE    hexdump du shasum df which checkpoint checkpoints restorepoint");
+        println!("  MODEL      packages dimensions makedim journal policy handles");
+        println!("  AUTHORITY  grant revoke handlecheck pimp relate unrelate relationships");
+        println!("  DISPLAY    desktop browser displayinfo displaydiag safevideo displayreset");
+        println!("  RUNTIME    python/python3 ayo formabi games arcade legacy");
+        println!("  SYSTEM     date clock timers cpuinfo features kernelcaps lspci neofetch");
+        println!("             sysinfo mem free env uptime ps kstat dmesg bootlog stateinfo diag");
+        println!("  NETWORK    ifconfig dhcp netstat ping dns fetch mode");
+        println!("  CONTROL    sysctl kqueue/kevent expbudget");
+        println!("  UTILITIES  calc len hex reverse tolower toupper factor rand sleep true false");
+        println!("  POWER      reboot shutdown");
+        shell_muted("Use '<command> help' where supported; passwords never enter history.");
+    }
+
+    fn welcome(&self) {
+        set_shell_color(vga::Color::White);
+        println!();
+        set_shell_color(vga::Color::LightCyan);
+        println!("+----------------------------------------------------------------------------+");
+        println!("|  ExpOS COMMAND DECK  //  FORM-NATIVE SHELL                                 |");
+        println!("+----------------------------------------------------------------------------+");
+        set_shell_color(vga::Color::White);
         println!(
-            "  grant <name> <read|execute|configure|relate|retire|package|display|input|network>"
+            "  {}  |  Stable  |  {} / {}",
+            self.report.cfc_name,
+            self.session.name(),
+            self.session.authority_name()
         );
-        println!("  revoke <id>  handlecheck <id> <requester> <operation>");
-        println!("  pimp <name> <key=value>");
-        println!("  relate/unrelate <source> <kind> <target>  relationships <source>");
-        println!(
-            "  desktop browser displayinfo displaydiag stateinfo diag safevideo displayreset formabi"
+        shell_muted(
+            "  Type 'help' for the command index. Authority is explicit; Handles are revocable.",
         );
-        println!("  ayo games arcade legacy reboot shutdown");
-        println!(
-            "  date clock timers cpuinfo features kernelcaps lspci neofetch sysinfo mem free env uptime ps"
-        );
-        println!("  kstat dmesg bootlog ifconfig dhcp netstat ping <IPv4-address> [count]");
-        println!("  sysctl [-a|<node>|<node> <value>]  kqueue <action>  expbudget <action>");
-        println!("  dns <host>  fetch <http[s]://host[:port]/path>  mode");
-        println!("  calc len hex reverse tolower toupper factor rand sleep true false");
+        set_shell_color(vga::Color::White);
+        println!();
     }
 
     fn status(&self) {
@@ -1056,28 +1065,37 @@ impl Shell {
             .flatten()
             .filter(|handle| !handle.revoked)
             .count();
-        println!("architecture: x86_64 Form-native alpha");
+        shell_heading("SYSTEM STATUS");
+        println!("architecture       x86_64 Form-native alpha");
         println!(
-            "CFC: {}  FIN: {}",
+            "CFC                {}  FIN {}",
             self.report.cfc_name, self.report.cfc_fin
         );
         println!(
-            "Dimension: Stable  user: {}  authority: {}",
+            "session            Stable  {} / {}",
             self.session.name(),
             self.session.authority_name()
         );
-        println!("active Forms: {}  active Handles: {}", active, handle_count);
-        println!("typed relationships: {}", self.relationships.count());
-        println!("ExpFS journal sequence: {}", self.journal_sequence);
+        println!(
+            "runtime            {} active Forms  {} active Handles",
+            active, handle_count
+        );
+        println!(
+            "relationships      {} typed edges",
+            self.relationships.count()
+        );
+        println!("ExpFS journal      sequence {}", self.journal_sequence);
         match crate::expfs_store::generation() {
-            Some(generation) => println!("ExpFS database generation: {}", generation),
-            None if crate::expfs_store::available() => println!("ExpFS database: blank disk"),
-            None => println!("ExpFS database: volatile"),
+            Some(generation) => println!("ExpFS database     generation {}", generation),
+            None if crate::expfs_store::available() => println!("ExpFS database     blank disk"),
+            None => println!("ExpFS database     volatile"),
         }
         match crate::state::loaded_generation() {
-            Some(generation) => println!("saved state generation: {}", generation),
-            None if crate::state::persistent_available() => println!("saved state: blank disk"),
-            None => println!("saved state: unavailable"),
+            Some(generation) => println!("saved state        generation {}", generation),
+            None if crate::state::persistent_available() => {
+                println!("saved state        blank disk")
+            }
+            None => println!("saved state        unavailable"),
         }
     }
 
@@ -3016,13 +3034,34 @@ const fn relationship_name(kind: RelationshipKind) -> &'static str {
 }
 
 fn prompt(session: Session) {
-    let mut writer = vga::WRITER.lock();
-    writer.set_color(vga::Color::LightGreen, vga::Color::Black);
-    drop(writer);
-    print!("{}@Stable> ", session.name());
-    vga::WRITER
-        .lock()
-        .set_color(vga::Color::LightGray, vga::Color::Black);
+    set_shell_color(vga::Color::LightCyan);
+    print!("[");
+    set_shell_color(vga::Color::White);
+    print!("{}", session.name());
+    set_shell_color(vga::Color::DarkGray);
+    print!("@");
+    set_shell_color(vga::Color::LightGreen);
+    print!("Stable");
+    set_shell_color(vga::Color::LightCyan);
+    print!("]");
+    set_shell_color(vga::Color::White);
+    print!(" > ");
+}
+
+fn set_shell_color(foreground: vga::Color) {
+    vga::WRITER.lock().set_color(foreground, vga::Color::Black);
+}
+
+fn shell_heading(title: &str) {
+    set_shell_color(vga::Color::LightCyan);
+    println!("{}", title);
+    set_shell_color(vga::Color::White);
+}
+
+fn shell_muted(message: &str) {
+    set_shell_color(vga::Color::DarkGray);
+    println!("{}", message);
+    set_shell_color(vga::Color::White);
 }
 
 const fn kind_name(kind: FormKind) -> &'static str {

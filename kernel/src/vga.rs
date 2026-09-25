@@ -155,5 +155,7 @@ impl fmt::Write for Writer {
 pub static WRITER: SpinMutex<Writer> = SpinMutex::new(Writer {
     col: 0,
     row: 0,
-    color_code: make_color(Color::LightGray, Color::Black),
+    // Bright white is the command environment's neutral foreground. Accent
+    // colors are selected explicitly and always return to this baseline.
+    color_code: make_color(Color::White, Color::Black),
 });

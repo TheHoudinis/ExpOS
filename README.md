@@ -50,6 +50,9 @@ ExpOS is the Form-native operating system described by
   DOM-mutation/click-handler JavaScript subset, and searches DuckDuckGo's
   non-JavaScript HTML endpoint from the address bar;
 - graphical and console login for Operator, Power and Guest authority;
+- a bright white-on-black native command deck with cyan/green identity
+  accents, a structured startup banner, grouped help, and aligned system
+  status output;
 - dedicated ATA PIO persistence with alternating verified ExpFS CFC snapshots
   for arbitrary Forms/content/Dimensions/relationships/revisions/PIMP state,
   accounts, and desktop settings; the old EXPOST03 slots are read-only migration

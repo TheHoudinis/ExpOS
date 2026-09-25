@@ -140,7 +140,7 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
     let _ = fmt::Write::write_fmt(&mut *writer, format_args!(" [ok] x86_64 "));
     writer.set_color(vga::Color::Yellow, vga::Color::Blue);
     let _ = fmt::Write::write_fmt(&mut *writer, format_args!(" [ok] VGA + serial "));
-    writer.set_color(vga::Color::LightGray, vga::Color::Black);
+    writer.set_color(vga::Color::White, vga::Color::Black);
     drop(writer);
     println!();
 
