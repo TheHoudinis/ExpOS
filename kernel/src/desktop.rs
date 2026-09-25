@@ -23,17 +23,19 @@ pub const SETTINGS_FIN: Fin = Fin::from_u128(0x5345_5454_494E_4753_0000_0000_000
 pub const SYSTEM_FIN: Fin = Fin::from_u128(0x5359_5354_454D_0000_0000_0000_0000_0001);
 pub const GAMES_FIN: Fin = Fin::from_u128(0x4741_4D45_5300_0000_0000_0000_0000_0001);
 pub const NOTES_FIN: Fin = Fin::from_u128(0x4E4F_5445_5300_0000_0000_0000_0000_0001);
+pub const APPS_FIN: Fin = Fin::from_u128(0x4150_5053_0000_0000_0000_0000_0000_0001);
 
-const APP_COUNT: usize = 8;
+const APP_COUNT: usize = 9;
 const TERMINAL_HISTORY: usize = 24;
 const TERMINAL_CAPACITY: usize = 96;
 const TERMINAL_SCROLLBACK: usize = 40;
 const TERMINAL_OUTPUT_CAPACITY: usize = 112;
-const NOTES_CAPACITY: usize = 2048;
+const NOTES_CAPACITY: usize = crate::expfs_store::FORM_CONTENT_CAPACITY;
+const BROWSER_HISTORY_CAPACITY: usize = 12;
 const CURSOR_WIDTH: usize = 14;
 const CURSOR_HEIGHT: usize = 20;
 const LAUNCHER_WIDTH: u16 = 250;
-const LAUNCHER_HEIGHT: u16 = 318;
+const LAUNCHER_HEIGHT: u16 = 350;
 const STABLE_FIN: Fin = Fin::from_u128(0x4449_4D00_0000_0000_0000_0000_0000_0001);
 
 fn taskbar_thickness(preferences: DesktopPreferences) -> i16 {
@@ -365,6 +367,7 @@ enum AppKind {
     System,
     Games,
     Notes,
+    Apps,
 }
 
 impl AppKind {
@@ -377,6 +380,7 @@ impl AppKind {
         Self::System,
         Self::Games,
         Self::Notes,
+        Self::Apps,
     ];
 
     const fn index(self) -> usize {
@@ -389,6 +393,7 @@ impl AppKind {
             Self::System => 5,
             Self::Games => 6,
             Self::Notes => 7,
+            Self::Apps => 8,
         }
     }
 
@@ -397,11 +402,12 @@ impl AppKind {
             Self::Browser => "BROWSER",
             Self::Terminal => "TERMINAL",
             Self::Forms => "FORMS",
-            Self::Packages => "PACKAGES",
+            Self::Packages => "AYO PACKAGE MANAGER",
             Self::Settings => "SETTINGS",
             Self::System => "SYSTEM SCOPE",
             Self::Games => "PRISM ARCADE",
             Self::Notes => "NOTES",
+            Self::Apps => "AYO APPS",
         }
     }
 
@@ -410,11 +416,12 @@ impl AppKind {
             Self::Browser => "Browser",
             Self::Terminal => "Terminal",
             Self::Forms => "Forms",
-            Self::Packages => "Packages",
+            Self::Packages => "Ayo",
             Self::Settings => "Settings",
             Self::System => "System",
             Self::Games => "Games",
             Self::Notes => "Notes",
+            Self::Apps => "Apps",
         }
     }
 
@@ -428,6 +435,7 @@ impl AppKind {
             Self::System => SYSTEM_FIN,
             Self::Games => GAMES_FIN,
             Self::Notes => NOTES_FIN,
+            Self::Apps => APPS_FIN,
         }
     }
 
@@ -441,6 +449,7 @@ impl AppKind {
             Self::System => "I",
             Self::Games => "G",
             Self::Notes => "N",
+            Self::Apps => "A",
         }
     }
 
@@ -454,6 +463,7 @@ impl AppKind {
             Self::System => color::RED,
             Self::Games => 0x0091_7483,
             Self::Notes => 0x0095_8B68,
+            Self::Apps => color::CYAN,
         }
     }
 }
@@ -1255,6 +1265,13 @@ struct DesktopState {
     browser_line: [u8; 512],
     browser_len: usize,
     browser_editing: bool,
+    browser_history: [[u8; 512]; BROWSER_HISTORY_CAPACITY],
+    browser_history_len: [u16; BROWSER_HISTORY_CAPACITY],
+    browser_history_count: usize,
+    browser_history_cursor: usize,
+    browser_history_locked: bool,
+    browser_bookmark: [u8; 512],
+    browser_bookmark_len: usize,
     terminal_line: [u8; TERMINAL_CAPACITY],
     terminal_len: usize,
     terminal_output: [[u8; TERMINAL_OUTPUT_CAPACITY]; TERMINAL_SCROLLBACK],
@@ -1268,7 +1285,12 @@ struct DesktopState {
     terminal_history_cursor: Option<usize>,
     notes: [u8; NOTES_CAPACITY],
     notes_len: usize,
+    notes_name: [u8; 32],
+    notes_name_len: usize,
+    notes_editing_name: bool,
+    notes_status: &'static str,
     games: crate::games::GameHub,
+    native_apps: crate::apps::NativeApps,
     session: crate::session::Session,
     cursor: PointerCursor,
     dragging: Option<AppKind>,
@@ -1636,6 +1658,22 @@ impl DesktopState {
         if start_app.is_some() {
             let _ = server.focus(app_surfaces[active.index()]);
         }
+        let mut browser_history = [[0_u8; 512]; BROWSER_HISTORY_CAPACITY];
+        browser_history[0][..12].copy_from_slice(b"expos://home");
+        let mut notes = [0_u8; NOTES_CAPACITY];
+        let mut notes_len = 0;
+        let mut notes_name = [0_u8; 32];
+        let mut notes_name_len = 12;
+        notes_name[..notes_name_len].copy_from_slice(b"Untitled.txt");
+        let mut notes_status = "Unsaved Data Form";
+        if let Some((name, content, length)) = crate::expfs_store::load_text_form(cfc) {
+            notes_len = length.min(notes.len());
+            notes[..notes_len].copy_from_slice(&content[..notes_len]);
+            notes_name_len = name.as_str().len().min(notes_name.len());
+            notes_name[..notes_name_len]
+                .copy_from_slice(&name.as_str().as_bytes()[..notes_name_len]);
+            notes_status = "Loaded from ExpFS";
+        }
         let mut state = Self {
             server,
             broker,
@@ -1659,6 +1697,13 @@ impl DesktopState {
             browser_line: [0; 512],
             browser_len: 0,
             browser_editing: false,
+            browser_history,
+            browser_history_len: core::array::from_fn(|index| if index == 0 { 12 } else { 0 }),
+            browser_history_count: 1,
+            browser_history_cursor: 0,
+            browser_history_locked: false,
+            browser_bookmark: [0; 512],
+            browser_bookmark_len: 0,
             terminal_line: [0; TERMINAL_CAPACITY],
             terminal_len: 0,
             terminal_output: [[0; TERMINAL_OUTPUT_CAPACITY]; TERMINAL_SCROLLBACK],
@@ -1670,9 +1715,14 @@ impl DesktopState {
             terminal_history_next: 0,
             terminal_history_count: 0,
             terminal_history_cursor: None,
-            notes: [0; NOTES_CAPACITY],
-            notes_len: 0,
+            notes,
+            notes_len,
+            notes_name,
+            notes_name_len,
+            notes_editing_name: false,
+            notes_status,
             games: crate::games::GameHub::new(),
+            native_apps: crate::apps::NativeApps::new(),
             session,
             cursor: PointerCursor::new(
                 preferences.cursor,
@@ -1966,6 +2016,20 @@ impl DesktopState {
             return true;
         }
         if app == AppKind::Browser && self.browser_click(x, y, rect) {
+            return true;
+        }
+        if app == AppKind::Packages {
+            if let Some(action) = self.native_apps.handle_manager_click(x, y, rect) {
+                if action == crate::apps::ManagerAction::Open {
+                    self.switch_to(AppKind::Apps);
+                }
+                return true;
+            }
+        }
+        if app == AppKind::Apps && self.native_apps.handle_app_click(x, y, rect) {
+            return true;
+        }
+        if app == AppKind::Notes && self.notes_click(x, y, rect) {
             return true;
         }
         if app == AppKind::Settings && self.settings_click(x, y, rect) {
@@ -2265,6 +2329,28 @@ impl DesktopState {
     }
 
     fn set_document(&mut self, document: Document) {
+        if self.browser_history_locked {
+            self.browser_history_locked = false;
+        } else {
+            let url = document.url().as_bytes();
+            if self.browser_history_cursor + 1 < self.browser_history_count {
+                self.browser_history_count = self.browser_history_cursor + 1;
+            }
+            if self.browser_history_count == BROWSER_HISTORY_CAPACITY {
+                for index in 1..BROWSER_HISTORY_CAPACITY {
+                    self.browser_history[index - 1] = self.browser_history[index];
+                    self.browser_history_len[index - 1] = self.browser_history_len[index];
+                }
+                self.browser_history_count -= 1;
+                self.browser_history_cursor = self.browser_history_cursor.saturating_sub(1);
+            }
+            let index = self.browser_history_count;
+            let length = url.len().min(self.browser_history[index].len());
+            self.browser_history[index][..length].copy_from_slice(&url[..length]);
+            self.browser_history_len[index] = length as u16;
+            self.browser_history_count += 1;
+            self.browser_history_cursor = self.browser_history_count - 1;
+        }
         self.document = document;
         self.log_browser_engine();
         let surface = self.app_surfaces[AppKind::Browser.index()];
@@ -2285,6 +2371,32 @@ impl DesktopState {
             });
         let _ = self.server.damage(BROWSER_FIN, surface, damage_rect);
         let _ = self.server.commit(BROWSER_FIN, surface);
+    }
+
+    fn browser_history_move(&mut self, direction: i8) {
+        let next = if direction < 0 {
+            self.browser_history_cursor.saturating_sub(1)
+        } else {
+            (self.browser_history_cursor + 1).min(self.browser_history_count.saturating_sub(1))
+        };
+        if next == self.browser_history_cursor {
+            return;
+        }
+        self.browser_history_cursor = next;
+        let length = self.browser_history_len[next] as usize;
+        let mut address = [0_u8; 512];
+        address[..length].copy_from_slice(&self.browser_history[next][..length]);
+        self.browser_history_locked = true;
+        self.navigate_address(core::str::from_utf8(&address[..length]).unwrap_or("expos://home"));
+    }
+
+    fn browser_reload(&mut self) {
+        let mut address = [0_u8; 512];
+        let bytes = self.document.url().as_bytes();
+        let length = bytes.len().min(address.len());
+        address[..length].copy_from_slice(&bytes[..length]);
+        self.browser_history_locked = true;
+        self.navigate_address(core::str::from_utf8(&address[..length]).unwrap_or("expos://home"));
     }
 
     fn log_browser_engine(&self) {
@@ -2461,16 +2573,44 @@ impl DesktopState {
         let local_x = x - rect.x;
         let local_y = y - rect.y;
         if (50..86).contains(&local_y) {
-            if (18..58).contains(&local_x) {
+            if (18..54).contains(&local_x) {
+                self.browser_history_move(-1);
+                self.browser_editing = false;
+                return true;
+            }
+            if (56..92).contains(&local_x) {
+                self.browser_history_move(1);
+                self.browser_editing = false;
+                return true;
+            }
+            if (94..130).contains(&local_x) {
+                self.browser_reload();
+                self.browser_editing = false;
+                return true;
+            }
+            if (132..168).contains(&local_x) {
                 self.navigate("expos://home", HOME);
                 self.browser_editing = false;
                 return true;
             }
-            if (66..rect.width as i16 - 20).contains(&local_x) {
+            if (176..rect.width as i16 - 58).contains(&local_x) {
                 let url = self.document.url().as_bytes();
                 self.browser_len = url.len().min(self.browser_line.len());
                 self.browser_line[..self.browser_len].copy_from_slice(&url[..self.browser_len]);
                 self.browser_editing = true;
+                return true;
+            }
+            if (rect.width as i16 - 52..rect.width as i16 - 18).contains(&local_x) {
+                let url = self.document.url().as_bytes();
+                if self.browser_bookmark_len == url.len()
+                    && self.browser_bookmark[..self.browser_bookmark_len] == *url
+                {
+                    self.browser_bookmark_len = 0;
+                } else {
+                    self.browser_bookmark_len = url.len().min(self.browser_bookmark.len());
+                    self.browser_bookmark[..self.browser_bookmark_len]
+                        .copy_from_slice(&url[..self.browser_bookmark_len]);
+                }
                 return true;
             }
         }
@@ -3179,6 +3319,21 @@ impl DesktopState {
     }
 
     fn handle_notes_key(&mut self, key: u8) -> bool {
+        if self.notes_editing_name {
+            match key {
+                b'\n' => self.notes_editing_name = false,
+                0x08 => self.notes_name_len = self.notes_name_len.saturating_sub(1),
+                byte if (byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+                    && self.notes_name_len < self.notes_name.len() =>
+                {
+                    self.notes_name[self.notes_name_len] = byte;
+                    self.notes_name_len += 1;
+                }
+                _ => return false,
+            }
+            self.notes_status = "Filename changed; save to commit";
+            return true;
+        }
         match key {
             0x08 => self.notes_len = self.notes_len.saturating_sub(1),
             b'\n' if self.notes_len < self.notes.len() => {
@@ -3197,7 +3352,67 @@ impl DesktopState {
             }
             _ => return false,
         }
+        self.notes_status = "Unsaved changes";
         true
+    }
+
+    fn notes_click(&mut self, x: i16, y: i16, rect: Rect) -> bool {
+        let local_x = x - rect.x;
+        let local_y = y - rect.y;
+        if !(48..86).contains(&local_y) {
+            self.notes_editing_name = false;
+            return false;
+        }
+        if (18..rect.width as i16 - 220).contains(&local_x) {
+            self.notes_editing_name = true;
+            return true;
+        }
+        if (rect.width as i16 - 204..rect.width as i16 - 112).contains(&local_x) {
+            self.notes.fill(0);
+            self.notes_len = 0;
+            self.notes_name.fill(0);
+            self.notes_name[..12].copy_from_slice(b"Untitled.txt");
+            self.notes_name_len = 12;
+            self.notes_editing_name = false;
+            self.notes_status = "New unsaved Data Form";
+            return true;
+        }
+        if (rect.width as i16 - 100..rect.width as i16 - 18).contains(&local_x) {
+            self.save_note();
+            return true;
+        }
+        false
+    }
+
+    fn save_note(&mut self) {
+        if !self.notes_name[..self.notes_name_len].ends_with(b".txt") {
+            if self.notes_name_len + 4 > self.notes_name.len() {
+                self.notes_status = "Filename must end in .txt";
+                return;
+            }
+            self.notes_name[self.notes_name_len..self.notes_name_len + 4].copy_from_slice(b".txt");
+            self.notes_name_len += 4;
+        }
+        let name = core::str::from_utf8(&self.notes_name[..self.notes_name_len]).unwrap_or("");
+        match crate::expfs_store::save_text_form(
+            self.broker.cfc(),
+            name,
+            &self.notes[..self.notes_len],
+        ) {
+            Ok((_fin, revision)) => {
+                self.notes_status = "Saved atomically to ExpFS";
+                slog!(
+                    "EXPOS_NOTES_SAVED name={} revision={} bytes={}\r\n",
+                    name,
+                    revision,
+                    self.notes_len
+                );
+            }
+            Err(error) => {
+                self.notes_status = error.message();
+                slog!("EXPOS_NOTES_SAVE_ERROR error={:?}\r\n", error);
+            }
+        }
     }
 
     fn terminal_clear(&mut self) {
@@ -3715,7 +3930,7 @@ fn run_session(
         crate::println!("ExpDisplay could not confirm scanout; command environment restored.");
         return;
     }
-    slog!("EXPOS_DISPLAY_READY surfaces=11 commit=11\r\n");
+    slog!("EXPOS_DISPLAY_READY surfaces=12 commit=12\r\n");
     if start_app.is_none() {
         slog!("EXPOS_DESKTOP_EMPTY open_apps=0 pinned_apps=0\r\n");
     }
@@ -3864,6 +4079,24 @@ fn run_session(
             render_active_window(&mut desktop);
             continue;
         }
+        if desktop.active == AppKind::Packages && desktop.app_is_visible(AppKind::Packages) {
+            if let Some(action) = desktop.native_apps.handle_manager_key(key) {
+                if action == crate::apps::ManagerAction::Open {
+                    desktop.switch_to(AppKind::Apps);
+                    render(&mut desktop);
+                } else {
+                    render_active_window(&mut desktop);
+                }
+                continue;
+            }
+        }
+        if desktop.active == AppKind::Apps
+            && desktop.app_is_visible(AppKind::Apps)
+            && desktop.native_apps.handle_app_key(key)
+        {
+            render_active_window(&mut desktop);
+            continue;
+        }
         if desktop.active == AppKind::Settings
             && desktop.app_is_visible(AppKind::Settings)
             && desktop.handle_settings_key(key)
@@ -3974,6 +4207,7 @@ fn app_shortcut(key: u8) -> Option<AppKind> {
         b'i' => Some(AppKind::System),
         b'g' => Some(AppKind::Games),
         b'n' => Some(AppKind::Notes),
+        b'a' => Some(AppKind::Apps),
         _ => None,
     }
 }
@@ -3988,6 +4222,7 @@ fn launcher_shortcut(key: u8) -> Option<AppKind> {
         b'i' | b'6' => Some(AppKind::System),
         b'g' | b'7' => Some(AppKind::Games),
         b'n' | b'8' => Some(AppKind::Notes),
+        b'a' | b'9' => Some(AppKind::Apps),
         _ => None,
     }
 }
@@ -4025,6 +4260,8 @@ fn parse_app(value: &[u8]) -> Option<AppKind> {
         Some(AppKind::Games)
     } else if value.eq_ignore_ascii_case(b"notes") || value.eq_ignore_ascii_case(b"n") {
         Some(AppKind::Notes)
+    } else if value.eq_ignore_ascii_case(b"apps") || value.eq_ignore_ascii_case(b"a") {
+        Some(AppKind::Apps)
     } else {
         None
     }
@@ -4311,7 +4548,12 @@ fn draw_app(desktop: &DesktopState, app: AppKind, focused: bool, draw_shadow: bo
     draw_window(rect, app.label(), focused, desktop.preferences, draw_shadow);
     let responsive_full = matches!(
         app,
-        AppKind::Browser | AppKind::Terminal | AppKind::Settings | AppKind::Notes
+        AppKind::Browser
+            | AppKind::Terminal
+            | AppKind::Packages
+            | AppKind::Settings
+            | AppKind::Notes
+            | AppKind::Apps
     ) && rect.width >= 480
         && rect.height >= 360;
     if responsive_full || (rect.width >= 600 && rect.height >= 380) {
@@ -4319,11 +4561,12 @@ fn draw_app(desktop: &DesktopState, app: AppKind, focused: bool, draw_shadow: bo
             AppKind::Browser => draw_browser(rect, desktop),
             AppKind::Terminal => draw_terminal(rect, desktop),
             AppKind::Forms => draw_forms(rect),
-            AppKind::Packages => draw_packages(rect),
+            AppKind::Packages => desktop.native_apps.render_manager(rect),
             AppKind::Settings => draw_settings(rect, desktop),
             AppKind::System => draw_system(rect, desktop),
             AppKind::Games => desktop.games.render(rect),
             AppKind::Notes => draw_notes(rect, desktop),
+            AppKind::Apps => desktop.native_apps.render_app(rect),
         }
     }
     draw_window_border(rect, focused, desktop.preferences);
@@ -4674,31 +4917,60 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
     let y = rect.y as i32;
     let width = rect.width as i32;
     let bottom = y + rect.height as i32;
-    framebuffer::rect(x + 18, y + 50, 40, 36, desktop.preferences.panel_color());
-    framebuffer::outline(
-        x + 18,
+    for (offset, label, enabled) in [
+        (18, "<", desktop.browser_history_cursor > 0),
+        (
+            56,
+            ">",
+            desktop.browser_history_cursor + 1 < desktop.browser_history_count,
+        ),
+        (94, "R", true),
+        (132, "H", true),
+    ] {
+        framebuffer::rounded_rect(
+            x + offset,
+            y + 50,
+            36,
+            36,
+            6,
+            if enabled { 0x0019_2028 } else { 0x000D_1116 },
+        );
+        framebuffer::outline(
+            x + offset,
+            y + 50,
+            36,
+            36,
+            desktop.preferences.border_color(false),
+        );
+        framebuffer::text(
+            x + offset + 14,
+            y + 64,
+            label,
+            if enabled { color::INK } else { color::BORDER },
+            1,
+        );
+    }
+    framebuffer::rounded_rect(
+        x + 176,
         y + 50,
-        40,
+        width - 234,
         36,
-        desktop.preferences.border_color(false),
-    );
-    framebuffer::text(x + 34, y + 64, "<", color::INK, 1);
-    framebuffer::rect(
-        x + 66,
-        y + 50,
-        width - 86,
-        36,
+        7,
         desktop.preferences.panel_color(),
     );
     framebuffer::outline(
-        x + 66,
+        x + 176,
         y + 50,
-        width - 86,
+        width - 234,
         36,
-        desktop.preferences.border_color(false),
+        if desktop.browser_editing {
+            color::CYAN
+        } else {
+            desktop.preferences.border_color(false)
+        },
     );
     framebuffer::rect(
-        x + 79,
+        x + 188,
         y + 65,
         5,
         5,
@@ -4713,7 +4985,7 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
     } else {
         desktop.document.url()
     };
-    let address_capacity = ((width - 116) / framebuffer::text_advance(1)).max(1) as usize;
+    let address_capacity = ((width - 276) / framebuffer::text_advance(1)).max(1) as usize;
     let (address_text, address_color) = if desktop.browser_editing && address.is_empty() {
         ("Search DuckDuckGo or enter an address", color::MUTED)
     } else if desktop.browser_editing && address.len() > address_capacity {
@@ -4723,23 +4995,45 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
     } else {
         (address, color::INK)
     };
-    framebuffer::text(x + 96, y + 64, address_text, address_color, 1);
+    framebuffer::text(x + 204, y + 64, address_text, address_color, 1);
     if desktop.browser_editing {
         let caret_x =
-            (x + 96 + address.len().min(address_capacity) as i32 * framebuffer::text_advance(1))
-                .min(x + width - 24);
+            (x + 204 + address.len().min(address_capacity) as i32 * framebuffer::text_advance(1))
+                .min(x + width - 64);
         framebuffer::rect(caret_x, y + 61, 2, 14, color::GREEN);
     }
+    let bookmarked = desktop.browser_bookmark_len == desktop.document.url().len()
+        && desktop.browser_bookmark[..desktop.browser_bookmark_len]
+            == desktop.document.url().as_bytes()[..];
+    framebuffer::rounded_rect(
+        x + width - 52,
+        y + 50,
+        34,
+        36,
+        6,
+        if bookmarked { 0x0036_2A18 } else { 0x0019_2028 },
+    );
+    framebuffer::text(
+        x + width - 41,
+        y + 64,
+        if bookmarked { "*" } else { "+" },
+        if bookmarked {
+            0x00F0_C46B
+        } else {
+            color::MUTED
+        },
+        1,
+    );
     let mut content_y = y + 110;
     for styled in desktop.document.styled_nodes() {
-        if content_y > bottom - 24 {
+        if content_y > bottom - 46 {
             break;
         }
         if styled.node.kind == NodeKind::Title || !styled.style.is_rendered() {
             continue;
         }
         let layout = browser_layout(rect, styled, content_y);
-        if layout.y > bottom - 24 {
+        if layout.y > bottom - 46 {
             break;
         }
         let button = styled.tag.eq_ignore_ascii_case("button");
@@ -4812,6 +5106,30 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
         }
         content_y = layout.next_y;
     }
+    framebuffer::rect(x + 1, bottom - 28, width - 2, 27, 0x000B_1016);
+    framebuffer::line(
+        x + 1,
+        bottom - 28,
+        x + width - 1,
+        bottom - 28,
+        color::BORDER,
+    );
+    framebuffer::text(x + 18, bottom - 18, desktop.document.title(), color::INK, 1);
+    framebuffer::text(
+        x + width - 190,
+        bottom - 18,
+        if desktop.network_active() {
+            "CAPABILITY SECURE"
+        } else {
+            "LOCAL DOCUMENT"
+        },
+        if desktop.network_active() {
+            color::GREEN
+        } else {
+            color::MUTED
+        },
+        1,
+    );
 }
 
 fn draw_terminal(rect: Rect, desktop: &DesktopState) {
@@ -4899,9 +5217,36 @@ fn draw_notes(rect: Rect, desktop: &DesktopState) {
     let width = rect.width as i32;
     let height = rect.height as i32;
     framebuffer::rect(x + 12, y + 44, width - 24, 42, 0x000A_0D13);
-    framebuffer::text(x + 28, y + 59, "Untitled note", color::INK, 1);
-    framebuffer::rect(x + 12, y + 88, width - 24, height - 122, 0x0000_0000);
-    framebuffer::outline(x + 12, y + 88, width - 24, height - 122, color::BORDER);
+    framebuffer::rect(x + 18, y + 50, width - 238, 30, 0x0012_171D);
+    framebuffer::outline(
+        x + 18,
+        y + 50,
+        width - 238,
+        30,
+        if desktop.notes_editing_name {
+            color::PURPLE
+        } else {
+            color::BORDER
+        },
+    );
+    let name = core::str::from_utf8(&desktop.notes_name[..desktop.notes_name_len])
+        .unwrap_or("Untitled.txt");
+    framebuffer::text(x + 30, y + 61, name, color::WHITE, 1);
+    if desktop.notes_editing_name {
+        framebuffer::rect(
+            x + 31 + name.len() as i32 * framebuffer::text_advance(1),
+            y + 58,
+            2,
+            14,
+            color::PURPLE,
+        );
+    }
+    framebuffer::rounded_rect(x + width - 204, y + 50, 92, 30, 5, 0x0020_2730);
+    framebuffer::text(x + width - 173, y + 61, "NEW", color::INK, 1);
+    framebuffer::rounded_rect(x + width - 100, y + 50, 82, 30, 5, color::PURPLE);
+    framebuffer::text(x + width - 76, y + 61, "SAVE", color::WHITE, 1);
+    framebuffer::rect(x + 12, y + 88, width - 24, height - 146, 0x0000_0000);
+    framebuffer::outline(x + 12, y + 88, width - 24, height - 146, color::BORDER);
 
     if desktop.notes_len == 0 {
         framebuffer::text(x + 32, y + 112, "Start typing...", color::MUTED, 1);
@@ -4915,6 +5260,20 @@ fn draw_notes(rect: Rect, desktop: &DesktopState) {
             &desktop.notes[..desktop.notes_len],
         );
     }
+    framebuffer::text(
+        x + 18,
+        y + height - 42,
+        desktop.notes_status,
+        color::MUTED,
+        1,
+    );
+    framebuffer::text(
+        x + width - 154,
+        y + height - 42,
+        "EXPFS DATA FORM",
+        color::CYAN,
+        1,
+    );
 }
 
 fn draw_note_text(left: i32, top: i32, width: i32, height: i32, bytes: &[u8]) {
@@ -4961,63 +5320,6 @@ fn draw_forms(rect: Rect) {
         framebuffer::text(x + 260, row_y + 12, kind, color::MUTED, 1);
         framebuffer::text(x + 494, row_y + 12, status, *status_color, 1);
     }
-}
-
-fn draw_packages(rect: Rect) {
-    let x = rect.x as i32;
-    let y = rect.y as i32;
-    let content_width = rect.width as i32 - 56;
-    framebuffer::text(x + 28, y + 58, "Packages", color::INK, 2);
-    package_card(
-        x + 28,
-        y + 96,
-        content_width,
-        "Core tools",
-        "Installed",
-        "Diagnostics and repair",
-    );
-    package_card(
-        x + 28,
-        y + 154,
-        content_width,
-        "Display + Renderkit",
-        "Installed",
-        "Display and graphics",
-    );
-    package_card(
-        x + 28,
-        y + 212,
-        content_width,
-        "Games",
-        "Available",
-        "Native games",
-    );
-    package_card(
-        x + 28,
-        y + 270,
-        content_width,
-        "Desktop + Session",
-        "Available",
-        "Desktop and accounts",
-    );
-}
-
-fn package_card(x: i32, y: i32, width: i32, name: &str, status: &str, detail: &str) {
-    framebuffer::rect(x, y, width, 46, 0x0015_1922);
-    framebuffer::outline(x, y, width, 46, color::BORDER);
-    framebuffer::text(x + 14, y + 11, name, color::INK, 1);
-    framebuffer::text(x + 178, y + 11, detail, color::MUTED, 1);
-    framebuffer::text(
-        x + width - 108,
-        y + 28,
-        status,
-        if status == "Installed" {
-            color::GREEN
-        } else {
-            color::CYAN
-        },
-        1,
-    );
 }
 
 #[derive(Clone, Copy)]
@@ -6113,7 +6415,7 @@ fn draw_system(rect: Rect, desktop: &DesktopState) {
         y + 174,
         metric_width,
         "Surfaces",
-        "11 Form-owned",
+        "12 Form-owned",
         color::PURPLE,
     );
     metric(

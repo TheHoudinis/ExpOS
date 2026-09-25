@@ -82,6 +82,7 @@ impl Snapshot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StoreError {
     Unavailable,
+    Full,
     WrongCfc,
     InvalidSnapshot,
     Disk(storage::StorageError),
@@ -94,6 +95,7 @@ impl StoreError {
     pub const fn message(self) -> &'static str {
         match self {
             Self::Unavailable => "ExpFS disk is unavailable",
+            Self::Full => "ExpFS Form capacity is full",
             Self::WrongCfc => "snapshot belongs to another CFC",
             Self::InvalidSnapshot => "snapshot violates the ExpFS schema",
             Self::Disk(_) => "ExpFS disk I/O failed",
@@ -218,6 +220,88 @@ pub fn loaded_snapshot(cfc: CfcFin) -> Option<Snapshot> {
         .then_some(store.snapshot)
         .flatten()
         .filter(|snapshot| snapshot.form_graph_present)
+}
+
+/// Load the first active Data Form whose name ends in `.txt`.
+///
+/// Notes uses the same generic Form records as the shell rather than a private
+/// side file, so saved text remains visible to every ExpFS-aware tool.
+pub fn load_text_form(cfc: CfcFin) -> Option<(Text, [u8; FORM_CONTENT_CAPACITY], usize)> {
+    let snapshot = loaded_snapshot(cfc)?;
+    snapshot.forms.iter().flatten().find_map(|stored| {
+        (stored.form.kind == FormKind::Data
+            && stored.form.lifecycle == Lifecycle::Active
+            && stored.form.name.as_str().ends_with(".txt"))
+        .then_some((
+            stored.form.name,
+            stored.content,
+            stored.content_len as usize,
+        ))
+    })
+}
+
+/// Atomically create or revise a named text Data Form in the active CFC.
+pub fn save_text_form(cfc: CfcFin, name: &str, bytes: &[u8]) -> Result<(Fin, u32), StoreError> {
+    if !name.ends_with(".txt") || bytes.len() > FORM_CONTENT_CAPACITY {
+        return Err(StoreError::InvalidSnapshot);
+    }
+    let name = Text::new(name).map_err(|_| StoreError::InvalidSnapshot)?;
+    let mut store = STORE.lock();
+    if store.device.is_none() || store.cfc != cfc || store.primary_dimension.is_zero() {
+        return Err(StoreError::Unavailable);
+    }
+    let mut snapshot = store
+        .snapshot
+        .unwrap_or_else(|| Snapshot::empty(store.cfc, store.cfc_name, store.primary_dimension));
+    let existing = snapshot.forms.iter().position(|entry| {
+        entry.is_some_and(|stored| stored.form.kind == FormKind::Data && stored.form.name == name)
+    });
+    let slot = existing.or_else(|| snapshot.forms.iter().position(Option::is_none));
+    let index = slot.ok_or(StoreError::Full)?;
+    let (fin, revision) = if let Some(stored) = snapshot.forms[index] {
+        (stored.form.fin, stored.form.revision.wrapping_add(1).max(1))
+    } else {
+        let fin =
+            Fin::from_u128(0x464F_524D_0000_0000_0000_0000_0000_0000 | snapshot.next_fin as u128);
+        snapshot.next_fin = snapshot.next_fin.wrapping_add(1).max(2);
+        (fin, 1)
+    };
+    let mut content = [0_u8; FORM_CONTENT_CAPACITY];
+    content[..bytes.len()].copy_from_slice(bytes);
+    let mut form = Form::new(fin, name.as_str(), FormKind::Data);
+    form.revision = revision;
+    snapshot.forms[index] = Some(StoredForm {
+        form,
+        content,
+        content_len: bytes.len() as u16,
+    });
+    if existing.is_none() {
+        if let Some(root) = snapshot
+            .forms
+            .iter()
+            .flatten()
+            .find(|stored| stored.form.kind == FormKind::Root)
+            .map(|stored| stored.form.fin)
+        {
+            if let Some(target) = snapshot
+                .relationships
+                .iter_mut()
+                .find(|entry| entry.is_none())
+            {
+                *target = Some(Relationship {
+                    source: root,
+                    target: fin,
+                    kind: RelationshipKind::Contains,
+                    dimension: Some(snapshot.primary_dimension),
+                });
+            }
+        }
+    }
+    snapshot.journal_sequence = snapshot.journal_sequence.wrapping_add(1).max(1);
+    snapshot.form_graph_present = true;
+    validate_snapshot(&snapshot)?;
+    commit_locked(&mut store, snapshot)?;
+    Ok((fin, revision))
 }
 
 pub fn system_records() -> (

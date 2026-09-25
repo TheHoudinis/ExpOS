@@ -75,6 +75,28 @@ func Builtin() Catalog {
 		{Name: "AudioKit", Version: "0.3.0", Summary: "Experimental audio service interfaces", Capabilities: []string{"read", "configure"}, ProvidedForms: []string{"AudioService"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
 		{Name: "TextLab", Version: "1.0.0", Summary: "Form-native notes and text workspace", Capabilities: []string{"read", "configure"}, ProvidedForms: []string{"TextLabInterface"}, Dependencies: []string{"ExpEdit@>=0.8.0", "PrismDE@>=1.0.0"}},
 		{Name: "DeveloperKit", Version: "1.1.0", Summary: "Form ABI SDKs terminal and editor development deck", Capabilities: []string{"execute", "read", "configure"}, ProvidedForms: []string{"DeveloperWorkspace"}, Dependencies: []string{"GoSDK@>=1.1.0", "RustSDK@>=1.0.0", "CSDK@>=1.0.0", "PythonSDK@>=1.0.0", "ExpEdit@>=0.8.0", "PrismDE@>=1.0.0"}},
+		{Name: "Calculator", Version: "1.0.0", Summary: "Native integer expression calculator", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"CalculatorInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "Tasks", Version: "1.0.0", Summary: "Focused native task inbox", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"TasksInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "Clock", Version: "1.0.0", Summary: "Local hardware clock dashboard", Capabilities: []string{"render", "read"}, ProvidedForms: []string{"ClockInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "Calendar", Version: "1.0.0", Summary: "Native date and month overview", Capabilities: []string{"render", "read"}, ProvidedForms: []string{"CalendarInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "UnitConvert", Version: "1.0.0", Summary: "Fast native unit converter", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"UnitConvertInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "ColorLab", Version: "1.0.0", Summary: "Interactive Prism palette explorer", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"ColorLabInterface"}, Dependencies: []string{"RenderKit@>=1.0.0", "PrismDE@>=1.2.0"}},
+		{Name: "PixelPad", Version: "1.0.0", Summary: "Native 8 by 8 sprite sketchpad", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"PixelPadInterface"}, Dependencies: []string{"RenderKit@>=1.0.0", "PrismDE@>=1.2.0"}},
+		{Name: "SystemMonitor", Version: "1.0.0", Summary: "Live ExpOS service status cards", Capabilities: []string{"render", "inspect"}, ProvidedForms: []string{"SystemMonitorInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "NetScope", Version: "1.0.0", Summary: "Native network readiness inspector", Capabilities: []string{"render", "inspect", "network"}, ProvidedForms: []string{"NetScopeInterface"}, Dependencies: []string{"Network@>=2.1.0", "PrismDE@>=1.2.0"}},
+		{Name: "FormMap", Version: "1.0.0", Summary: "Visual Form relationship explorer", Capabilities: []string{"render", "inspect", "relate"}, ProvidedForms: []string{"FormMapInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "CharacterMap", Version: "1.0.0", Summary: "Printable character reference", Capabilities: []string{"render"}, ProvidedForms: []string{"CharacterMapInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "BaseConvert", Version: "1.0.0", Summary: "Decimal and hexadecimal converter", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"BaseConvertInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "TextCase", Version: "1.0.0", Summary: "Native text case transformer", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"TextCaseInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "WordCount", Version: "1.0.0", Summary: "Live word and character counter", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"WordCountInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "FocusTimer", Version: "1.0.0", Summary: "Distraction-free focus session card", Capabilities: []string{"render", "read"}, ProvidedForms: []string{"FocusTimerInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "Stopwatch", Version: "1.0.0", Summary: "Monotonic native stopwatch", Capabilities: []string{"render", "read"}, ProvidedForms: []string{"StopwatchInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "Counter", Version: "1.0.0", Summary: "Clean click and keyboard tally counter", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"CounterInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "MarkdownPad", Version: "1.0.0", Summary: "Tiny native Markdown scratchpad", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"MarkdownPadInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "JsonInspect", Version: "1.0.0", Summary: "Bounded JSON framing inspector", Capabilities: []string{"render", "input", "inspect"}, ProvidedForms: []string{"JsonInspectInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "HashLab", Version: "1.0.0", Summary: "Deterministic FNV-1a fingerprint tool", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"HashLabInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "Breakout", Version: "1.0.0", Summary: "Block Forms native arcade game", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"BreakoutGame"}, Dependencies: []string{"GameHub@>=1.0.0"}},
+		{Name: "Memory", Version: "1.0.0", Summary: "Form pairs native memory game", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"MemoryGame"}, Dependencies: []string{"GameHub@>=1.0.0"}},
 	}}
 	for index := range catalog.Packages {
 		pkg := &catalog.Packages[index]
@@ -200,17 +222,17 @@ func (catalog Catalog) Search(query string) []Package {
 
 func builtinCategory(name string) string {
 	switch name {
-	case "ExpEdit", "TextLab":
+	case "ExpEdit", "TextLab", "TextCase", "WordCount", "MarkdownPad":
 		return "Editors"
-	case "GoSDK", "RustSDK", "CSDK", "PythonSDK", "DeveloperKit":
+	case "GoSDK", "RustSDK", "CSDK", "PythonSDK", "DeveloperKit", "FormMap", "BaseConvert", "JsonInspect", "HashLab":
 		return "Developer tools"
 	case "ExpPython":
 		return "Languages"
-	case "GameHub", "Snake", "Pong":
+	case "GameHub", "Snake", "Pong", "Breakout", "Memory":
 		return "Games"
-	case "Network", "Browser":
+	case "Network", "Browser", "NetScope":
 		return "Networking"
-	case "ExpDisplay", "RenderKit", "MouseKit", "PrismDE", "PrismTheme":
+	case "ExpDisplay", "RenderKit", "MouseKit", "PrismDE", "PrismTheme", "ColorLab", "PixelPad":
 		return "Graphics"
 	default:
 		return "Utilities"

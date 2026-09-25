@@ -218,7 +218,7 @@ display-check: $(ISO)
 	grep -q "EXPOS_DISPLAY_MODE .*pageflip=true" $(BUILD)/display-serial.log
 	grep -q "EXPOS_PRESENTATION_READY rate=60 Hz vsync=true pageflip=true" $(BUILD)/display-serial.log
 	awk '/EXPOS_RENDER_POLICY/{first=1; if ($$0 ~ /mode=Efficient damage=true shadows=false wallpaper_effects=false/) safe=1; exit} END{exit !(first && safe)}' $(BUILD)/display-serial.log
-	grep -q "EXPOS_DISPLAY_READY surfaces=11 commit=11" $(BUILD)/display-serial.log
+	grep -q "EXPOS_DISPLAY_READY surfaces=12 commit=12" $(BUILD)/display-serial.log
 	grep -q "EXPOS_DESKTOP_EMPTY open_apps=0 pinned_apps=0" $(BUILD)/display-serial.log
 	grep -q "EXPOS_MOUSE_READY enabled=true" $(BUILD)/display-serial.log
 	grep -q "EXPOS_APP_OPENED SETTINGS" $(BUILD)/display-serial.log
@@ -264,7 +264,7 @@ display-check: $(ISO)
 	grep -q "EXPOS_TERMINAL_COMMAND name=theme" $(BUILD)/display-serial.log
 	grep -q "EXPOS_TERMINAL_COMMAND name=ps" $(BUILD)/display-serial.log
 	grep -q "EXPOS_TERMINAL_COMMAND name=windowreset" $(BUILD)/display-serial.log
-	grep -q "EXPOS_WINDOW_LAYOUT_RESET count=8" $(BUILD)/display-serial.log
+	grep -q "EXPOS_WINDOW_LAYOUT_RESET count=9" $(BUILD)/display-serial.log
 	grep -q "EXPOS_APP_CLOSED TERMINAL" $(BUILD)/display-serial.log
 	grep -q "EXPOS_APP_REOPENED TERMINAL" $(BUILD)/display-serial.log
 	grep -Eq "EXPOS_PRESENTATION_STATS frames=[1-9][0-9]* missed=[0-9]+ idle=[0-9]+ vblank_timeouts=0 responsive_commits=[1-9][0-9]*" $(BUILD)/display-serial.log

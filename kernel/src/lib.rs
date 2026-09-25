@@ -10,6 +10,7 @@
 extern crate alloc;
 
 mod allocator;
+mod apps;
 pub(crate) mod boot;
 mod compat;
 mod crypto;

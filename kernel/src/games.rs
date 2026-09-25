@@ -9,11 +9,13 @@ const MILLIS_PER_SECOND: u64 = 1_000;
 const FALLBACK_TSC_HZ: u64 = 1_000_000_000;
 const SNAKE_TICK_MILLIS: u64 = 1_200;
 const PONG_TICK_MILLIS: u64 = 120;
+const BREAKOUT_TICK_MILLIS: u64 = 90;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct GameTiming {
     snake_interval: u64,
     pong_interval: u64,
+    breakout_interval: u64,
 }
 
 impl GameTiming {
@@ -22,6 +24,7 @@ impl GameTiming {
         Self {
             snake_interval: ticks_from_millis(tsc_hz, SNAKE_TICK_MILLIS),
             pong_interval: ticks_from_millis(tsc_hz, PONG_TICK_MILLIS),
+            breakout_interval: ticks_from_millis(tsc_hz, BREAKOUT_TICK_MILLIS),
         }
     }
 
@@ -30,6 +33,8 @@ impl GameTiming {
             GameMode::Menu => None,
             GameMode::Snake => Some(self.snake_interval),
             GameMode::Pong => Some(self.pong_interval),
+            GameMode::Breakout => Some(self.breakout_interval),
+            GameMode::Memory => None,
         }
     }
 }
@@ -51,6 +56,8 @@ pub enum GameMode {
     Menu,
     Snake,
     Pong,
+    Breakout,
+    Memory,
 }
 
 pub struct GameHub {
@@ -60,6 +67,8 @@ pub struct GameHub {
     timing: GameTiming,
     snake: Snake,
     pong: Pong,
+    breakout: Breakout,
+    memory: Memory,
 }
 
 impl GameHub {
@@ -75,6 +84,8 @@ impl GameHub {
             timing: GameTiming::calibrated(tsc_hz),
             snake: Snake::new(),
             pong: Pong::new(),
+            breakout: Breakout::new(),
+            memory: Memory::new(),
         }
     }
 
@@ -92,6 +103,18 @@ impl GameHub {
                 self.paused = false;
                 true
             }
+            b'3' => {
+                self.mode = GameMode::Breakout;
+                self.breakout.reset();
+                self.paused = false;
+                true
+            }
+            b'4' => {
+                self.mode = GameMode::Memory;
+                self.memory.reset();
+                self.paused = false;
+                true
+            }
             b'm' => {
                 self.mode = GameMode::Menu;
                 self.paused = false;
@@ -101,6 +124,8 @@ impl GameHub {
                 match self.mode {
                     GameMode::Snake => self.snake.reset(),
                     GameMode::Pong => self.pong.reset(),
+                    GameMode::Breakout => self.breakout.reset(),
+                    GameMode::Memory => self.memory.reset(),
                     GameMode::Menu => {}
                 }
                 self.paused = false;
@@ -135,34 +160,49 @@ impl GameHub {
                     self.pong.player = (self.pong.player + 70).min(460);
                     true
                 }
+                (GameMode::Breakout, input::KEY_LEFT) => {
+                    self.breakout.paddle = (self.breakout.paddle - 45).max(0);
+                    true
+                }
+                (GameMode::Breakout, input::KEY_RIGHT) => {
+                    self.breakout.paddle = (self.breakout.paddle + 45).min(800);
+                    true
+                }
                 _ => false,
             },
         }
     }
 
     pub fn handle_click(&mut self, x: i16, y: i16, rect: Rect) -> bool {
-        if self.mode != GameMode::Menu {
-            return false;
-        }
         let local_x = x - rect.x;
         let local_y = y - rect.y;
-        if !(122..302).contains(&local_y) {
+        if self.mode == GameMode::Memory {
+            return self.memory.click(local_x, local_y);
+        }
+        if self.mode != GameMode::Menu || !(116..356).contains(&local_y) {
             return false;
         }
-        let card_width = (rect.width as i16 - 82) / 2;
-        if (34..34 + card_width).contains(&local_x) {
-            self.mode = GameMode::Snake;
-            self.snake.reset();
-            self.paused = false;
-            true
-        } else if (48 + card_width..48 + card_width * 2).contains(&local_x) {
-            self.mode = GameMode::Pong;
-            self.pong.reset();
-            self.paused = false;
-            true
+        let column = if local_x < rect.width as i16 / 2 {
+            0
         } else {
-            false
+            1
+        };
+        let row = if local_y < 236 { 0 } else { 1 };
+        self.mode = match (row, column) {
+            (0, 0) => GameMode::Snake,
+            (0, 1) => GameMode::Pong,
+            (1, 0) => GameMode::Breakout,
+            _ => GameMode::Memory,
+        };
+        match self.mode {
+            GameMode::Snake => self.snake.reset(),
+            GameMode::Pong => self.pong.reset(),
+            GameMode::Breakout => self.breakout.reset(),
+            GameMode::Memory => self.memory.reset(),
+            GameMode::Menu => {}
         }
+        self.paused = false;
+        true
     }
 
     pub fn tick(&mut self, now: u64) -> bool {
@@ -184,6 +224,8 @@ impl GameHub {
         match self.mode {
             GameMode::Snake => self.snake.tick(),
             GameMode::Pong => self.pong.tick(),
+            GameMode::Breakout => self.breakout.tick(),
+            GameMode::Memory => {}
             GameMode::Menu => {}
         }
         true
@@ -194,6 +236,8 @@ impl GameHub {
             GameMode::Menu => self.render_menu(rect),
             GameMode::Snake => self.render_snake(rect),
             GameMode::Pong => self.render_pong(rect),
+            GameMode::Breakout => self.render_breakout(rect),
+            GameMode::Memory => self.render_memory(rect),
         }
     }
 
@@ -209,26 +253,42 @@ impl GameHub {
             color::MUTED,
             1,
         );
-        game_card(
+        game_card_small(
             x + 34,
-            y + 122,
+            y + 116,
             (width - 82) / 2,
             "1  SNAKE",
-            "EAT SIGNALS. AVOID WALLS AND YOUR TAIL.",
+            "EAT SIGNALS",
             color::GREEN,
         );
-        game_card(
+        game_card_small(
             x + 48 + (width - 82) / 2,
-            y + 122,
+            y + 116,
             (width - 82) / 2,
             "2  PONG",
-            "DEFEND THE LEFT EDGE AGAINST THE CPU.",
+            "DEFEND THE EDGE",
             color::CYAN,
+        );
+        game_card_small(
+            x + 34,
+            y + 240,
+            (width - 82) / 2,
+            "3  BREAKOUT",
+            "CLEAR THE GRID",
+            color::PURPLE,
+        );
+        game_card_small(
+            x + 48 + (width - 82) / 2,
+            y + 240,
+            (width - 82) / 2,
+            "4  MEMORY",
+            "MATCH THE FORMS",
+            0x00D0_9B52,
         );
         framebuffer::text(
             x + 44,
-            y + 338,
-            "SELECT 1 OR 2   ARROWS MOVE   SPACE PAUSE   R RESET   M MENU",
+            y + 382,
+            "SELECT 1-4   ARROWS MOVE   SPACE PAUSE   R RESET   M MENU",
             color::INK,
             1,
         );
@@ -345,6 +405,107 @@ impl GameHub {
             framebuffer::text(field_x + 280, field_y + 155, "PAUSED", color::WHITE, 2);
         }
     }
+
+    fn render_breakout(&self, rect: Rect) {
+        let x = rect.x as i32;
+        let y = rect.y as i32;
+        framebuffer::text(x + 28, y + 54, "BREAKOUT // BLOCK FORMS", color::PURPLE, 2);
+        let field_x = x + 54;
+        let field_y = y + 92;
+        let field_w = 620;
+        let field_h = 326;
+        framebuffer::rect(field_x, field_y, field_w, field_h, 0x0008_0B12);
+        framebuffer::outline(field_x, field_y, field_w, field_h, color::PURPLE);
+        for row in 0..4 {
+            for column in 0..8 {
+                let bit = row * 8 + column;
+                if self.breakout.blocks & (1 << bit) != 0 {
+                    framebuffer::rect(
+                        field_x + 14 + column * 74,
+                        field_y + 18 + row * 28,
+                        66,
+                        20,
+                        if row % 2 == 0 {
+                            color::CYAN
+                        } else {
+                            color::PURPLE
+                        },
+                    );
+                }
+            }
+        }
+        framebuffer::rect(
+            field_x + 20 + self.breakout.paddle as i32 * 500 / 800,
+            field_y + field_h - 25,
+            90,
+            10,
+            color::GREEN,
+        );
+        framebuffer::rect(
+            field_x + 8 + self.breakout.ball_x as i32 * 590 / 1000,
+            field_y + 8 + self.breakout.ball_y as i32 * 292 / 600,
+            12,
+            12,
+            color::WHITE,
+        );
+        framebuffer::text(
+            x + 54,
+            y + 440,
+            "LEFT RIGHT MOVE   R RESET   M ARCADE",
+            color::MUTED,
+            1,
+        );
+        if !self.breakout.alive {
+            framebuffer::text(field_x + 245, field_y + 174, "PRESS R", color::RED, 2);
+        }
+    }
+
+    fn render_memory(&self, rect: Rect) {
+        let x = rect.x as i32;
+        let y = rect.y as i32;
+        framebuffer::text(x + 28, y + 54, "MEMORY // FORM PAIRS", 0x00D0_9B52, 2);
+        for row in 0..4 {
+            for column in 0..4 {
+                let index = row * 4 + column;
+                let card_x = x + 92 + column as i32 * 112;
+                let card_y = y + 100 + row as i32 * 76;
+                let visible = self.memory.visible(index);
+                framebuffer::rounded_rect(
+                    card_x,
+                    card_y,
+                    92,
+                    58,
+                    6,
+                    if visible {
+                        MEMORY_COLORS[self.memory.value(index)]
+                    } else {
+                        0x0020_2730
+                    },
+                );
+                framebuffer::outline(
+                    card_x,
+                    card_y,
+                    92,
+                    58,
+                    if visible { color::WHITE } else { color::BORDER },
+                );
+                framebuffer::text(
+                    card_x + 39,
+                    card_y + 22,
+                    if visible { "F" } else { "?" },
+                    if visible { color::WHITE } else { color::MUTED },
+                    2,
+                );
+            }
+        }
+        framebuffer::text(
+            x + 92,
+            y + 420,
+            "CLICK TWO CARDS TO MATCH   R RESET   M ARCADE",
+            color::MUTED,
+            1,
+        );
+    }
 }
 
 struct Snake {
@@ -455,6 +616,140 @@ struct Pong {
     cpu_score: u8,
 }
 
+struct Breakout {
+    ball_x: i16,
+    ball_y: i16,
+    velocity_x: i16,
+    velocity_y: i16,
+    paddle: i16,
+    blocks: u32,
+    alive: bool,
+}
+
+impl Breakout {
+    const fn new() -> Self {
+        Self {
+            ball_x: 500,
+            ball_y: 430,
+            velocity_x: 13,
+            velocity_y: -15,
+            paddle: 360,
+            blocks: u32::MAX,
+            alive: true,
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    fn tick(&mut self) {
+        if !self.alive {
+            return;
+        }
+        self.ball_x += self.velocity_x;
+        self.ball_y += self.velocity_y;
+        if self.ball_x <= 0 || self.ball_x >= 980 {
+            self.velocity_x = -self.velocity_x;
+            self.ball_x = self.ball_x.clamp(0, 980);
+        }
+        if self.ball_y <= 0 {
+            self.velocity_y = -self.velocity_y;
+            self.ball_y = 0;
+        }
+        if self.ball_y < 230 {
+            let column = (self.ball_x.max(0) as usize * 8 / 1000).min(7);
+            let row = (self.ball_y.max(0) as usize * 4 / 230).min(3);
+            let bit = row * 8 + column;
+            if self.blocks & (1 << bit) != 0 {
+                self.blocks &= !(1 << bit);
+                self.velocity_y = -self.velocity_y;
+            }
+        }
+        let paddle_left = self.paddle as i32 * 500 / 800;
+        let ball_left = self.ball_x as i32 * 590 / 1000;
+        if self.ball_y >= 540
+            && self.velocity_y > 0
+            && (paddle_left..=paddle_left + 100).contains(&ball_left)
+        {
+            self.velocity_y = -self.velocity_y;
+            self.ball_y = 539;
+        }
+        if self.ball_y > 620 || self.blocks == 0 {
+            self.alive = false;
+        }
+    }
+}
+
+const MEMORY_COLORS: [u32; 8] = [
+    color::GREEN,
+    color::CYAN,
+    color::PURPLE,
+    0x00D0_9B52,
+    0x00D9_5D7A,
+    0x0068_A0D8,
+    0x0086_CB8F,
+    0x00B1_75D0,
+];
+
+struct Memory {
+    matched: u16,
+    first: u8,
+    second: u8,
+}
+
+impl Memory {
+    const VALUES: [usize; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 3, 6, 1, 5, 0, 7, 4, 2];
+    const fn new() -> Self {
+        Self {
+            matched: 0,
+            first: u8::MAX,
+            second: u8::MAX,
+        }
+    }
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+    const fn value(&self, index: usize) -> usize {
+        Self::VALUES[index]
+    }
+    fn visible(&self, index: usize) -> bool {
+        self.matched & (1 << index) != 0
+            || self.first as usize == index
+            || self.second as usize == index
+    }
+    fn click(&mut self, x: i16, y: i16) -> bool {
+        if !(92..540).contains(&x) || !(100..404).contains(&y) {
+            return false;
+        }
+        let column = ((x - 92) / 112) as usize;
+        let row = ((y - 100) / 76) as usize;
+        if column >= 4 || row >= 4 {
+            return false;
+        }
+        let index = row * 4 + column;
+        if self.matched & (1 << index) != 0 {
+            return false;
+        }
+        if self.second != u8::MAX {
+            self.first = u8::MAX;
+            self.second = u8::MAX;
+        }
+        if self.first == u8::MAX {
+            self.first = index as u8;
+        } else if self.first as usize != index {
+            self.second = index as u8;
+            if self.value(self.first as usize) == self.value(index) {
+                self.matched |= 1 << self.first;
+                self.matched |= 1 << index;
+                self.first = u8::MAX;
+                self.second = u8::MAX;
+            }
+        }
+        true
+    }
+}
+
 impl Pong {
     const fn new() -> Self {
         Self {
@@ -520,13 +815,13 @@ impl Pong {
     }
 }
 
-fn game_card(x: i32, y: i32, width: i32, title: &str, detail: &str, accent: u32) {
-    framebuffer::rect(x, y, width, 180, 0x0015_1922);
-    framebuffer::outline(x, y, width, 180, color::BORDER);
-    framebuffer::rect(x, y, 7, 180, accent);
-    framebuffer::text(x + 25, y + 28, title, accent, 2);
-    framebuffer::text(x + 25, y + 72, detail, color::INK, 1);
-    framebuffer::text(x + 25, y + 135, "PLAY NOW", color::PURPLE, 1);
+fn game_card_small(x: i32, y: i32, width: i32, title: &str, detail: &str, accent: u32) {
+    framebuffer::rect(x, y, width, 104, 0x0015_1922);
+    framebuffer::outline(x, y, width, 104, color::BORDER);
+    framebuffer::rect(x, y, 6, 104, accent);
+    framebuffer::text(x + 20, y + 20, title, accent, 2);
+    framebuffer::text(x + 20, y + 55, detail, color::INK, 1);
+    framebuffer::text(x + 20, y + 78, "PLAY", color::PURPLE, 1);
 }
 
 fn draw_number(x: i32, y: i32, mut value: u64, color: u32) {
