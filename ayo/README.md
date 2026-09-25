@@ -14,7 +14,7 @@ make build
 ./bin/ayo --authority operator
 ```
 
-The built-in 21-package catalog works offline and every package installs a real
+The built-in 25-package catalog works offline and every package installs a real
 owned `.form` artifact. The TUI accepts a package number or name, `/text` to
 search, `d NAME` for details, `i` for installed packages, and `x NAME` to
 remove one.
@@ -22,7 +22,8 @@ remove one.
 The same operations are available directly:
 
 ```sh
-./bin/ayo --authority operator install TextLab
+./bin/ayo --authority operator slap TextLab
+./bin/ayo --authority operator install TextLab # compatibility spelling
 ./bin/ayo glance TextLab
 ./bin/ayo files TextLab
 ./bin/ayo --authority operator yeet TextLab
@@ -43,7 +44,10 @@ Select a local JSON catalog or an HTTPS registry:
   --registry-key BASE64_ED25519_PUBLIC_KEY
 ```
 
-Remote catalogs are size-bounded and package metadata is checksummed. The
+Schema v3 catalogs carry category and target-architecture metadata, so `glance`
+can search Editors, Developer tools, Games, Networking, Languages, Utilities,
+and Graphics without flattening everything into a path list. Remote catalogs
+are size-bounded and package metadata is checksummed. The
 optional registry key requires a valid Ed25519 signature. Ayo v3 catalog
 entries include an artifact source, SHA-256 digest, format and optional raw-file
 target. Sources may be HTTPS, `file://`, local files or `builtin://`; supported
@@ -71,7 +75,9 @@ For a one-off local artifact:
 
 The philosophy command vocabulary remains available: `slap`, `yeet`, `glance`,
 `chill`, `fix`, `ghost`, `manifest`, `highfive`, `dodge`, `vibecheck`, and
-`flex`. Ayo v3 adds `install`, `files`, and `recover` for artifact workflows.
+`flex`. `slap NAME` is the normal catalog install path; `install` is its
+compatibility spelling. `slap NAME VERSION` creates a local Package Form, and
+artifact flags attach local bytes. Ayo v3 also adds `files` and `recover`.
 
 The JSON state store is a development ExpFS bridge. It uses a single-writer
 lock, pending journal, atomic rename and recovery snapshot. Native integration

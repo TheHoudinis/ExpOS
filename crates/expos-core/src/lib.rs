@@ -23,7 +23,7 @@ mod relationship;
 mod scope;
 mod text;
 
-pub use abi::{AbiCall, AbiRequest, AbiResponse, AbiStatus, GO_ABI_VERSION};
+pub use abi::{AbiCall, AbiRequest, AbiResponse, AbiStatus, FORM_ABI_VERSION, GO_ABI_VERSION};
 pub use browser::{
     BorderStyle, BoxEdges, BrowserError, BrowserText, ComputedStyle, CssColor, CssVisibility,
     DisplayMode, Document, DocumentNode, DomEvent, NodeKind, ScriptRejection, ScriptReport,

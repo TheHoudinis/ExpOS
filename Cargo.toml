@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/expos-core", "kernel"]
+members = ["crates/expos-core", "kernel", "sdk/rust"]
 resolver = "2"
 
 [patch.crates-io]

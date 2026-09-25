@@ -28,6 +28,8 @@ type Package struct {
 	Name          string              `json:"name"`
 	Version       string              `json:"version"`
 	Summary       string              `json:"summary"`
+	Category      string              `json:"category,omitempty"`
+	Architectures []string            `json:"architectures,omitempty"`
 	Capabilities  []string            `json:"capabilities,omitempty"`
 	ProvidedForms []string            `json:"provided_forms,omitempty"`
 	Dependencies  []string            `json:"dependencies,omitempty"`
@@ -43,10 +45,11 @@ type Catalog struct {
 	GeneratedAt time.Time `json:"generated_at"`
 	Packages    []Package `json:"packages"`
 	Signature   string    `json:"signature,omitempty"`
+	Trust       string    `json:"-"`
 }
 
 func Builtin() Catalog {
-	catalog := Catalog{Schema: 2, Name: "ExpOS Prism Forms", GeneratedAt: time.Date(2026, 9, 9, 0, 0, 0, 0, time.UTC), Packages: []Package{
+	catalog := Catalog{Schema: 3, Name: "ExpOS Prism Forms", GeneratedAt: time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC), Trust: "built-in", Packages: []Package{
 		{Name: "CoreTools", Version: "1.0.0", Summary: "Form-native diagnostics and repair tools", Capabilities: []string{"inspect", "repair"}, ProvidedForms: []string{"Diagnostics"}, Compatibility: []string{"expos>=8.0.0"}},
 		{Name: "Network", Version: "2.1.0", Summary: "Network service Form and socket capability", Capabilities: []string{"network", "socket"}, ProvidedForms: []string{"NetworkService"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
 		{Name: "Terminal", Version: "1.2.0", Summary: "Interactive command Interface Form", Capabilities: []string{"execute", "render"}, ProvidedForms: []string{"TerminalInterface"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
@@ -57,7 +60,11 @@ func Builtin() Catalog {
 		{Name: "RenderKit", Version: "1.0.0", Summary: "Dark UI gradients alpha blending rounded shapes and lines", Capabilities: []string{"render"}, ProvidedForms: []string{"GraphicsPrimitives"}, Dependencies: []string{"ExpDisplay@>=1.0.0"}},
 		{Name: "MouseKit", Version: "1.0.0", Summary: "PS2 pointer packets cursor and surface hit testing", Capabilities: []string{"input", "inspect"}, ProvidedForms: []string{"PointerService"}, Dependencies: []string{"InputKit@>=1.0.0", "ExpDisplay@>=1.0.0"}},
 		{Name: "SessionManager", Version: "1.0.0", Summary: "Login identity and capability authority sessions", Capabilities: []string{"inspect", "configure"}, ProvidedForms: []string{"SessionService"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
-		{Name: "GoSDK", Version: "1.0.0", Summary: "ExpOS Go ABI bindings and Form test emulator", Capabilities: []string{"execute", "relate"}, ProvidedForms: []string{"GoABIClient"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
+		{Name: "GoSDK", Version: "1.1.0", Summary: "Go bindings and deterministic Form ABI test transport", Capabilities: []string{"execute", "relate"}, ProvidedForms: []string{"FormABIClient"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
+		{Name: "RustSDK", Version: "1.0.0", Summary: "no_std Rust client sharing the kernel Form ABI types", Capabilities: []string{"execute", "relate"}, ProvidedForms: []string{"FormABIClient"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
+		{Name: "CSDK", Version: "1.0.0", Summary: "C11 Form ABI header with compile-time wire-layout checks", Capabilities: []string{"execute", "relate"}, ProvidedForms: []string{"FormABIClient"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
+		{Name: "PythonSDK", Version: "1.0.0", Summary: "Python Form ABI serializer and bounded host emulator", Capabilities: []string{"execute", "relate"}, ProvidedForms: []string{"FormABIClient"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
+		{Name: "ExpPython", Version: "1.0.0", Summary: "Bounded native Python language runtime for executable Forms", Capabilities: []string{"execute", "read"}, ProvidedForms: []string{"PythonRuntime"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
 		{Name: "PrismDE", Version: "1.2.0", Summary: "Dark pointer-driven capability-native desktop environment", Capabilities: []string{"render", "input", "configure"}, ProvidedForms: []string{"PrismDesktop"}, Dependencies: []string{"ExpDisplay@>=1.0.0", "RenderKit@>=1.0.0", "Terminal@>=1.2.0", "MouseKit@>=1.0.0", "SessionManager@>=1.0.0"}},
 		{Name: "PrismTheme", Version: "1.1.0", Summary: "Black Prism desktop palette and original chrome", Capabilities: []string{"render"}, ProvidedForms: []string{"PrismPalette"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
 		{Name: "InputKit", Version: "1.0.0", Summary: "PS2 and serial key event adapters", Capabilities: []string{"input", "inspect"}, ProvidedForms: []string{"InputService"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
@@ -67,10 +74,12 @@ func Builtin() Catalog {
 		{Name: "VirtioBlock", Version: "0.4.0", Summary: "Experimental virtio block Driver Form", Capabilities: []string{"read", "write", "inspect"}, ProvidedForms: []string{"BlockDriver"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
 		{Name: "AudioKit", Version: "0.3.0", Summary: "Experimental audio service interfaces", Capabilities: []string{"read", "configure"}, ProvidedForms: []string{"AudioService"}, Dependencies: []string{"CoreTools@>=1.0.0"}},
 		{Name: "TextLab", Version: "1.0.0", Summary: "Form-native notes and text workspace", Capabilities: []string{"read", "configure"}, ProvidedForms: []string{"TextLabInterface"}, Dependencies: []string{"ExpEdit@>=0.8.0", "PrismDE@>=1.0.0"}},
-		{Name: "DeveloperKit", Version: "1.0.0", Summary: "Go SDK terminal and editor development deck", Capabilities: []string{"execute", "read", "configure"}, ProvidedForms: []string{"DeveloperWorkspace"}, Dependencies: []string{"GoSDK@>=1.0.0", "ExpEdit@>=0.8.0", "PrismDE@>=1.0.0"}},
+		{Name: "DeveloperKit", Version: "1.1.0", Summary: "Form ABI SDKs terminal and editor development deck", Capabilities: []string{"execute", "read", "configure"}, ProvidedForms: []string{"DeveloperWorkspace"}, Dependencies: []string{"GoSDK@>=1.1.0", "RustSDK@>=1.0.0", "CSDK@>=1.0.0", "PythonSDK@>=1.0.0", "ExpEdit@>=0.8.0", "PrismDE@>=1.0.0"}},
 	}}
 	for index := range catalog.Packages {
 		pkg := &catalog.Packages[index]
+		pkg.Category = builtinCategory(pkg.Name)
+		pkg.Architectures = builtinArchitectures(pkg.Name)
 		source := fmt.Sprintf("builtin://forms/%s/%s", pkg.Name, pkg.Version)
 		payload, _ := artifact.BuiltinPayload(source)
 		pkg.Artifact = &model.ArtifactSpec{
@@ -101,6 +110,12 @@ func Load(ctx context.Context, source, publicKey string) (Catalog, error) {
 		if err := verifySignature(catalog, publicKey); err != nil {
 			return Catalog{}, err
 		}
+		catalog.Trust = "ed25519"
+	} else {
+		catalog.Trust = "unverified"
+		if allChecksummed(catalog.Packages) {
+			catalog.Trust = "checksummed"
+		}
 	}
 	if err := resolveArtifactSources(&catalog, source, remote); err != nil {
 		return Catalog{}, err
@@ -108,14 +123,36 @@ func Load(ctx context.Context, source, publicKey string) (Catalog, error) {
 	return catalog, nil
 }
 
+func allChecksummed(packages []Package) bool {
+	if len(packages) == 0 {
+		return false
+	}
+	for _, pkg := range packages {
+		if pkg.Checksum == "" {
+			return false
+		}
+	}
+	return true
+}
+
 func (catalog Catalog) Validate(requireChecksums bool) error {
-	if (catalog.Schema != 1 && catalog.Schema != 2) || catalog.Name == "" {
+	if (catalog.Schema < 1 || catalog.Schema > 3) || catalog.Name == "" {
 		return errors.New("unsupported or unnamed ayo registry catalog")
 	}
 	seen := make(map[string]bool)
 	for _, pkg := range catalog.Packages {
 		if pkg.Name == "" || pkg.Version == "" || pkg.Summary == "" {
 			return errors.New("registry contains an incomplete Package Form")
+		}
+		if catalog.Schema >= 3 {
+			if pkg.Category == "" || len(pkg.Architectures) == 0 {
+				return fmt.Errorf("Package Form %s has no category or architecture", pkg.Name)
+			}
+			for _, architecture := range pkg.Architectures {
+				if strings.TrimSpace(architecture) == "" {
+					return fmt.Errorf("Package Form %s has an empty architecture", pkg.Name)
+				}
+			}
 		}
 		key := strings.ToLower(pkg.Name)
 		if seen[key] {
@@ -144,6 +181,49 @@ func (catalog Catalog) Find(name string) (Package, bool) {
 		}
 	}
 	return Package{}, false
+}
+
+func (catalog Catalog) Search(query string) []Package {
+	needle := strings.ToLower(strings.TrimSpace(query))
+	if needle == "" {
+		return append([]Package(nil), catalog.Packages...)
+	}
+	matches := make([]Package, 0)
+	for _, pkg := range catalog.Packages {
+		haystack := strings.ToLower(strings.Join([]string{pkg.Name, pkg.Summary, pkg.Category, strings.Join(pkg.ProvidedForms, " ")}, " "))
+		if strings.Contains(haystack, needle) {
+			matches = append(matches, pkg)
+		}
+	}
+	return matches
+}
+
+func builtinCategory(name string) string {
+	switch name {
+	case "ExpEdit", "TextLab":
+		return "Editors"
+	case "GoSDK", "RustSDK", "CSDK", "PythonSDK", "DeveloperKit":
+		return "Developer tools"
+	case "ExpPython":
+		return "Languages"
+	case "GameHub", "Snake", "Pong":
+		return "Games"
+	case "Network", "Browser":
+		return "Networking"
+	case "ExpDisplay", "RenderKit", "MouseKit", "PrismDE", "PrismTheme":
+		return "Graphics"
+	default:
+		return "Utilities"
+	}
+}
+
+func builtinArchitectures(name string) []string {
+	switch name {
+	case "GoSDK", "RustSDK", "CSDK", "PythonSDK", "DeveloperKit":
+		return []string{"host"}
+	default:
+		return []string{"x86_64"}
+	}
 }
 
 func (catalog Catalog) Resolve(name, dimension string, state model.State) ([]manager.InstallSpec, error) {

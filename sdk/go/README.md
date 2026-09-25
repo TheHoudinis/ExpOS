@@ -1,12 +1,14 @@
 # ExpOS Go SDK
 
-`expos.dev/sdk/expos` is the Go-facing contract for ExpOS Go ABI v1. It uses
+`expos.dev/sdk/expos` is the Go binding for the language-neutral ExpOS Form ABI
+v1. It uses
 FIN caller identity and a Form Handle on every privileged request—there are no
 Unix paths, file descriptors, UIDs, or implicit global authority.
 
-Implemented client calls cover surface creation, buffer attachment, damage,
-atomic commit, browser navigation, event polling, Form resolution, Handle
-authorization and package transactions. The included deterministic emulator
+Implemented call numbers cover identity, time, IPC, surface creation, buffer
+attachment, damage, atomic commit, browser navigation, events, storage,
+networking, Form resolution, Handle authorization, and package transactions.
+The included deterministic emulator
 lets ordinary Go tooling test Form clients now:
 
 ```sh

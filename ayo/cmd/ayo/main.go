@@ -61,7 +61,11 @@ func run(arguments []string) int {
 	case "install":
 		err = install(context.Background(), ayo, *registrySource, *registryKey, operands)
 	case "slap":
-		err = slap(ayo, operands)
+		if len(operands) == 1 {
+			err = install(context.Background(), ayo, *registrySource, *registryKey, operands)
+		} else {
+			err = slap(ayo, operands)
+		}
 	case "yeet":
 		err = yeet(ayo, operands)
 	case "ghost", "dodge":
@@ -93,7 +97,7 @@ func run(arguments []string) int {
 			err = ayo.ManifestNamed(label)
 		}
 	case "glance":
-		err = glance(ayo, operands)
+		err = glance(context.Background(), ayo, *registrySource, *registryKey, operands)
 	case "vibecheck":
 		err = vibecheck(ayo)
 	case "flex":
@@ -212,18 +216,37 @@ func yeet(ayo manager.Manager, args []string) error {
 	return ayo.YeetForce(operands[0], *force)
 }
 
-func glance(ayo manager.Manager, operands []string) error {
+func glance(ctx context.Context, ayo manager.Manager, source, publicKey string, operands []string) error {
 	if len(operands) > 1 {
-		return errorsFor("glance accepts at most one FIN or name")
+		return errorsFor("glance accepts at most one FIN, name, category, or search term")
 	}
 	state, err := ayo.Read()
 	if err != nil {
 		return err
 	}
+	if len(operands) == 1 {
+		registry, loadErr := catalog.Load(ctx, source, publicKey)
+		if loadErr != nil {
+			return loadErr
+		}
+		if pkg, found := registry.Find(operands[0]); found {
+			printCatalogPackage(pkg, registry.Trust, installedForm(state, ayo.Dimension, pkg.Name))
+			return nil
+		}
+		matches := registry.Search(operands[0])
+		if len(matches) > 0 {
+			for _, pkg := range matches {
+				fmt.Printf("%-16s %-16s v%-8s %s\n", pkg.Name, pkg.Category, pkg.Version, pkg.Summary)
+			}
+			return nil
+		}
+	}
+	found := false
 	for _, form := range state.Packages {
-		if form.Dimension != ayo.Dimension || (len(operands) == 1 && operands[0] != form.Name && operands[0] != form.FIN) {
+		if form.Dimension != ayo.Dimension || (len(operands) == 1 && !strings.EqualFold(operands[0], form.Name) && operands[0] != form.FIN) {
 			continue
 		}
+		found = true
 		status := "retired"
 		if form.Active {
 			status = "active"
@@ -243,7 +266,38 @@ func glance(ayo manager.Manager, operands []string) error {
 			}
 		}
 	}
+	if len(operands) == 1 && !found {
+		return fmt.Errorf("no installed or catalog Package Form matches %q", operands[0])
+	}
 	return nil
+}
+
+func installedForm(state model.State, dimension, name string) *model.PackageForm {
+	form, err := state.Find(name, dimension)
+	if err != nil {
+		return nil
+	}
+	return form
+}
+
+func printCatalogPackage(pkg catalog.Package, trust string, installed *model.PackageForm) {
+	fin, status := "assigned during installation", "available"
+	if installed != nil {
+		fin = installed.FIN
+		status = "installed"
+		if !installed.Active {
+			status = "inactive"
+		}
+	}
+	signature := "no (unverified local metadata)"
+	if trust == "ed25519" {
+		signature = "yes (Ed25519 catalog)"
+	} else if trust == "built-in" {
+		signature = "compiled-in release trust"
+	} else if trust == "checksummed" {
+		signature = "no (checksummed metadata only)"
+	}
+	fmt.Printf("%s\nVersion: %s\nFIN: %s\nSignature: %s\nCategory: %s\nArchitectures: %s\nStatus: %s\nDependencies: %s\nProvides: %s\nCapabilities: %s\n", pkg.Name, pkg.Version, fin, signature, pkg.Category, display(pkg.Architectures), status, display(pkg.Dependencies), display(pkg.ProvidedForms), display(pkg.Capabilities))
 }
 
 func files(ayo manager.Manager, operands []string) error {
@@ -349,7 +403,8 @@ Registry options: --registry HTTPS_URL --registry-key BASE64_ED25519_KEY --plain
 commands: install slap yeet files recover glance chill fix ghost manifest
           highfive dodge vibecheck flex version
 
-install NAME resolves, downloads, verifies, stages, and owns catalog artifacts.
+slap NAME (or install NAME) resolves, downloads, verifies, stages, and owns catalog artifacts.
+slap NAME VERSION registers a local metadata Package Form; artifact options attach bytes.
 slap artifact options: --source URL --sha256 HEX --format raw|tar|tar.gz [--target PATH]
 metadata options: --cap NAME --dep 'NAME@>=VERSION' --provide FORM --compat RULE --pimp KEY=VALUE
 

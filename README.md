@@ -38,7 +38,10 @@ ExpOS is the Form-native operating system described by
   themes, five font faces and three real font weights;
 - readable case-sensitive 8x8 framebuffer text with runtime face/weight
   rasterization and an expanded 8x16 VGA console font;
-- Ayo v3 package installation, verification, ownership, rollback and recovery;
+- Ayo v3 package installation, verification, ownership, rollback and recovery,
+  with a categorized 25-package built-in catalog;
+- a frozen language-neutral Form ABI v1 plus Rust, Go, C, and Python SDK
+  contracts and an `expos build/run/test/package` host-development workflow;
 - a capability-gated RTL8139 network path with Ethernet, ARP, DHCP IPv4,
   ICMP, UDP, DNS A lookup, one bounded TCP client and HTTP/1.0 GET over plain
   TCP or authenticated TLS 1.3;
@@ -133,6 +136,7 @@ make https-check    # verify TLS and fetch youtube.com HTML (requires Internet)
 make search-check   # verify DuckDuckGo HTML address-bar search (requires Internet)
 make persistence-check # verify Forms, Handles, settings and checkpoints across boots
 make ayo            # test and build Ayo v3
+make sdk            # verify Rust, Go, C, Python SDKs and the expos project tool
 make all            # run the complete native test suite
 ```
 
@@ -331,14 +335,39 @@ subdomains. Sites chaining to another root are not accepted.
 
 ```sh
 ./ayo/bin/ayo --authority operator
-./ayo/bin/ayo --authority operator install TextLab
+./ayo/bin/ayo glance editor
+./ayo/bin/ayo --authority operator slap TextLab
 ./ayo/bin/ayo files TextLab
 ```
 
 Ayo accepts built-in, local or HTTPS catalogs; verifies configured SHA-256 and
 Ed25519 metadata; extracts raw, tar and tar.gz artifacts beneath an explicit
 root; records owned files; and supports uninstall and recovery. It does not run
-package scripts or install links.
+package scripts or install links. Schema v3 records include categories and
+target architectures. The compiled catalog is a trusted release input; remote
+catalogs say whether Ed25519 verification actually occurred rather than
+presenting a checksum as a signature.
+See [`docs/PACKAGE_ECOSYSTEM.md`](docs/PACKAGE_ECOSYSTEM.md) for the public
+registry layout and the quality bar for the 50-package milestone.
+
+## Form ABI and SDK
+
+[`docs/FORM_ABI_V1.md`](docs/FORM_ABI_V1.md) freezes the 72-byte request,
+40-byte response, status values, and capability-gated calls for identity,
+Handles, IPC, ExpDisplay, input/events, time, storage, networking, Browser, and
+Ayo. Kernel-private Rust layouts are explicitly outside the ABI.
+
+```sh
+./sdk/bin/expos build
+./sdk/bin/expos run
+./sdk/bin/expos test
+./sdk/bin/expos package
+```
+
+The project driver supports fixed Rust, Go, and C recipes and emits a
+deterministic Ayo tar artifact plus SHA-256 receipt. `run` is a host-development
+run: native user-mode call-gate transport and isolated binary loading remain
+unfinished and are not claimed by the SDK.
 
 ## Console
 
@@ -411,7 +440,9 @@ The feature pass described above does not modify `legacy/alpha32/`.
 | `boot/`, `kernel/` | x86_64 bootstrap and kernel |
 | `crates/expos-core/` | platform-independent Form semantics |
 | `ayo/` | Go package manager and development storage bridge |
-| `sdk/go/` | Go ABI client and host emulator |
+| `sdk/` | Rust, Go, C, and Python Form ABI clients plus the `expos` project tool |
+| `docs/FORM_ABI_V1.md` | frozen language-neutral Form ABI v1 contract |
+| `docs/PACKAGE_ECOSYSTEM.md` | signed registry design and 50-package acceptance bar |
 | `docs/PHILOSOPHY.txt` | source architecture specification |
 | `docs/ARCHITECTURE.md` | implementation and trust boundaries |
 | `docs/MIGRATION.md` | migration map |

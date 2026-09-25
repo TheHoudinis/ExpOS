@@ -45,6 +45,22 @@ func TestBuiltinSnakeResolvesPlayableGameStack(t *testing.T) {
 	}
 }
 
+func TestBuiltinCatalogHasEcosystemMetadataAndSearch(t *testing.T) {
+	catalog := Builtin()
+	if catalog.Schema != 3 || catalog.Trust != "built-in" {
+		t.Fatalf("unexpected catalog identity: schema=%d trust=%q", catalog.Schema, catalog.Trust)
+	}
+	for _, pkg := range catalog.Packages {
+		if pkg.Category == "" || len(pkg.Architectures) == 0 {
+			t.Fatalf("%s lacks ecosystem metadata", pkg.Name)
+		}
+	}
+	matches := catalog.Search("editor")
+	if len(matches) < 2 || matches[0].Name != "ExpEdit" || matches[1].Name != "TextLab" {
+		t.Fatalf("unexpected editor search: %#v", matches)
+	}
+}
+
 func TestCatalogRejectsTamperedPackage(t *testing.T) {
 	catalog := Builtin()
 	catalog.Packages[0].Summary = "tampered"

@@ -25,12 +25,19 @@ const (
 	CallLog                Call = 1
 	CallFormResolve        Call = 2
 	CallHandleAuthorize    Call = 3
+	CallTimeNow            Call = 4
+	CallIPCSend            Call = 5
+	CallIPCReceive         Call = 6
 	CallSurfaceCreate      Call = 16
 	CallBufferAttach       Call = 17
 	CallSurfaceDamage      Call = 18
 	CallSurfaceCommit      Call = 19
 	CallEventPoll          Call = 20
 	CallBrowserNavigate    Call = 32
+	CallStorageRead        Call = 33
+	CallStorageWrite       Call = 34
+	CallNetworkSend        Call = 35
+	CallNetworkReceive     Call = 36
 	CallPackageTransaction Call = 48
 )
 
@@ -95,6 +102,11 @@ func (client Client) Commit(ctx context.Context, surface uint32) (uint64, error)
 func (client Client) Navigate(ctx context.Context, resource uint64) error {
 	_, err := client.invoke(ctx, CallBrowserNavigate, [6]uint64{resource})
 	return err
+}
+
+func (client Client) TimeNow(ctx context.Context, clock uint64) (uint64, error) {
+	response, err := client.invoke(ctx, CallTimeNow, [6]uint64{clock})
+	return response.Values[0], err
 }
 
 func (client Client) invoke(ctx context.Context, call Call, arguments [6]uint64) (Response, error) {
@@ -169,7 +181,9 @@ func (emulator *Emulator) Call(_ context.Context, request Request) (Response, er
 		emulator.Surfaces[id] = surface
 		emulator.CommitSequence++
 		return Response{Status: StatusOK, Values: [4]uint64{emulator.CommitSequence}}, nil
-	case CallBrowserNavigate, CallLog, CallFormResolve, CallHandleAuthorize, CallEventPoll, CallPackageTransaction:
+	case CallBrowserNavigate, CallLog, CallFormResolve, CallHandleAuthorize, CallTimeNow,
+		CallIPCSend, CallIPCReceive, CallEventPoll, CallStorageRead, CallStorageWrite,
+		CallNetworkSend, CallNetworkReceive, CallPackageTransaction:
 		return Response{Status: StatusOK}, nil
 	default:
 		return Response{Status: StatusUnsupported}, nil

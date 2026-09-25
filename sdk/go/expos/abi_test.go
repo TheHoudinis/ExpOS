@@ -42,4 +42,7 @@ func TestABILayoutMatchesKernelContract(t *testing.T) {
 	if unsafe.Sizeof(Request{}) != 72 || unsafe.Sizeof(Response{}) != 40 {
 		t.Fatalf("ABI layout drifted: request=%d response=%d", unsafe.Sizeof(Request{}), unsafe.Sizeof(Response{}))
 	}
+	if CallTimeNow != 4 || CallSurfaceCreate != 16 || CallStorageRead != 33 || CallNetworkReceive != 36 || CallPackageTransaction != 48 {
+		t.Fatal("Form ABI v1 call numbers drifted")
+	}
 }

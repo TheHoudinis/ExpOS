@@ -134,7 +134,7 @@ func (app App) filtered(filter string) []catalog.Package {
 	needle := strings.ToLower(filter)
 	result := make([]catalog.Package, 0)
 	for _, pkg := range app.Catalog.Packages {
-		if strings.Contains(strings.ToLower(pkg.Name+" "+pkg.Summary), needle) {
+		if strings.Contains(strings.ToLower(pkg.Name+" "+pkg.Summary+" "+pkg.Category), needle) {
 			result = append(result, pkg)
 		}
 	}
@@ -178,7 +178,7 @@ func (app App) details(identity string, packages []catalog.Package) string {
 	if pkg.Artifact != nil {
 		artifact = fmt.Sprintf("%s (%s, sha256 %s)", pkg.Artifact.Source, pkg.Artifact.Format, pkg.Artifact.SHA256)
 	}
-	return fmt.Sprintf("%s@%s — %s\nProvides: %s\nCapabilities: %s\nDepends: %s\nCompatibility: %s\nArtifact: %s\nCatalog checksum: %s", pkg.Name, pkg.Version, pkg.Summary, values(pkg.ProvidedForms), values(pkg.Capabilities), values(pkg.Dependencies), values(pkg.Compatibility), artifact, pkg.Checksum)
+	return fmt.Sprintf("%s@%s — %s\nCategory: %s\nArchitectures: %s\nProvides: %s\nCapabilities: %s\nDepends: %s\nCompatibility: %s\nArtifact: %s\nCatalog trust: %s\nCatalog checksum: %s", pkg.Name, pkg.Version, pkg.Summary, pkg.Category, values(pkg.Architectures), values(pkg.ProvidedForms), values(pkg.Capabilities), values(pkg.Dependencies), values(pkg.Compatibility), artifact, app.Catalog.Trust, pkg.Checksum)
 }
 
 func selectPackage(identity string, packages []catalog.Package) (catalog.Package, bool) {

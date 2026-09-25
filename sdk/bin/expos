@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+"""ExpOS SDK project driver: build, run, test, and package Forms."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tarfile
+import tomllib
+
+
+FORM_ABI_VERSION = 1
+NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,31}$")
+VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$")
+LANGUAGES = {"rust", "go", "c"}
+
+
+class ProjectError(RuntimeError):
+    pass
+
+
+class Project:
+    def __init__(self, manifest: Path):
+        self.manifest = manifest.resolve()
+        self.root = self.manifest.parent
+        try:
+            data = tomllib.loads(self.manifest.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError) as error:
+            raise ProjectError(f"cannot read {self.manifest}: {error}") from error
+        package = data.get("package", {})
+        form = data.get("form", {})
+        build = data.get("build", {})
+        self.name = package.get("name", "")
+        self.version = package.get("version", "")
+        self.language = package.get("language", "")
+        self.entry = build.get("entry", "")
+        self.artifact_override = build.get("artifact", "")
+        self.fin = form.get("fin", "")
+        self.kind = form.get("kind", "executable")
+        self.capabilities = form.get("capabilities", [])
+        self.dependencies = form.get("dependencies", [])
+        self.architectures = form.get("architectures", ["host"])
+        self._validate()
+
+    def _validate(self):
+        if not NAME.fullmatch(self.name):
+            raise ProjectError("package.name must be 1-32 safe ASCII characters")
+        if not VERSION.fullmatch(self.version):
+            raise ProjectError("package.version must be semantic x.y.z form")
+        if self.language not in LANGUAGES:
+            raise ProjectError("package.language must be rust, go, or c")
+        for label, values in (
+            ("capabilities", self.capabilities),
+            ("dependencies", self.dependencies),
+            ("architectures", self.architectures),
+        ):
+            if not isinstance(values, list) or not all(isinstance(item, str) and item for item in values):
+                raise ProjectError(f"form.{label} must be an array of nonempty strings")
+        if self.kind not in {"executable", "interface", "service", "data", "driver"}:
+            raise ProjectError("form.kind is not a supported Form kind")
+        if self.fin and not re.fullmatch(
+            r"[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}", self.fin
+        ):
+            raise ProjectError("form.fin must be a canonical 128-bit FIN")
+
+    def local(self, raw: str) -> Path:
+        candidate = (self.root / raw).resolve()
+        if candidate != self.root and self.root not in candidate.parents:
+            raise ProjectError(f"path escapes project: {raw}")
+        return candidate
+
+    @property
+    def build_dir(self) -> Path:
+        return self.root / ".expos" / "build"
+
+    @property
+    def artifact(self) -> Path:
+        if self.artifact_override:
+            return self.local(self.artifact_override)
+        if self.language == "rust":
+            return self.root / "target" / "release" / self.name
+        return self.build_dir / self.name
+
+    def command(self, action: str) -> list[str]:
+        if self.language == "rust":
+            if action == "build":
+                return ["cargo", "build", "--release"]
+            if action == "test":
+                return ["cargo", "test"]
+        if self.language == "go":
+            if action == "build":
+                return ["go", "build", "-o", str(self.artifact), "."]
+            if action == "test":
+                return ["go", "test", "./..."]
+        if self.language == "c":
+            if not self.entry:
+                raise ProjectError("C projects require build.entry")
+            source = self.local(self.entry)
+            sdk_include = Path(__file__).resolve().parents[1] / "c"
+            return [
+                os.environ.get("CC", "cc"),
+                "-std=c11",
+                "-O2",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-I",
+                str(sdk_include),
+                str(source),
+                "-o",
+                str(self.artifact),
+            ]
+        raise ProjectError(f"{action} is unavailable for {self.language}")
+
+
+def execute(command: list[str], root: Path) -> None:
+    try:
+        subprocess.run(command, cwd=root, check=True)
+    except FileNotFoundError as error:
+        raise ProjectError(f"required tool is not installed: {command[0]}") from error
+    except subprocess.CalledProcessError as error:
+        raise ProjectError(f"command failed with status {error.returncode}: {' '.join(command)}") from error
+
+
+def build(project: Project) -> None:
+    project.build_dir.mkdir(parents=True, exist_ok=True)
+    execute(project.command("build"), project.root)
+    if not project.artifact.is_file():
+        raise ProjectError(
+            f"build completed but artifact is missing: {project.artifact}; set build.artifact if needed"
+        )
+
+
+def test(project: Project) -> None:
+    if project.language == "c":
+        build(project)
+        print("C contract compiled cleanly; add a Form-native test runner as the project grows.")
+        return
+    execute(project.command("test"), project.root)
+
+
+def run(project: Project, arguments: list[str]) -> None:
+    build(project)
+    execute([str(project.artifact), *arguments], project.root)
+
+
+def tar_entry(archive: tarfile.TarFile, name: str, payload: bytes, mode: int) -> None:
+    info = tarfile.TarInfo(name)
+    info.size = len(payload)
+    info.mode = mode
+    info.mtime = 0
+    info.uid = info.gid = 0
+    info.uname = info.gname = "root"
+    archive.addfile(info, io.BytesIO(payload))
+
+
+def package(project: Project, skip_build: bool) -> Path:
+    if not skip_build:
+        build(project)
+    if not project.artifact.is_file():
+        raise ProjectError(f"artifact is missing: {project.artifact}")
+    payload = project.artifact.read_bytes()
+    if not payload:
+        raise ProjectError("refusing to package an empty artifact")
+    metadata = {
+        "schema": 1,
+        "name": project.name,
+        "version": project.version,
+        "fin": project.fin or None,
+        "kind": project.kind,
+        "form_abi": FORM_ABI_VERSION,
+        "language": project.language,
+        "architectures": project.architectures,
+        "capabilities": project.capabilities,
+        "dependencies": project.dependencies,
+        "implementation_sha256": hashlib.sha256(payload).hexdigest(),
+    }
+    encoded = json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    destination = project.root / "dist" / f"{project.name}-{project.version}.tar"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(destination, "w", format=tarfile.PAX_FORMAT) as archive:
+        tar_entry(archive, f"forms/{project.name}/form.json", encoded, 0o644)
+        tar_entry(archive, f"forms/{project.name}/implementation", payload, 0o755)
+    digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+    receipt = destination.with_suffix(".ayo.json")
+    receipt.write_text(
+        json.dumps(
+            {
+                "name": project.name,
+                "version": project.version,
+                "format": "tar",
+                "artifact": str(destination.name),
+                "sha256": digest,
+                "form_abi": FORM_ABI_VERSION,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    print(destination)
+    print(f"sha256 {digest}")
+    print(
+        "ayo slap --source "
+        f"{destination} --sha256 {digest} --format tar {project.name} {project.version}"
+    )
+    return destination
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(prog="expos", description="ExpOS Form SDK project driver")
+    result.add_argument("--manifest", default="expos.toml", help="path to expos.toml")
+    commands = result.add_subparsers(dest="command", required=True)
+    commands.add_parser("build", help="build the declared Form implementation")
+    run_parser = commands.add_parser("run", help="build and run in the host development environment")
+    run_parser.add_argument("arguments", nargs=argparse.REMAINDER)
+    commands.add_parser("test", help="run language tests and ABI checks")
+    package_parser = commands.add_parser("package", help="create a deterministic Ayo tar artifact")
+    package_parser.add_argument("--no-build", action="store_true", help="package an existing artifact")
+    return result
+
+
+def main(arguments: list[str] | None = None) -> int:
+    options = parser().parse_args(arguments)
+    try:
+        project = Project(Path(options.manifest))
+        if options.command == "build":
+            build(project)
+        elif options.command == "run":
+            run(project, options.arguments)
+        elif options.command == "test":
+            test(project)
+        elif options.command == "package":
+            package(project, options.no_build)
+        return 0
+    except ProjectError as error:
+        print(f"expos: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

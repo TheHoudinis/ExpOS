@@ -16,6 +16,10 @@ class ABIContract(unittest.TestCase):
         response = Response(Status.OK, (42, 0, 0, 0))
         self.assertEqual(len(response.pack()), 40)
         self.assertEqual(Response.unpack(response.pack()), response)
+        self.assertEqual(Call.TIME_NOW, 4)
+        self.assertEqual(Call.STORAGE_READ, 33)
+        self.assertEqual(Call.NETWORK_RECEIVE, 36)
+        self.assertEqual(Call.PACKAGE_TRANSACTION, 48)
 
     def test_pending_buffer_is_invisible_until_commit(self):
         surface = self.client.create_surface(-1, 2, 640, 480)

@@ -277,6 +277,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "expos-sdk"
+version = "1.0.0"
+dependencies = [
+ "expos-core",
+]
+
+[[package]]
 name = "ff"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

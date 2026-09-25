@@ -35,7 +35,8 @@ general native application loader or a guarantee against interpreter defects.
 The current console font displays ASCII; non-ASCII output uses placeholders.
 
 `sdk/python` is a separate host-side Python development package. Its versioned
-request/response serialization matches the Rust and Go ABI, and its bounded
+request/response serialization matches the language-neutral Form ABI used by
+the Rust, Go, and C SDKs, and its bounded
 emulator verifies capability identity, revocation and atomic surface commits.
 Unsupported services return explicit errors. A live transport to a running
 kernel is not yet implemented, and this host SDK is not imported by ExpPython.

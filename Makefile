@@ -21,9 +21,9 @@ GENESIS_ISO := $(BUILD)/ExpOS-0.9-x86_64.iso
 OVMF_CODE  ?= /usr/share/edk2/x64/OVMF_CODE.4m.fd
 OVMF_VARS  ?= /usr/share/edk2/x64/OVMF_VARS.4m.fd
 
-.PHONY: all iso genesis-iso genesis-check test check display-check session-check network-check internet-check https-check search-check persistence-check run debug clean legacy-alpha-check run-alpha ayo go-sdk kernel-build genesis-kernel-build
+.PHONY: all iso genesis-iso genesis-check test check display-check session-check network-check internet-check https-check search-check persistence-check run debug clean legacy-alpha-check run-alpha ayo sdk rust-sdk go-sdk c-sdk python-sdk sdk-cli-check kernel-build genesis-kernel-build
 
-all: test check display-check session-check network-check persistence-check ayo go-sdk python-sdk python-runtime-check python-check budget-check uefi-check bootmode-check startup-check
+all: test check display-check session-check network-check persistence-check ayo sdk python-runtime-check python-check budget-check uefi-check bootmode-check startup-check
 
 test:
 	cargo test --workspace
@@ -181,7 +181,7 @@ check: $(ISO)
 	awk '/EXPOS_SAFE_VIDEO_APPLIED persisted=true/{applied=1; next} applied && /display: preset-id=0 refresh=60Hz vsync=on/{verified=1} END{exit !verified}' $(BUILD)/serial.log
 	grep -q "Ayo.*package" $(BUILD)/serial.log
 	grep -q "ExpDisplay.*service" $(BUILD)/serial.log
-	grep -q "GoABI.*interface" $(BUILD)/serial.log
+	grep -q "FormABI.*interface" $(BUILD)/serial.log
 	grep -q "Ayo --configured-by--> Root" $(BUILD)/serial.log
 	grep -q "DemoBrowser --depends-on--> Ayo" $(BUILD)/serial.log
 	grep -q "DIESE exact resolution" $(BUILD)/serial.log
@@ -274,7 +274,7 @@ display-check: $(ISO)
 	grep -q "EXPOS_COMMAND_OK desktop" $(BUILD)/display-serial.log
 	grep -q "EXPOS_PRESENTATION_READY rate=144 Hz vsync=true pageflip=true" $(BUILD)/display-serial.log
 	grep -q "EXPOS_RENDER_POLICY mode=Responsive damage=true shadows=true wallpaper_effects=true" $(BUILD)/display-serial.log
-	grep -q "ExpOS Go ABI v1" $(BUILD)/display-serial.log
+	grep -q "ExpOS Form ABI v1" $(BUILD)/display-serial.log
 	@echo ">>> EXPOS DISPLAY TEST PASSED <<<"
 
 session-check: $(ISO)
@@ -412,10 +412,21 @@ debug: $(ISO) $(STATE_IMG)
 ayo:
 	$(MAKE) -C ayo test build
 
+sdk: rust-sdk go-sdk c-sdk python-sdk sdk-cli-check
+
+rust-sdk:
+	cargo test -p expos-sdk
+
 go-sdk:
 	GOCACHE=/tmp/expos-go-sdk-cache go -C sdk/go test ./...
 
-.PHONY: python-sdk python-runtime-check python-check budget-check
+c-sdk:
+	$(CC) -std=c11 -Wall -Wextra -Werror -pedantic -Isdk/c sdk/c/tests/abi_test.c -o /tmp/expos-c-sdk-test
+	/tmp/expos-c-sdk-test
+
+sdk-cli-check:
+	python3 -m unittest discover -s sdk/cli/tests -v
+
 python-sdk:
 	PYTHONPATH=sdk/python python3 -m unittest discover -s sdk/python/tests -v
 

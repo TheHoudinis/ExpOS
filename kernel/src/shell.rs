@@ -12,7 +12,7 @@ use expos_core::{
     AddressSpace, Authority, BootReport, CapabilityBroker, Dimension, ExecutionContext,
     ExecutionIdentity, ExecutionRuntime, ExecutionState, Fin, Form, FormHandle, FormKind,
     Lifecycle, NetworkPolicy, Operations, PimpScope, PimpSpec, PimpValue, Relationship,
-    RelationshipGraph, RelationshipKind, Scheduler, SpecKey, Text, GO_ABI_VERSION,
+    RelationshipGraph, RelationshipKind, Scheduler, SpecKey, Text, FORM_ABI_VERSION,
 };
 
 const MAX_LINE: usize = 128;
@@ -22,7 +22,7 @@ const MAX_CONTENT: usize = 512;
 const MAX_DIMENSIONS: usize = 6;
 const MAX_HISTORY: usize = 8;
 const AYO_FIN: Fin = Fin::from_u128(0x4159_4F00_0000_0000_0000_0000_0000_0001);
-const GO_ABI_FIN: Fin = Fin::from_u128(0x474F_4142_4900_0000_0000_0000_0000_0001);
+const FORM_ABI_FIN: Fin = Fin::from_u128(0x474F_4142_4900_0000_0000_0000_0000_0001);
 
 pub fn run(report: BootReport, mut input: Input, session: Session) -> ! {
     let mut shell = Shell::new(report, session);
@@ -185,7 +185,7 @@ impl Shell {
             "Browser",
             FormKind::Interface,
         ));
-        forms[4] = Some(Form::new(GO_ABI_FIN, "GoABI", FormKind::Interface));
+        forms[4] = Some(Form::new(FORM_ABI_FIN, "FormABI", FormKind::Interface));
         let mut network_form = Form::new(crate::network::NETWORK_FIN, "Network", FormKind::Driver);
         if !crate::network::available() {
             network_form.lifecycle = Lifecycle::Recoverable;
@@ -233,7 +233,7 @@ impl Shell {
             },
             Relationship {
                 source: AYO_FIN,
-                target: GO_ABI_FIN,
+                target: FORM_ABI_FIN,
                 kind: RelationshipKind::DependsOn,
                 dimension: Some(report.stable_fin),
             },
@@ -274,7 +274,7 @@ impl Shell {
         );
         seed_content(
             &mut content[4],
-            b"Go ABI v1: versioned capability-gated Form, surface, browser, event, and package calls",
+            b"Form ABI v1: frozen capability-gated identity, IPC, display, input, time, storage, network, browser, and package calls",
         );
         seed_content(
             &mut content[5],
@@ -751,14 +751,14 @@ impl Shell {
                 );
                 true
             }
-            "goabi" => {
-                println!("ExpOS Go ABI v{} FIN={}", GO_ABI_VERSION, GO_ABI_FIN);
+            "formabi" | "goabi" => {
+                println!("ExpOS Form ABI v{} FIN={}", FORM_ABI_VERSION, FORM_ABI_FIN);
                 println!(
-                    "calls: resolve authorize surface attach damage commit event navigate package"
+                    "calls: resolve authorize time ipc surface event storage network navigate package"
                 );
-                println!("SDK: sdk/go/expos (host emulator tested)");
+                println!("SDKs: sdk/rust sdk/go sdk/c sdk/python (host contracts tested)");
                 println!(
-                    "native Go execution loader: not connected; scheduler/loader work remains"
+                    "native user-mode ABI transport: not connected; scheduler/loader work remains"
                 );
                 true
             }
@@ -1031,7 +1031,7 @@ impl Shell {
         println!("  pimp <name> <key=value>");
         println!("  relate/unrelate <source> <kind> <target>  relationships <source>");
         println!(
-            "  desktop browser displayinfo displaydiag stateinfo diag safevideo displayreset goabi"
+            "  desktop browser displayinfo displaydiag stateinfo diag safevideo displayreset formabi"
         );
         println!("  ayo games arcade legacy reboot shutdown");
         println!(
@@ -2772,6 +2772,7 @@ fn is_shell_command(name: &str) -> bool {
             | "displayreset"
             | "desktop"
             | "browser"
+            | "formabi"
             | "goabi"
             | "policy"
             | "handles"

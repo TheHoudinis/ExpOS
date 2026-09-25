@@ -13,12 +13,19 @@ class Call(IntEnum):
     LOG = 1
     FORM_RESOLVE = 2
     HANDLE_AUTHORIZE = 3
+    TIME_NOW = 4
+    IPC_SEND = 5
+    IPC_RECEIVE = 6
     SURFACE_CREATE = 16
     BUFFER_ATTACH = 17
     SURFACE_DAMAGE = 18
     SURFACE_COMMIT = 19
     EVENT_POLL = 20
     BROWSER_NAVIGATE = 32
+    STORAGE_READ = 33
+    STORAGE_WRITE = 34
+    NETWORK_SEND = 35
+    NETWORK_RECEIVE = 36
     PACKAGE_TRANSACTION = 48
 
 
@@ -134,8 +141,29 @@ class Client:
     def authorize(self, operation: int):
         return self.invoke(Call.HANDLE_AUTHORIZE, operation)
 
+    def time_now(self, clock: int = 0) -> int:
+        return self.invoke(Call.TIME_NOW, clock).values[0]
+
+    def ipc_send(self, channel: int, buffer: int, length: int):
+        return self.invoke(Call.IPC_SEND, channel, buffer, length)
+
+    def ipc_receive(self, channel: int, buffer: int, capacity: int):
+        return self.invoke(Call.IPC_RECEIVE, channel, buffer, capacity)
+
     def navigate(self, resource: int):
         self.invoke(Call.BROWSER_NAVIGATE, resource)
+
+    def storage_read(self, object_handle: int, offset: int, buffer: int, length: int):
+        return self.invoke(Call.STORAGE_READ, object_handle, offset, buffer, length)
+
+    def storage_write(self, object_handle: int, offset: int, buffer: int, length: int):
+        return self.invoke(Call.STORAGE_WRITE, object_handle, offset, buffer, length)
+
+    def network_send(self, channel: int, buffer: int, length: int):
+        return self.invoke(Call.NETWORK_SEND, channel, buffer, length)
+
+    def network_receive(self, channel: int, buffer: int, capacity: int):
+        return self.invoke(Call.NETWORK_RECEIVE, channel, buffer, capacity)
 
     def poll(self):
         return self.invoke(Call.EVENT_POLL)

@@ -358,10 +358,11 @@ retained for compatibility, recovery, and development.
   containers/codecs, audio/video output and GPU rendering are absent. A
   verified fetch of `www.youtube.com` may return HTML, but YouTube playback is
   not supported.
-- Go ABI v1 gives Go clients stable call numbers and request/response layouts
-  for Forms, Handles, display surfaces, events, browser navigation and package
-  transactions. The Go SDK and emulator are runnable today; native Go binary
-  loading still depends on the execution-context loader and scheduler.
+- Form ABI v1 freezes language-neutral 72-byte requests, 40-byte responses,
+  call/status numbers, FIN caller identity, and explicit Handles for identity,
+  IPC, display, input/events, time, storage, networking, browser navigation,
+  and package transactions. Rust, Go, C, and Python contracts are tested; the
+  native user-mode call gate and isolated implementation loader remain pending.
 - PIMP accepts only known keys and typed values. DIESE never silently resolves
   an equal-precedence conflict.
 - ExpFS transaction commit validates all staged records and capacity before

@@ -1,0 +1,9 @@
+[package]
+name = "expos-sdk"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+description = "Language-neutral ExpOS Form ABI v1 client for Rust Forms"
+
+[dependencies]
+expos-core = { path = "../../crates/expos-core" }
