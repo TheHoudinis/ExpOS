@@ -1,0 +1,7 @@
+2222
+operator
+expos
+browser
+/https://en.wikipedia.org/wiki/NetBSD
+q
+shutdown

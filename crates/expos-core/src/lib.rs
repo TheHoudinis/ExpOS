@@ -38,8 +38,9 @@ pub use capability::{
 pub use cfc::{Cfc, CfcBinding, CfcCatalog, CfcCatalogError, CfcError, CfcFin};
 pub use diese::{Diagnostic, Diese, Resolution};
 pub use display::{
-    BufferFormat, BufferHandle, DisplayError, DisplayEvent, DisplayEventKind, DisplayServer, Rect,
-    Surface, SurfaceRole, SurfaceState,
+    protocol_info as display_protocol_info, BufferFormat, BufferHandle, DisplayError, DisplayEvent,
+    DisplayEventKind, DisplayFeatures, DisplayProtocolInfo, DisplayServer, Rect, Surface,
+    SurfaceRole, SurfaceState, EXPDISPLAY_PROTOCOL_VERSION,
 };
 pub use execution::{
     AddressSpace, CpuState, ExecutionContext, ExecutionError, ExecutionEvent, ExecutionIdentity,

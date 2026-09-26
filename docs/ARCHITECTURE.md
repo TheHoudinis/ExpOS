@@ -233,8 +233,9 @@ retained for compatibility, recovery, and development.
   bounded recovery region; optional snapping and three focus policies alter the
   real geometry/input path. `windowreset` in the graphical Terminal restores
   every application surface to its default geometry. Settings offers six
-  renderer-defined themes (including Aurora and Rose), seven procedural
-  wallpapers (including Aurora and Mesh), four cursor themes, five bitmap font
+  renderer-defined themes (including Aurora and Rose), 252 persisted wallpaper
+  variants across seven procedural patterns (including Aurora and Mesh), 256
+  accent colors, four cursor themes, five bitmap font
   faces, three independently rasterized font weights and the three display
   presets. Font selections apply globally without changing the fixed glyph
   advance. Window radius, border width and backdrop/titlebar opacity feed the
@@ -245,7 +246,7 @@ retained for compatibility, recovery, and development.
   reveal at that edge, blend translucently, show horizontal labels, and include
   RTC seconds. The eleven-category Settings UI computes compact category/row
   viewports so the selected item remains visible at 480p. Appearance, Windows
-  and Taskbar expose 106 directly working selectable values. Its
+  and Taskbar expose 603 directly working selectable values. Its
   Display page also selects a 60, 75, 120 or 144 Hz compositor presentation
   target and optional VSync. These are software-pacing targets, not negotiated
   physical monitor modes. The Performance page independently controls window
@@ -298,28 +299,26 @@ retained for compatibility, recovery, and development.
   for new records); candidate hashes are compared in constant time and
   plaintext input is wiped after use. This is not yet a claim of lockout,
   hardware-backed keys or a complete modern account-security policy.
-- The state disk is a compact versioned store, not ExpFS. Two 2 KiB slots at
-  fixed LBAs hold accounts and desktop preferences. Each commit writes the
-  inactive slot with a monotonically advancing generation, format/version
-  fields and CRC-32 over its header and payload; boot selects the newest valid
-  slot, preserving the previous generation across an interrupted or corrupt
-  write. Settings persist display mode, theme, wallpaper, cursor, accent,
+- Accounts and desktop preferences are typed records in the ExpFS current-state
+  transaction. The older two-slot EXPOST03 area is read-only migration input;
+  compatible state moves into ExpFS on its next mutation. Settings persist
+  display mode, theme, wallpaper variant, cursor, accent,
   backdrop, pointer speed, presentation rate, VSync, shadows, wallpaper
   effects, presentation policy and desktop/connectivity flags. A tagged compact
-  extension in the existing preference reservation persists and sanitizes 112
+  extension in the preference record persists and sanitizes 620
   accepted states for font face/weight; window radius, border, titlebar,
   opacity, off-screen allowance, snap and focus; taskbar edge, size, alignment,
-  auto-hide, translucency, labels and clock precision; plus 28 reserved
-  interaction states that are stored but not claimed as working controls. This
+  auto-hide, translucency, labels and clock precision. This
   count represents accepted selector states and both states of booleans, not
-  112 independent rows. Older compatible records receive
+  620 independent rows. Older compatible records receive
   conservative extension defaults; they default to 60 Hz with VSync enabled and
   use the low-cost renderer policy. Fresh state remains 480p/60 Hz with effects,
   translucency, animations, cursor shadow and off-screen travel disabled. Form
-  records, notes and PIMP revisions are outside this store and remain volatile.
-  This current CRC journal is plaintext and is not the approved per-CFC AEAD
-  store. It has neither an Argon2id-wrapped random storage key nor the target
-  eight-checkpoint ring and protected installation baseline.
+  records, Notes `.txt` content, Ayo application state and PIMP revisions share
+  the durable ExpFS CFC snapshot and eight-checkpoint recovery ring. The current
+  CRC journal is plaintext and is not the approved per-CFC AEAD store; it has
+  neither an Argon2id-wrapped random storage key nor a protected installation
+  baseline.
 - Network is a Driver Form protected by requester-bound Network Handles and
   PIMP policy. Its current polling RTL8139 path implements Ethernet, ARP,
   DHCP-configured IPv4 with a conservative fallback, ICMP echo,
@@ -330,8 +329,9 @@ retained for compatibility, recovery, and development.
   the RTC, the chain and signatures, and accepts a fixed AES-128-GCM-SHA256
   suite. TLS record and chain storage are fixed-size. Its Web PKI trust store
   is not a general operating-system CA bundle: GlobalSign Root R1 is the
-  default anchor, and DigiCert Global Root G2 is selected only for
-  `duckduckgo.com` and its subdomains. IPv6, physical Wi-Fi, concurrent
+  default anchor, DigiCert Global Root G2 is selected only for
+  `duckduckgo.com`, and ISRG Root X1 only for `wikipedia.org` and their
+  subdomains. IPv6, physical Wi-Fi, concurrent
   sockets, TCP servers and interrupt-driven I/O are explicitly future work.
 - Connectivity settings target a distinct Radio FIN through a requester-bound
   Configure Handle. The manager keeps software policy, PCI/USB presence, driver
@@ -346,7 +346,9 @@ retained for compatibility, recovery, and development.
   URL scheme is encoded for DuckDuckGo's canonical non-JavaScript HTML endpoint
   at `https://duckduckgo.com/html/?q=...`. Navigation follows at most three
   redirects and rejects an HTTPS-to-HTTP downgrade. Search pages are projected
-  into at most eight result titles and links. The allocation-free
+  into at most eight result titles and links. Wikipedia result wrappers are
+  unwrapped before the request; direct article URLs use Wikipedia's live HTTPS
+  REST summary endpoint and render into a bounded scrollable document. The allocation-free
   document core accepts at most 16 KiB, while the native HTTP client retains at
   most the first 14 KiB of a response body; a document contains at most 48
   nodes, 32 CSS rules, 16 scripts, 24 statements per script and 12 click
@@ -385,22 +387,24 @@ The 32-bit alpha is quarantined under `legacy/alpha32`. Its code may be ported,
 but its paths, owner/group modes, file descriptors, sudo-like ACL behavior and
 process naming must not leak into the new public model.
 
-Form contents, relationships and PIMP state are deliberately backed by
-fixed-capacity, in-memory tables at this stage. Account and desktop preference
-mutations are durable through the separate state journal, but that journal is
-not a substitute for the ExpFS block driver, persistent Form graph or FIN
-index.
+Form contents, relationships, PIMP state, accounts and desktop preferences are
+fixed-capacity records in the persistent ExpFS CFC snapshot. Mutations publish
+transactionally with a journal generation; the recovery catalog retains eight
+complete checkpoints. The current storage path is intentionally bounded and is
+not yet the encrypted per-CFC storage design.
 
 Alpha.12 includes the runtime-selectable 480p/720p/1080p empty-start desktop,
 normal case-sensitive text, Notes, a richer graphical Terminal with two-eye
-`neofetch` and window recovery, six themes, seven procedural wallpapers, four
+`neofetch` and window recovery, six themes, 252 wallpaper variants, four
 cursor themes, five font faces, three real weights, all-edge taskbar and bounded
 off-screen window controls, double-buffered presentation
-with atomic surface commits, presentation-bound frame completion, bounded
+  with ExpDisplay v2 atomic surface commits, multi-region damage,
+  presentation-bound frame completion, bounded
 damage coalescing and page synchronization, persistent 60/75/120/144 Hz
 software pacing, opt-in responsive damaged commits and optional VSync, a
 bounded native HTML/CSS/JavaScript Browser with
-DuckDuckGo non-JavaScript HTML search, dual graphical and console login
+  DuckDuckGo non-JavaScript HTML search and a live Wikipedia summary reader,
+  dual graphical and console login
 selection, durable accounts/preferences, Ayo v3 artifact transactions, and
 capability-gated native RTL8139/ARP/IPv4/ICMP/UDP/DNS/TCP/HTTP/TLS networking,
 plus bounded Form-native tunable/event/resource controls inspired by—but not

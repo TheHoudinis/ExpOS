@@ -265,7 +265,7 @@ impl Shell {
         content[1].length = ayo_description.len() as u16;
         seed_content(
             &mut content[2],
-            b"ExpDisplay v1: owned surfaces, attach, damage, atomic commit, focus, z-order, hit testing, XRGB8888",
+            b"ExpDisplay v2: feature discovery, owned surfaces, atomic commit, multi-region damage, frame callbacks",
         );
         seed_content(
             &mut content[3],

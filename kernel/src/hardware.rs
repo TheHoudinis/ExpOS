@@ -29,6 +29,9 @@ pub struct ClockInfo {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RtcTime {
+    pub year: u16,
+    pub month: u8,
+    pub day: u8,
     pub hour: u8,
     pub minute: u8,
     pub second: u8,
@@ -41,6 +44,9 @@ pub fn rtc_time() -> RtcTime {
     let second = read_cmos(0x00);
     let minute = read_cmos(0x02);
     let hour = read_cmos(0x04);
+    let day = read_cmos(0x07);
+    let month = read_cmos(0x08);
+    let year = read_cmos(0x09);
     let status_b = read_cmos(0x0B);
     let convert = |value| {
         if status_b & 0x04 == 0 {
@@ -50,6 +56,9 @@ pub fn rtc_time() -> RtcTime {
         }
     };
     RtcTime {
+        year: 2000 + convert(year) as u16,
+        month: convert(month).clamp(1, 12),
+        day: convert(day).clamp(1, 31),
         hour: convert(hour & 0x7F).min(23),
         minute: convert(minute).min(59),
         second: convert(second).min(59),

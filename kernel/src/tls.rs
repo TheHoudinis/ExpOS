@@ -29,11 +29,13 @@ const GLOBAL_SIGN_ROOT_R1: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/global_sign_root_r1.der"));
 const DIGICERT_GLOBAL_ROOT_G2: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/digicert_global_root_g2.der"));
+const ISRG_ROOT_X1: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/isrg_root_x1.der"));
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TrustAnchor {
     GlobalSignRootR1,
     DigiCertGlobalRootG2,
+    IsrgRootX1,
 }
 
 impl TrustAnchor {
@@ -41,6 +43,7 @@ impl TrustAnchor {
         match self {
             Self::GlobalSignRootR1 => GLOBAL_SIGN_ROOT_R1,
             Self::DigiCertGlobalRootG2 => DIGICERT_GLOBAL_ROOT_G2,
+            Self::IsrgRootX1 => ISRG_ROOT_X1,
         }
     }
 
@@ -48,23 +51,30 @@ impl TrustAnchor {
         match self {
             Self::GlobalSignRootR1 => "GlobalSign_R1",
             Self::DigiCertGlobalRootG2 => "DigiCert_Global_Root_G2",
+            Self::IsrgRootX1 => "ISRG_Root_X1",
         }
     }
 }
 
 fn trust_anchor_for(hostname: &str) -> TrustAnchor {
     const DUCKDUCKGO: &[u8] = b"duckduckgo.com";
+    const WIKIPEDIA: &[u8] = b"wikipedia.org";
 
     let mut host = hostname.as_bytes();
     if host.last() == Some(&b'.') {
         host = &host[..host.len() - 1];
     }
-    let is_duckduckgo = host.eq_ignore_ascii_case(DUCKDUCKGO)
-        || (host.len() > DUCKDUCKGO.len()
-            && host[host.len() - DUCKDUCKGO.len() - 1] == b'.'
-            && host[host.len() - DUCKDUCKGO.len()..].eq_ignore_ascii_case(DUCKDUCKGO));
+    let in_domain = |domain: &[u8]| {
+        host.eq_ignore_ascii_case(domain)
+            || (host.len() > domain.len()
+                && host[host.len() - domain.len() - 1] == b'.'
+                && host[host.len() - domain.len()..].eq_ignore_ascii_case(domain))
+    };
+    let is_duckduckgo = in_domain(DUCKDUCKGO);
     if is_duckduckgo {
         TrustAnchor::DigiCertGlobalRootG2
+    } else if in_domain(WIKIPEDIA) {
+        TrustAnchor::IsrgRootX1
     } else {
         TrustAnchor::GlobalSignRootR1
     }
@@ -400,6 +410,17 @@ mod tests {
                 "unexpected trust anchor for {hostname}"
             );
         }
+    }
+
+    #[test]
+    fn selects_isrg_for_wikipedia_without_trusting_deceptive_suffixes() {
+        for hostname in ["wikipedia.org", "en.wikipedia.org", "EN.WIKIPEDIA.ORG."] {
+            assert_eq!(trust_anchor_for(hostname), TrustAnchor::IsrgRootX1);
+        }
+        assert_eq!(
+            trust_anchor_for("wikipedia.org.example.net"),
+            TrustAnchor::GlobalSignRootR1
+        );
     }
 
     #[test]

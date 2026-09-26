@@ -469,9 +469,11 @@ impl AppKind {
 }
 
 const SETTINGS_CATEGORY_COUNT: usize = 11;
+const ACCENT_COLOR_CHOICES: usize = 256;
+const WALLPAPER_VARIANT_CHOICES: usize = 252;
 const CUSTOMIZATION_VALUE_COUNT: usize = ThemeChoice::ALL.len()
-    + WallpaperChoice::ALL.len()
-    + 4 // accent colors
+    + WALLPAPER_VARIANT_CHOICES
+    + ACCENT_COLOR_CHOICES
     + 3 // backdrop tones
     + 2 // pure-black apps
     + 2 // rounded controls
@@ -700,51 +702,68 @@ const TASKBAR_SIZE_LABELS: [&str; 9] = [
     "28 px", "32 px", "36 px", "40 px", "44 px", "48 px", "52 px", "60 px", "72 px",
 ];
 
-#[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AccentChoice {
-    Green,
-    Cyan,
-    Purple,
-    Amber,
-}
+struct AccentChoice(u8);
 
 impl AccentChoice {
     const fn color(self) -> u32 {
-        match self {
-            Self::Green => color::GREEN,
-            Self::Cyan => color::CYAN,
-            Self::Purple => color::PURPLE,
-            Self::Amber => 0x00B6_8B50,
+        match self.0 {
+            0 => color::GREEN,
+            1 => color::CYAN,
+            2 => color::PURPLE,
+            3 => 0x00B6_8B50,
+            value => spectrum_color(value),
         }
     }
 
     const fn label(self) -> &'static str {
-        match self {
-            Self::Green => "Forest",
-            Self::Cyan => "Ocean",
-            Self::Purple => "Violet",
-            Self::Amber => "Amber",
+        match self.0 {
+            0 => "Forest 1/256",
+            1 => "Ocean 2/256",
+            2 => "Violet 3/256",
+            3 => "Amber 4/256",
+            4..=42 => "Spectrum red",
+            43..=85 => "Spectrum amber",
+            86..=128 => "Spectrum green",
+            129..=171 => "Spectrum cyan",
+            172..=214 => "Spectrum blue",
+            _ => "Spectrum violet",
         }
     }
 
     fn shifted(self, direction: i8) -> Self {
-        match (self, direction < 0) {
-            (Self::Green, false) | (Self::Purple, true) => Self::Cyan,
-            (Self::Cyan, false) | (Self::Amber, true) => Self::Purple,
-            (Self::Purple, false) | (Self::Green, true) => Self::Amber,
-            (Self::Amber, false) | (Self::Cyan, true) => Self::Green,
-        }
+        Self(if direction < 0 {
+            self.0.wrapping_sub(1)
+        } else {
+            self.0.wrapping_add(1)
+        })
     }
 
     const fn from_persisted(value: u8) -> Self {
-        match value {
-            1 => Self::Cyan,
-            2 => Self::Purple,
-            3 => Self::Amber,
-            _ => Self::Green,
-        }
+        Self(value)
     }
+
+    const fn persisted(self) -> u8 {
+        self.0
+    }
+}
+
+const fn spectrum_color(value: u8) -> u32 {
+    let wheel = value as u16 * 6;
+    let raw_sector = wheel / 256;
+    let sector = if raw_sector > 5 { 5 } else { raw_sector };
+    let offset = wheel % 256;
+    let rising = 64 + (offset * 191 / 255) as u8;
+    let falling = 255 - (offset * 191 / 255) as u8;
+    let (red, green, blue) = match sector {
+        0 => (255, rising, 64),
+        1 => (falling, 255, 64),
+        2 => (64, 255, rising),
+        3 => (64, falling, 255),
+        4 => (rising, 64, 255),
+        _ => (255, 64, falling),
+    };
+    ((red as u32) << 16) | ((green as u32) << 8) | blue as u32
 }
 
 #[repr(u8)]
@@ -911,16 +930,6 @@ enum WallpaperChoice {
 }
 
 impl WallpaperChoice {
-    const ALL: [Self; 7] = [
-        Self::Solid,
-        Self::Gradient,
-        Self::Horizon,
-        Self::Grid,
-        Self::Dusk,
-        Self::Aurora,
-        Self::Mesh,
-    ];
-
     const fn label(self) -> &'static str {
         match self {
             Self::Solid => "Solid",
@@ -943,16 +952,6 @@ impl WallpaperChoice {
             6 => Self::Mesh,
             _ => Self::Solid,
         }
-    }
-
-    fn shifted(self, direction: i8) -> Self {
-        let index = self as usize;
-        let next = if direction < 0 {
-            (index + Self::ALL.len() - 1) % Self::ALL.len()
-        } else {
-            (index + 1) % Self::ALL.len()
-        };
-        Self::ALL[next]
     }
 }
 
@@ -998,6 +997,7 @@ impl CursorChoice {
 struct DesktopPreferences {
     theme: ThemeChoice,
     wallpaper: WallpaperChoice,
+    wallpaper_variant: u8,
     cursor: CursorChoice,
     accent: AccentChoice,
     backdrop: BackdropChoice,
@@ -1011,6 +1011,7 @@ struct DesktopPreferences {
     wallpaper_effects: bool,
     responsive_presentation: bool,
     pointer_speed: u8,
+    scroll_speed: u8,
     refresh_rate: state::RefreshRate,
     vsync: bool,
     font_face: framebuffer::FontFace,
@@ -1052,6 +1053,14 @@ impl DesktopPreferences {
 
     const fn card_color(self) -> u32 {
         self.theme.card()
+    }
+
+    const fn wallpaper_color(self) -> u32 {
+        if self.wallpaper_variant < 7 {
+            self.accent.color()
+        } else {
+            spectrum_color(self.wallpaper_variant)
+        }
     }
 
     const fn border_color(self, focused: bool) -> u32 {
@@ -1117,7 +1126,8 @@ impl DesktopPreferences {
         let flags = value.flags;
         Self {
             theme: ThemeChoice::from_persisted(value.theme),
-            wallpaper: WallpaperChoice::from_persisted(value.wallpaper),
+            wallpaper: WallpaperChoice::from_persisted(value.wallpaper % 7),
+            wallpaper_variant: value.wallpaper.min((WALLPAPER_VARIANT_CHOICES - 1) as u8),
             cursor: CursorChoice::from_persisted(value.cursor_theme),
             accent: AccentChoice::from_persisted(value.accent),
             backdrop: BackdropChoice::from_persisted(value.backdrop),
@@ -1132,6 +1142,7 @@ impl DesktopPreferences {
             wallpaper_effects: flags & state::PREF_WALLPAPER_EFFECTS != 0,
             responsive_presentation: flags & state::PREF_RESPONSIVE_PRESENTATION != 0,
             pointer_speed: value.pointer_speed.clamp(1, 3),
+            scroll_speed: value.scroll_speed.min(6),
             refresh_rate: value.refresh_rate,
             vsync: value.vsync,
             font_face: framebuffer::FontFace::from_persisted(value.font_face)
@@ -1163,11 +1174,12 @@ impl DesktopPreferences {
     ) -> state::PersistentPreferences {
         value.display_mode = framebuffer::requested_mode().persisted();
         value.theme = self.theme as u8;
-        value.wallpaper = self.wallpaper as u8;
+        value.wallpaper = self.wallpaper_variant;
         value.cursor_theme = self.cursor as u8;
-        value.accent = self.accent as u8;
+        value.accent = self.accent.persisted();
         value.backdrop = self.backdrop as u8;
         value.pointer_speed = self.pointer_speed;
+        value.scroll_speed = self.scroll_speed;
         value.refresh_rate = self.refresh_rate;
         value.vsync = self.vsync;
         value.font_face = self.font_face.persisted();
@@ -1265,6 +1277,7 @@ struct DesktopState {
     browser_line: [u8; 512],
     browser_len: usize,
     browser_editing: bool,
+    browser_scroll: i32,
     browser_history: [[u8; 512]; BROWSER_HISTORY_CAPACITY],
     browser_history_len: [u16; BROWSER_HISTORY_CAPACITY],
     browser_history_count: usize,
@@ -1674,6 +1687,9 @@ impl DesktopState {
                 .copy_from_slice(&name.as_str().as_bytes()[..notes_name_len]);
             notes_status = "Loaded from ExpFS";
         }
+        let native_apps = crate::expfs_store::load_data_form(cfc, "AyoApps.state")
+            .map(|(content, length)| crate::apps::NativeApps::restore_state(&content[..length]))
+            .unwrap_or_else(crate::apps::NativeApps::new);
         let mut state = Self {
             server,
             broker,
@@ -1697,6 +1713,7 @@ impl DesktopState {
             browser_line: [0; 512],
             browser_len: 0,
             browser_editing: false,
+            browser_scroll: 0,
             browser_history,
             browser_history_len: core::array::from_fn(|index| if index == 0 { 12 } else { 0 }),
             browser_history_count: 1,
@@ -1722,7 +1739,7 @@ impl DesktopState {
             notes_editing_name: false,
             notes_status,
             games: crate::games::GameHub::new(),
-            native_apps: crate::apps::NativeApps::new(),
+            native_apps,
             session,
             cursor: PointerCursor::new(
                 preferences.cursor,
@@ -2019,15 +2036,25 @@ impl DesktopState {
             return true;
         }
         if app == AppKind::Packages {
+            let generation = self.native_apps.persistence_generation();
             if let Some(action) = self.native_apps.handle_manager_click(x, y, rect) {
+                if self.native_apps.persistence_generation() != generation {
+                    self.persist_native_apps();
+                }
                 if action == crate::apps::ManagerAction::Open {
                     self.switch_to(AppKind::Apps);
                 }
                 return true;
             }
         }
-        if app == AppKind::Apps && self.native_apps.handle_app_click(x, y, rect) {
-            return true;
+        if app == AppKind::Apps {
+            let generation = self.native_apps.persistence_generation();
+            if self.native_apps.handle_app_click(x, y, rect) {
+                if self.native_apps.persistence_generation() != generation {
+                    self.persist_native_apps();
+                }
+                return true;
+            }
         }
         if app == AppKind::Notes && self.notes_click(x, y, rect) {
             return true;
@@ -2352,6 +2379,7 @@ impl DesktopState {
             self.browser_history_cursor = self.browser_history_count - 1;
         }
         self.document = document;
+        self.browser_scroll = 0;
         self.log_browser_engine();
         let surface = self.app_surfaces[AppKind::Browser.index()];
         let damage_rect = self
@@ -2450,6 +2478,16 @@ impl DesktopState {
             self.navigate_address(url);
             return;
         }
+        let mut unwrapped = [0_u8; 512];
+        if let Some(length) = unwrap_duckduckgo_target(address, &mut unwrapped) {
+            let target = core::str::from_utf8(&unwrapped[..length]).unwrap_or("");
+            slog!(
+                "EXPOS_BROWSER_UNWRAP provider=duckduckgo target_bytes={}\r\n",
+                length
+            );
+            self.navigate_address(target);
+            return;
+        }
         if !self.network_active() {
             self.navigate("expos://offline", NETWORK_BLOCKED);
             slog!("EXPOS_BROWSER_HTTP_ERROR error=CapabilityDenied\r\n");
@@ -2465,6 +2503,17 @@ impl DesktopState {
             return;
         };
         let mut current_len = current_len;
+        let mut wikipedia_original = [0_u8; 512];
+        let mut wikipedia_original_len = 0;
+        let mut summary_url = [0_u8; 512];
+        if let Some(summary_len) = wikipedia_summary_url(address, &mut summary_url) {
+            wikipedia_original_len = address.len().min(wikipedia_original.len());
+            wikipedia_original[..wikipedia_original_len]
+                .copy_from_slice(&address.as_bytes()[..wikipedia_original_len]);
+            current[..summary_len].copy_from_slice(&summary_url[..summary_len]);
+            current_len = summary_len;
+            slog!("EXPOS_WIKIPEDIA_READER request_bytes={}\r\n", summary_len);
+        }
         for redirect_count in 0..=MAX_BROWSER_REDIRECTS {
             let current_url = core::str::from_utf8(&current[..current_len]).unwrap_or("");
             match network::http_get(
@@ -2525,7 +2574,16 @@ impl DesktopState {
                     let projected = Document::parse_duckduckgo_results(current_url, source).ok();
                     let search_results =
                         projected.as_ref().map_or(0, |results| results.result_count);
-                    let document = if let Some(results) = projected {
+                    let document = if wikipedia_original_len != 0 {
+                        let original =
+                            core::str::from_utf8(&wikipedia_original[..wikipedia_original_len])
+                                .unwrap_or("https://en.wikipedia.org/");
+                        let mut wiki_source = [0_u8; 12 * 1024];
+                        wikipedia_document(response.body(), &mut wiki_source)
+                            .and_then(|length| core::str::from_utf8(&wiki_source[..length]).ok())
+                            .ok_or(expos_core::BrowserError::InvalidDocument)
+                            .and_then(|source| Document::parse(original, source))
+                    } else if let Some(results) = projected {
                         Ok(results.document)
                     } else {
                         Document::parse(current_url, source).or_else(|_| {
@@ -2543,6 +2601,9 @@ impl DesktopState {
                             self.set_document(document);
                             if search_results != 0 {
                                 slog!("EXPOS_SEARCH_RESULTS count={}\r\n", search_results);
+                            }
+                            if wikipedia_original_len != 0 {
+                                slog!("EXPOS_WIKIPEDIA_READY bytes={}\r\n", response.body_len);
                             }
                             slog!(
                                 "EXPOS_BROWSER_HTTP_OK status={} bytes={} peer={}.{}.{}.{}\r\n",
@@ -2615,7 +2676,7 @@ impl DesktopState {
             }
         }
 
-        let mut content_y = rect.y as i32 + 110;
+        let mut content_y = rect.y as i32 + 110 - self.browser_scroll;
         let mut selected: Option<(usize, BrowserText, bool)> = None;
         for styled in self.document.styled_nodes() {
             if styled.node.kind == NodeKind::Title || !styled.style.is_rendered() {
@@ -2846,7 +2907,20 @@ impl DesktopState {
             }
             (SettingsCategory::Appearance, 1) => {
                 self.full_redraw_requested = true;
-                self.preferences.wallpaper = self.preferences.wallpaper.shifted(direction);
+                self.preferences.wallpaper_variant = if direction < 0 {
+                    self.preferences
+                        .wallpaper_variant
+                        .checked_sub(1)
+                        .unwrap_or((WALLPAPER_VARIANT_CHOICES - 1) as u8)
+                } else if self.preferences.wallpaper_variant as usize + 1
+                    >= WALLPAPER_VARIANT_CHOICES
+                {
+                    0
+                } else {
+                    self.preferences.wallpaper_variant + 1
+                };
+                self.preferences.wallpaper =
+                    WallpaperChoice::from_persisted(self.preferences.wallpaper_variant % 7);
                 slog!(
                     "EXPOS_SETTING_CHANGED key=wallpaper value={}\r\n",
                     self.preferences.wallpaper.label()
@@ -3295,7 +3369,16 @@ impl DesktopState {
 
     fn handle_browser_key(&mut self, key: u8) -> bool {
         if !self.browser_editing {
-            return false;
+            let step =
+                state::SCROLL_STEPS[self.preferences.scroll_speed.min(6) as usize] as i32 * 18;
+            match key {
+                KEY_UP => self.browser_scroll = self.browser_scroll.saturating_sub(step).max(0),
+                KEY_DOWN => self.browser_scroll = (self.browser_scroll + step).min(8_192),
+                b' ' => self.browser_scroll = (self.browser_scroll + 280).min(8_192),
+                b'h' => self.browser_scroll = 0,
+                _ => return false,
+            }
+            return true;
         }
         match key {
             b'\n' => {
@@ -3412,6 +3495,25 @@ impl DesktopState {
                 self.notes_status = error.message();
                 slog!("EXPOS_NOTES_SAVE_ERROR error={:?}\r\n", error);
             }
+        }
+    }
+
+    fn persist_native_apps(&mut self) {
+        let mut state = [0_u8; 32];
+        let length = self.native_apps.encode_state(&mut state);
+        match crate::expfs_store::save_data_form(
+            self.broker.cfc(),
+            "AyoApps.state",
+            &state[..length],
+        ) {
+            Ok((_fin, revision)) => {
+                slog!(
+                    "EXPOS_APPS_STATE_SAVED revision={} bytes={}\r\n",
+                    revision,
+                    length
+                );
+            }
+            Err(error) => slog!("EXPOS_APPS_STATE_ERROR error={:?}\r\n", error),
         }
     }
 
@@ -4080,7 +4182,11 @@ fn run_session(
             continue;
         }
         if desktop.active == AppKind::Packages && desktop.app_is_visible(AppKind::Packages) {
+            let generation = desktop.native_apps.persistence_generation();
             if let Some(action) = desktop.native_apps.handle_manager_key(key) {
+                if desktop.native_apps.persistence_generation() != generation {
+                    desktop.persist_native_apps();
+                }
                 if action == crate::apps::ManagerAction::Open {
                     desktop.switch_to(AppKind::Apps);
                     render(&mut desktop);
@@ -4090,12 +4196,15 @@ fn run_session(
                 continue;
             }
         }
-        if desktop.active == AppKind::Apps
-            && desktop.app_is_visible(AppKind::Apps)
-            && desktop.native_apps.handle_app_key(key)
-        {
-            render_active_window(&mut desktop);
-            continue;
+        if desktop.active == AppKind::Apps && desktop.app_is_visible(AppKind::Apps) {
+            let generation = desktop.native_apps.persistence_generation();
+            if desktop.native_apps.handle_app_key(key) {
+                if desktop.native_apps.persistence_generation() != generation {
+                    desktop.persist_native_apps();
+                }
+                render_active_window(&mut desktop);
+                continue;
+            }
         }
         if desktop.active == AppKind::Settings
             && desktop.app_is_visible(AppKind::Settings)
@@ -4338,7 +4447,10 @@ fn draw_wallpaper(preferences: DesktopPreferences) {
         return;
     }
     match preferences.wallpaper {
-        WallpaperChoice::Solid => framebuffer::clear(base),
+        WallpaperChoice::Solid => {
+            framebuffer::clear(base);
+            framebuffer::alpha_rect(0, 0, width, height, preferences.wallpaper_color(), 34);
+        }
         WallpaperChoice::Gradient => {
             let (top, bottom) = match preferences.backdrop {
                 BackdropChoice::Graphite => (0x0019_1D20, 0x0007_090B),
@@ -4346,9 +4458,10 @@ fn draw_wallpaper(preferences: DesktopPreferences) {
                 BackdropChoice::Black => (0x0008_0A0D, 0x0000_0000),
             };
             framebuffer::vertical_gradient(0, 0, width, height, top, bottom);
+            framebuffer::alpha_rect(0, 0, width, height, preferences.wallpaper_color(), 24);
         }
         WallpaperChoice::Horizon => {
-            let accent = preferences.accent.color();
+            let accent = preferences.wallpaper_color();
             framebuffer::vertical_gradient(0, 0, width, height, 0x0005_0A12, base);
             let horizon = height * 3 / 5;
             framebuffer::alpha_rect(0, horizon - 2, width, 5, accent, 120);
@@ -4361,7 +4474,7 @@ fn draw_wallpaper(preferences: DesktopPreferences) {
         }
         WallpaperChoice::Grid => {
             framebuffer::clear(base);
-            let grid = preferences.theme.card();
+            let grid = preferences.wallpaper_color();
             let mut column = 0;
             while column < width {
                 framebuffer::alpha_rect(column, 0, 1, height, grid, 100);
@@ -4380,13 +4493,13 @@ fn draw_wallpaper(preferences: DesktopPreferences) {
                 height * 2 / 3,
                 width,
                 height / 3,
-                preferences.accent.color(),
+                preferences.wallpaper_color(),
                 28,
             );
         }
         WallpaperChoice::Aurora => {
             framebuffer::vertical_gradient(0, 0, width, height, 0x0004_101B, 0x0002_060B);
-            let accent = preferences.accent.color();
+            let accent = preferences.wallpaper_color();
             let band_height = (height / 8).max(24);
             for band in 0..5 {
                 let y = height / 7 + band * band_height;
@@ -4404,7 +4517,7 @@ fn draw_wallpaper(preferences: DesktopPreferences) {
         }
         WallpaperChoice::Mesh => {
             framebuffer::vertical_gradient(0, 0, width, height, base, 0x0002_0508);
-            let accent = preferences.accent.color();
+            let accent = preferences.wallpaper_color();
             let spacing = if width <= 640 { 56 } else { 88 };
             let mut offset = -height;
             while offset < width {
@@ -5024,7 +5137,7 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
         },
         1,
     );
-    let mut content_y = y + 110;
+    let mut content_y = y + 110 - desktop.browser_scroll;
     for styled in desktop.document.styled_nodes() {
         if content_y > bottom - 46 {
             break;
@@ -5130,6 +5243,9 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
         },
         1,
     );
+    if desktop.browser_scroll > 0 {
+        framebuffer::text(x + width - 270, bottom - 18, "SCROLLED", color::CYAN, 1);
+    }
 }
 
 fn draw_terminal(rect: Rect, desktop: &DesktopState) {
@@ -5482,8 +5598,8 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 y,
                 content_width,
                 1,
-                "Wallpaper",
-                "Procedural desktop artwork",
+                "Wallpaper variant",
+                "252 persisted pattern and spectrum combinations",
                 desktop.preferences.wallpaper.label(),
                 SettingControl::Choice,
             );
@@ -5494,7 +5610,7 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 content_width,
                 2,
                 "Accent color",
-                "Used for focus, selections, and switches",
+                "256 persisted colors for focus, selection, and controls",
                 desktop.preferences.accent.label(),
                 SettingControl::Choice,
             );
@@ -6399,7 +6515,7 @@ fn draw_system(rect: Rect, desktop: &DesktopState) {
         y + 98,
         metric_width,
         "Display",
-        "Protocol v1",
+        "Protocol v2",
         color::GREEN,
     );
     metric(
@@ -6674,6 +6790,187 @@ fn wrapped_text(mut x: i32, mut y: i32, width: i32, value: &str, color: u32, sca
     y + if scale <= 1 { 8 } else { 16 }
 }
 
+fn unwrap_duckduckgo_target(address: &str, output: &mut [u8]) -> Option<usize> {
+    let query = address
+        .strip_prefix("https://duckduckgo.com/l/?")
+        .or_else(|| address.strip_prefix("https://www.duckduckgo.com/l/?"))?;
+    let encoded = query
+        .split('&')
+        .find_map(|part| part.strip_prefix("uddg="))?;
+    percent_decode_url(encoded.as_bytes(), output)
+}
+
+fn percent_decode_url(input: &[u8], output: &mut [u8]) -> Option<usize> {
+    let mut source = 0;
+    let mut length = 0;
+    while source < input.len() {
+        let byte = if input[source] == b'%' {
+            let high = hex_digit(*input.get(source + 1)?)?;
+            let low = hex_digit(*input.get(source + 2)?)?;
+            source += 3;
+            (high << 4) | low
+        } else {
+            let byte = input[source];
+            source += 1;
+            byte
+        };
+        if !(0x21..=0x7E).contains(&byte) || length == output.len() {
+            return None;
+        }
+        output[length] = byte;
+        length += 1;
+    }
+    (length != 0).then_some(length)
+}
+
+const fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn wikipedia_summary_url(address: &str, output: &mut [u8]) -> Option<usize> {
+    let rest = address.strip_prefix("https://")?;
+    let slash = rest.find('/')?;
+    let host = &rest[..slash];
+    if host != "wikipedia.org" && !host.ends_with(".wikipedia.org") {
+        return None;
+    }
+    let path = &rest[slash..];
+    let title = path.strip_prefix("/wiki/")?.split(['?', '#']).next()?;
+    if title.is_empty() {
+        return None;
+    }
+    let mut length = 0;
+    for part in [
+        "https://".as_bytes(),
+        host.as_bytes(),
+        "/api/rest_v1/page/summary/".as_bytes(),
+        title.as_bytes(),
+    ] {
+        if length + part.len() > output.len() {
+            return None;
+        }
+        output[length..length + part.len()].copy_from_slice(part);
+        length += part.len();
+    }
+    Some(length)
+}
+
+fn wikipedia_document(json: &[u8], output: &mut [u8]) -> Option<usize> {
+    let mut title = [0_u8; 512];
+    let mut description = [0_u8; 512];
+    let mut extract = [0_u8; 8 * 1024];
+    let title_len = json_string_field(json, b"title", &mut title)?;
+    let description_len = json_string_field(json, b"description", &mut description).unwrap_or(0);
+    let extract_len = json_string_field(json, b"extract", &mut extract)?;
+    let mut length = 0;
+    for part in [
+        b"<style>h1{color:#74bcc7}.wiki{background:#111820;border:1px solid #32404a;padding:8px}a{color:#74bcc7}</style><title>Wikipedia</title><h1>Wikipedia // "
+            .as_slice(),
+        &title[..title_len],
+        b"</h1><p class='wiki'>",
+        &description[..description_len],
+        b"</p>",
+    ] {
+        append_html(&mut length, output, part)?;
+    }
+    let mut cursor = 0;
+    while cursor < extract_len {
+        let remaining = &extract[cursor..extract_len];
+        let limit = remaining.len().min(470);
+        let split = if limit == remaining.len() {
+            limit
+        } else {
+            remaining[..limit]
+                .iter()
+                .rposition(|byte| *byte == b' ')
+                .unwrap_or(limit)
+        };
+        append_html(&mut length, output, b"<p>")?;
+        append_html(&mut length, output, &remaining[..split])?;
+        append_html(&mut length, output, b"</p>")?;
+        cursor += split;
+        while cursor < extract_len && extract[cursor] == b' ' {
+            cursor += 1;
+        }
+    }
+    append_html(
+        &mut length,
+        output,
+        b"<p class='wiki'>Verified HTTPS summary from Wikipedia. Use Up, Down, Space, or H to read.</p>",
+    )?;
+    Some(length)
+}
+
+fn json_string_field(json: &[u8], field: &[u8], output: &mut [u8]) -> Option<usize> {
+    let mut pattern = [0_u8; 40];
+    if field.len() + 4 > pattern.len() {
+        return None;
+    }
+    pattern[0] = b'"';
+    pattern[1..1 + field.len()].copy_from_slice(field);
+    pattern[1 + field.len()..4 + field.len()].copy_from_slice(b"\":\"");
+    let start = find_bytes_local(json, &pattern[..field.len() + 4])? + field.len() + 4;
+    let mut source = start;
+    let mut length = 0;
+    while source < json.len() && length < output.len() {
+        let byte = json[source];
+        source += 1;
+        if byte == b'"' {
+            return Some(length);
+        }
+        if byte == b'\\' {
+            let escaped = *json.get(source)?;
+            source += 1;
+            let decoded = match escaped {
+                b'"' | b'\\' | b'/' => escaped,
+                b'n' | b'r' | b't' => b' ',
+                b'u' => {
+                    source = source.checked_add(4)?;
+                    b'?'
+                }
+                _ => return None,
+            };
+            output[length] = decoded;
+            length += 1;
+        } else if byte.is_ascii() && byte >= b' ' {
+            output[length] = match byte {
+                b'<' | b'>' | b'&' => b' ',
+                _ => byte,
+            };
+            length += 1;
+        } else if byte & 0xC0 != 0x80 {
+            output[length] = b'?';
+            length += 1;
+        }
+    }
+    None
+}
+
+fn append_html(length: &mut usize, output: &mut [u8], bytes: &[u8]) -> Option<()> {
+    let end = length.checked_add(bytes.len())?;
+    if end > output.len() {
+        return None;
+    }
+    output[*length..end].copy_from_slice(bytes);
+    *length = end;
+    Some(())
+}
+
+fn find_bytes_local(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    (!needle.is_empty())
+        .then(|| {
+            haystack
+                .windows(needle.len())
+                .position(|window| window == needle)
+        })
+        .flatten()
+}
+
 fn encode_search_url(query: &str, output: &mut [u8]) -> Option<usize> {
     let prefix = SEARCH_PREFIX.as_bytes();
     if prefix.len() > output.len() {
@@ -6817,6 +7114,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn duckduckgo_redirects_are_unwrapped_before_the_network_request() {
+        let mut output = [0_u8; 512];
+        let input = "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FRust_%28programming_language%29&rut=ignored";
+        let length = unwrap_duckduckgo_target(input, &mut output).expect("wrapped target");
+        assert_eq!(
+            core::str::from_utf8(&output[..length]).unwrap(),
+            "https://en.wikipedia.org/wiki/Rust_(programming_language)"
+        );
+    }
+
+    #[test]
+    fn wikipedia_articles_use_the_live_bounded_summary_endpoint() {
+        let mut output = [0_u8; 512];
+        let length = wikipedia_summary_url("https://en.wikipedia.org/wiki/NetBSD", &mut output)
+            .expect("Wikipedia article URL");
+        assert_eq!(
+            core::str::from_utf8(&output[..length]).unwrap(),
+            "https://en.wikipedia.org/api/rest_v1/page/summary/NetBSD"
+        );
+        assert!(wikipedia_summary_url("https://example.org/wiki/NetBSD", &mut output).is_none());
+    }
+
+    #[test]
+    fn wikipedia_json_becomes_a_readable_safe_document() {
+        let json = br#"{"title":"NetBSD","description":"Unix-like operating system","extract":"NetBSD is a free and open-source operating system. It emphasizes portability."}"#;
+        let mut html = [0_u8; 2048];
+        let length = wikipedia_document(json, &mut html).expect("summary document");
+        let html = core::str::from_utf8(&html[..length]).unwrap();
+        assert!(html.contains("Wikipedia // NetBSD"));
+        assert!(html.contains("Unix-like operating system"));
+        assert!(html.contains("It emphasizes portability."));
+        Document::parse("https://en.wikipedia.org/wiki/NetBSD", html)
+            .expect("safe bounded document");
+    }
+
+    #[test]
     fn performance_settings_are_conservative_and_have_a_dedicated_category() {
         let preferences = DesktopPreferences::from_persistent(state::PersistentPreferences::new());
         assert!(!preferences.window_shadows);
@@ -6829,10 +7162,10 @@ mod tests {
     }
 
     #[test]
-    fn customization_pages_expose_more_than_one_hundred_real_values() {
-        assert_eq!(CUSTOMIZATION_VALUE_COUNT, 106);
-        const { assert!(CUSTOMIZATION_VALUE_COUNT >= 100) };
-        const { assert!(state::CUSTOMIZATION_SELECTABLE_VALUES >= 100) };
+    fn customization_pages_expose_more_than_five_hundred_real_values() {
+        assert_eq!(CUSTOMIZATION_VALUE_COUNT, 603);
+        const { assert!(CUSTOMIZATION_VALUE_COUNT >= 500) };
+        const { assert!(state::CUSTOMIZATION_SELECTABLE_VALUES >= 500) };
         assert_eq!(SettingsCategory::Appearance.row_count(), 8);
         assert_eq!(SettingsCategory::Windows.row_count(), 8);
         assert_eq!(SettingsCategory::Taskbar.row_count(), 7);

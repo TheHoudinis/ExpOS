@@ -146,6 +146,7 @@ const APPS: [PackageApp; PACKAGE_COUNT] = [
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ManagerAction {
     Changed,
+    Installed,
     Open,
 }
 
@@ -159,6 +160,7 @@ pub struct NativeApps {
     palette: usize,
     pixels: u64,
     started_at: u64,
+    persistence_generation: u32,
     notice: &'static str,
 }
 
@@ -174,6 +176,7 @@ impl NativeApps {
             palette: 0,
             pixels: 0,
             started_at: hardware::timestamp(),
+            persistence_generation: 0,
             notice: "Select a package, then install its signed built-in artifact.",
         }
     }
@@ -187,6 +190,7 @@ impl NativeApps {
                 if self.is_installed(self.selected) {
                     self.active = self.selected;
                     self.clear_input();
+                    self.mark_persistent_change();
                     return Some(ManagerAction::Open);
                 }
                 return Some(self.install_selected());
@@ -220,6 +224,7 @@ impl NativeApps {
             {
                 self.active = self.selected;
                 self.clear_input();
+                self.mark_persistent_change();
                 return Some(ManagerAction::Open);
             }
         }
@@ -228,8 +233,50 @@ impl NativeApps {
 
     fn install_selected(&mut self) -> ManagerAction {
         self.installed |= 1 << self.selected;
+        self.mark_persistent_change();
         self.notice = "Verified -> DIESE -> PIMP -> installed Interface Form.";
-        ManagerAction::Changed
+        ManagerAction::Installed
+    }
+
+    pub const fn persistence_generation(&self) -> u32 {
+        self.persistence_generation
+    }
+
+    fn mark_persistent_change(&mut self) {
+        self.persistence_generation = self.persistence_generation.wrapping_add(1).max(1);
+    }
+
+    /// Serialize the durable shared state of the Ayo app host. Typed input is
+    /// deliberately transient; installed packages and tool results survive.
+    pub fn encode_state(&self, out: &mut [u8; 32]) -> usize {
+        out.fill(0);
+        out[..4].copy_from_slice(b"AYO1");
+        out[4..8].copy_from_slice(&self.installed.to_le_bytes());
+        out[8] = self.active as u8;
+        out[9] = self.palette as u8;
+        out[10..14].copy_from_slice(&self.counter.to_le_bytes());
+        out[14..22].copy_from_slice(&self.pixels.to_le_bytes());
+        22
+    }
+
+    pub fn restore_state(bytes: &[u8]) -> Self {
+        let mut state = Self::new();
+        if bytes.len() < 22 || &bytes[..4] != b"AYO1" {
+            return state;
+        }
+        let installed = u32::from_le_bytes(bytes[4..8].try_into().unwrap_or([0; 4]));
+        state.installed = installed & ((1_u32 << PACKAGE_COUNT) - 1);
+        state.active = (bytes[8] as usize).min(PACKAGE_COUNT - 1);
+        if !state.is_installed(state.active) {
+            state.active = (0..PACKAGE_COUNT)
+                .find(|index| state.is_installed(*index))
+                .unwrap_or(0);
+        }
+        state.palette = (bytes[9] as usize) % PALETTE.len();
+        state.counter = u32::from_le_bytes(bytes[10..14].try_into().unwrap_or([0; 4]));
+        state.pixels = u64::from_le_bytes(bytes[14..22].try_into().unwrap_or([0; 8]));
+        state.notice = "Restored installed apps and tool state from ExpFS.";
+        state
     }
 
     const fn is_installed(&self, index: usize) -> bool {
@@ -344,17 +391,21 @@ impl NativeApps {
                 if self.active == 1 {
                     self.counter = self.counter.saturating_add(1);
                     self.clear_input();
+                    self.mark_persistent_change();
                 } else if self.active == 16 {
                     self.counter = self.counter.saturating_add(1);
+                    self.mark_persistent_change();
                 }
                 true
             }
             b' ' if self.active == 16 => {
                 self.counter = self.counter.saturating_add(1);
+                self.mark_persistent_change();
                 true
             }
             b' ' if self.active == 5 => {
                 self.palette = (self.palette + 1) % PALETTE.len();
+                self.mark_persistent_change();
                 true
             }
             byte if (byte.is_ascii_graphic() || byte == b' ')
@@ -378,10 +429,12 @@ impl NativeApps {
             let column = ((local_x - 210) / 32) as u64;
             let row = ((local_y - 116) / 32) as u64;
             self.pixels ^= 1_u64 << (row * 8 + column);
+            self.mark_persistent_change();
             return true;
         }
         if self.active == 16 && (220..500).contains(&local_x) && (170..260).contains(&local_y) {
             self.counter = self.counter.saturating_add(1);
+            self.mark_persistent_change();
             return true;
         }
         false
@@ -397,6 +450,7 @@ impl NativeApps {
             if self.is_installed(index) {
                 self.active = index;
                 self.clear_input();
+                self.mark_persistent_change();
                 break;
             }
         }
@@ -485,7 +539,10 @@ impl NativeApps {
                 );
             }
             3 => {
+                let now = hardware::rtc_time();
                 framebuffer::text(x + 24, y + 20, "MONTH VIEW", color::CYAN, 2);
+                framebuffer::text(x + 190, y + 24, month_name(now.month), color::WHITE, 1);
+                number(x + 288, y + 24, now.year as u64, color::MUTED, 1);
                 framebuffer::text(
                     x + 24,
                     y + 52,
@@ -500,17 +557,15 @@ impl NativeApps {
                         x + 24 + column * 48,
                         y + 84 + row * 34,
                         (day + 1) as u64,
-                        if day == 0 { color::GREEN } else { color::INK },
+                        if day + 1 == now.day as i32 {
+                            color::GREEN
+                        } else {
+                            color::INK
+                        },
                         1,
                     );
                 }
-                framebuffer::text(
-                    x + 24,
-                    y + 266,
-                    "DATE SERVICE SUPPORT IS NEXT; CLOCK IS LIVE.",
-                    color::MUTED,
-                    1,
-                );
+                framebuffer::text(x + 24, y + 266, "LIVE CMOS DATE SERVICE", color::MUTED, 1);
             }
             5 => {
                 framebuffer::rect(x + 24, y + 30, width - 48, 170, PALETTE[self.palette]);
@@ -582,6 +637,14 @@ impl NativeApps {
                 framebuffer::text(x + 28, y + 112, "INTERFACE FORM", color::CYAN, 1);
                 framebuffer::line(x + 98, y + 132, x + 98, y + 174, color::BORDER);
                 framebuffer::text(x + 28, y + 182, "EXPDisplay HANDLE", color::GREEN, 1);
+                framebuffer::text(x + 28, y + 224, "EXPFS GENERATION", color::MUTED, 1);
+                number(
+                    x + 166,
+                    y + 224,
+                    crate::expfs_store::generation().unwrap_or(0),
+                    color::WHITE,
+                    1,
+                );
             }
             10 => {
                 for row in 0..6 {
@@ -781,6 +844,24 @@ fn metric(x: i32, y: i32, label: &str, value: &str, accent: u32) {
     framebuffer::text(x + 16, y + 32, value, accent, 1);
 }
 
+fn month_name(month: u8) -> &'static str {
+    match month {
+        1 => "JANUARY",
+        2 => "FEBRUARY",
+        3 => "MARCH",
+        4 => "APRIL",
+        5 => "MAY",
+        6 => "JUNE",
+        7 => "JULY",
+        8 => "AUGUST",
+        9 => "SEPTEMBER",
+        10 => "OCTOBER",
+        11 => "NOVEMBER",
+        12 => "DECEMBER",
+        _ => "UNKNOWN",
+    }
+}
+
 fn parse_u64(bytes: &[u8]) -> u64 {
     bytes
         .iter()
@@ -894,5 +975,27 @@ mod tests {
         assert_eq!(eval_expression(b"12/0"), 12);
         assert_eq!(fnv1a(b"ExpOS"), fnv1a(b"ExpOS"));
         assert_ne!(fnv1a(b"ExpOS"), fnv1a(b"expos"));
+    }
+
+    #[test]
+    fn durable_app_state_roundtrips_without_restoring_transient_input() {
+        let mut apps = NativeApps::new();
+        apps.selected = 6;
+        assert_eq!(apps.install_selected(), ManagerAction::Installed);
+        apps.active = 6;
+        apps.pixels = 0x55AA;
+        apps.counter = 42;
+        apps.palette = 4;
+        apps.input[..4].copy_from_slice(b"temp");
+        apps.input_len = 4;
+        let mut wire = [0_u8; 32];
+        let length = apps.encode_state(&mut wire);
+        let restored = NativeApps::restore_state(&wire[..length]);
+        assert!(restored.is_installed(6));
+        assert_eq!(restored.active, 6);
+        assert_eq!(restored.pixels, 0x55AA);
+        assert_eq!(restored.counter, 42);
+        assert_eq!(restored.palette, 4);
+        assert_eq!(restored.input_len, 0);
     }
 }

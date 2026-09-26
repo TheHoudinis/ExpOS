@@ -240,9 +240,28 @@ pub fn load_text_form(cfc: CfcFin) -> Option<(Text, [u8; FORM_CONTENT_CAPACITY],
     })
 }
 
+pub fn load_data_form(cfc: CfcFin, name: &str) -> Option<([u8; FORM_CONTENT_CAPACITY], usize)> {
+    let snapshot = loaded_snapshot(cfc)?;
+    snapshot.forms.iter().flatten().find_map(|stored| {
+        (stored.form.kind == FormKind::Data
+            && stored.form.lifecycle == Lifecycle::Active
+            && stored.form.name.as_str() == name)
+            .then_some((stored.content, stored.content_len as usize))
+    })
+}
+
 /// Atomically create or revise a named text Data Form in the active CFC.
 pub fn save_text_form(cfc: CfcFin, name: &str, bytes: &[u8]) -> Result<(Fin, u32), StoreError> {
-    if !name.ends_with(".txt") || bytes.len() > FORM_CONTENT_CAPACITY {
+    if !name.ends_with(".txt") {
+        return Err(StoreError::InvalidSnapshot);
+    }
+    save_data_form(cfc, name, bytes)
+}
+
+/// Commit application state through the same generic Data Form transaction
+/// used by text documents and shell-created data.
+pub fn save_data_form(cfc: CfcFin, name: &str, bytes: &[u8]) -> Result<(Fin, u32), StoreError> {
+    if bytes.len() > FORM_CONTENT_CAPACITY {
         return Err(StoreError::InvalidSnapshot);
     }
     let name = Text::new(name).map_err(|_| StoreError::InvalidSnapshot)?;

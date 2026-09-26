@@ -27,6 +27,7 @@ fn main() {
             "trust/digicert_global_root_g2.pem",
             "digicert_global_root_g2.der",
         ),
+        ("trust/isrg_root_x1.pem", "isrg_root_x1.der"),
     ] {
         println!("cargo:rerun-if-changed={source}");
         let pem = fs::read_to_string(source).expect("read HTTPS trust anchor");

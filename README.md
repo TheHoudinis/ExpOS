@@ -25,10 +25,10 @@ ExpOS is the Form-native operating system described by
   readiness watches, and shell-runtime-local resource accounting with DIESE-gated
   mutation;
 - ExpDisplay, a runtime-selectable 640x480, 1280x720 or 1920x1080 software
-  compositor with Form-owned surfaces, atomic commits, presentation-complete
-  frame events, bounded damage-region scanout, double-buffered Bochs/QEMU
-  output and selectable 60, 75, 120 or 144 Hz pacing; fresh state starts at
-  the lowest safe choices, 640x480 and 60 Hz;
+  compositor whose additive v2 protocol advertises Form-owned surfaces, atomic
+  commits, multi-region damage, presentation-complete frame events and alpha
+  buffers; bounded damage-region scanout, double-buffered Bochs/QEMU output and
+  selectable 60, 75, 120 or 144 Hz pacing remain compatible with Form ABI v1;
 - a flat dark desktop with an application menu and taskbar, no default or
   pinned applications, and movable, closable, minimizable and maximizable
   windows;
@@ -48,7 +48,8 @@ ExpOS is the Form-native operating system described by
 - a graphical Browser that fetches and renders bounded `http://` and
   `https://` documents, applies a small native CSS subset, runs a deterministic
   DOM-mutation/click-handler JavaScript subset, and searches DuckDuckGo's
-  non-JavaScript HTML endpoint from the address bar;
+  non-JavaScript HTML endpoint from the address bar; direct Wikipedia article
+  links use its live HTTPS summary endpoint and render as a scrollable reader;
 - graphical and console login for Operator, Power and Guest authority;
 - a bright white-on-black native command deck with cyan/green identity
   accents, a structured startup banner, grouped help, and aligned system
@@ -246,12 +247,12 @@ click/sloppy/pointer focus. Off-screen travel is configurable from contained to
 reachable. The Taskbar page controls bottom/top/left/right placement, nine
 panel sizes, start/center/end app alignment, edge-reveal auto-hide,
 translucency, horizontal app labels and hardware-RTC seconds. The cursor shadow
-is independently switchable. Across Appearance, Windows and Taskbar, 106
+is independently switchable. Across Appearance, Windows and Taskbar, 603
 selectable values are directly wired to rendering, geometry or interaction.
-The compact persistent-state extension validates 112 accepted states across
-its selectors and booleans, including 28 reserved interaction states that are
-stored but not advertised as working desktop controls. These counts overlap and
-are not additive.
+That includes 256 persisted accent colors and 252 wallpaper variants across
+seven procedural patterns. The compact persistent-state schema validates 620
+selectable states in total; the schema and desktop counts overlap and are not
+additive.
 
 Resolution can be selected as 480p (640x480), 720p (1280x720) or 1080p
 (1920x1080); it is saved immediately and applied when the desktop is reopened.
@@ -277,7 +278,9 @@ select a row, Enter or Space activates it, and `+`/`-` move choices.
 ExpDisplay adopts compositor concepts also used by Wayland—client-owned
 surfaces, pending state published by an atomic commit, explicit surface damage
 and frame completion after presentation—but it is a Form-native protocol, not
-a Wayland wire protocol or `libwayland` compatibility layer. Consecutive pure
+a Wayland wire protocol or `libwayland` compatibility layer. ExpDisplay v2 adds
+feature discovery and atomically validated multi-region damage while preserving
+the frozen Form ABI v1 boundary. Consecutive pure
 mouse-motion packets are combined into a bounded compositor update; keyboard
 input and mouse-button transitions are retained in order.
 
@@ -303,12 +306,16 @@ The native stack supports:
 - address-bar search through the canonical
   `https://duckduckgo.com/html/?q=...` endpoint, with at most three redirects,
   rejection of HTTPS-to-HTTP downgrades, and projection of up to eight result
-  titles and links into the bounded document model.
+  titles and links into the bounded document model;
+- a direct Wikipedia reader that unwraps DuckDuckGo result redirects, requests
+  the live REST summary over verified HTTPS, and provides bounded scrolling.
 
 Use `ifconfig`, `dhcp`, `ping`, `dns`, `fetch` and `netstat` in the console to inspect
 and exercise the network. Type an `http://` or `https://` URL in Browser to
 fetch it through the same native stack. `make https-check` performs a verified
-fetch of the HTML returned by `https://www.youtube.com/`.
+fetch of the HTML returned by `https://www.youtube.com/`; `make
+wikipedia-check` boots QEMU and proves a live `en.wikipedia.org` article reaches
+the reader.
 
 Settings reports Ethernet carrier state and separately reports Wi-Fi and
 Bluetooth hardware presence, driver state and requested power state. ExpOS
@@ -330,9 +337,10 @@ YouTube playback work.
 IPv6, physical Wi-Fi drivers, a USB host/Bluetooth data path, concurrent
 sockets, TCP servers and downloads are also absent. HTTP, TLS record and
 certificate-chain buffers are fixed and bounded. The embedded Web PKI store is
-not a general CA bundle: GlobalSign Root R1 is the default anchor, while
-DigiCert Global Root G2 is selected only for `duckduckgo.com` and its
-subdomains. Sites chaining to another root are not accepted.
+not a general CA bundle: GlobalSign Root R1 is the default anchor, DigiCert
+Global Root G2 is selected only for `duckduckgo.com`, and ISRG Root X1 only for
+`wikipedia.org` and their subdomains. Sites chaining to another root are not
+accepted.
 
 ## Ayo v3
 

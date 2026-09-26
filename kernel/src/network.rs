@@ -68,6 +68,7 @@ const UDP_HEADER_SIZE: usize = 8;
 const TCP_HEADER_SIZE: usize = 20;
 const TCP_SYN_HEADER_SIZE: usize = 24;
 const DNS_PACKET_CAPACITY: usize = 512;
+const DNS_CACHE_HOST_CAPACITY: usize = 96;
 const HTTP_REQUEST_CAPACITY: usize = 768;
 const HTTP_WIRE_CAPACITY: usize = 16 * 1024;
 pub const HTTP_BODY_CAPACITY: usize = 14 * 1024;
@@ -328,6 +329,9 @@ struct NetworkStack {
     next_ip_identification: u16,
     next_ephemeral_port: u16,
     next_dns_identifier: u16,
+    cached_dns_host: [u8; DNS_CACHE_HOST_CAPACITY],
+    cached_dns_host_len: u8,
+    cached_dns_address: [u8; 4],
     configuration: Ipv4Configuration,
     dma: DmaBuffers,
 }
@@ -352,6 +356,9 @@ impl NetworkStack {
             next_ip_identification: 1,
             next_ephemeral_port: 49_152,
             next_dns_identifier: 1,
+            cached_dns_host: [0; DNS_CACHE_HOST_CAPACITY],
+            cached_dns_host_len: 0,
+            cached_dns_address: [0; 4],
             configuration: Ipv4Configuration::static_fallback(),
             dma: DmaBuffers::new(),
         }
@@ -902,11 +909,17 @@ impl NetworkStack {
             return Ok(address);
         }
         validate_hostname(hostname)?;
+        let hostname_bytes = hostname.as_bytes();
+        if hostname_bytes.len() == self.cached_dns_host_len as usize
+            && self.cached_dns_host[..hostname_bytes.len()].eq_ignore_ascii_case(hostname_bytes)
+        {
+            return Ok(self.cached_dns_address);
+        }
         let identifier = self.allocate_dns_identifier();
         let mut request = [0_u8; DNS_PACKET_CAPACITY];
         let request_length = build_dns_query(identifier, hostname, &mut request)?;
         let mut response = [0_u8; DNS_PACKET_CAPACITY];
-        match self.udp_exchange(
+        let address = match self.udp_exchange(
             self.configuration.dns_server,
             53,
             &request[..request_length],
@@ -915,7 +928,14 @@ impl NetworkStack {
             Ok(reply) => parse_dns_a_response(identifier, &response[..reply.bytes]),
             Err(NetworkError::ReplyTimeout) => Err(NetworkError::DnsTimeout),
             Err(error) => Err(error),
+        }?;
+        if hostname_bytes.len() <= self.cached_dns_host.len() {
+            self.cached_dns_host.fill(0);
+            self.cached_dns_host[..hostname_bytes.len()].copy_from_slice(hostname_bytes);
+            self.cached_dns_host_len = hostname_bytes.len() as u8;
+            self.cached_dns_address = address;
         }
+        Ok(address)
     }
 
     #[allow(clippy::too_many_arguments)]

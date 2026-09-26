@@ -127,6 +127,7 @@ pub const SCROLL_SPEED_CHOICES: u8 = SCROLL_STEPS.len() as u8;
 pub const FOCUS_POLICY_CHOICES: u8 = FOCUS_POLICY_NAMES.len() as u8;
 pub const WINDOW_OPACITY_CHOICES: u8 = WINDOW_OPACITY_ALPHA.len() as u8;
 pub const CUSTOMIZATION_BOOLEAN_CONTROLS: usize = 8;
+pub const COLOR_AND_WALLPAPER_CHOICES: usize = 256 + 252;
 
 /// Total number of distinct selectable values represented by the customization
 /// extension. This counts each value of a selector and both states of every
@@ -147,7 +148,8 @@ pub const CUSTOMIZATION_SELECTABLE_VALUES: usize = FONT_FACE_CHOICES as usize
     + SCROLL_SPEED_CHOICES as usize
     + FOCUS_POLICY_CHOICES as usize
     + WINDOW_OPACITY_CHOICES as usize
-    + CUSTOMIZATION_BOOLEAN_CONTROLS * 2;
+    + CUSTOMIZATION_BOOLEAN_CONTROLS * 2
+    + COLOR_AND_WALLPAPER_CHOICES;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StateError {
@@ -1143,9 +1145,9 @@ mod tests {
     }
 
     #[test]
-    fn customization_surface_exposes_more_than_one_hundred_real_values() {
-        assert_eq!(CUSTOMIZATION_SELECTABLE_VALUES, 112);
-        const { assert!(CUSTOMIZATION_SELECTABLE_VALUES >= 100) };
+    fn customization_surface_exposes_more_than_five_hundred_real_values() {
+        assert_eq!(CUSTOMIZATION_SELECTABLE_VALUES, 620);
+        const { assert!(CUSTOMIZATION_SELECTABLE_VALUES >= 500) };
     }
 
     #[test]

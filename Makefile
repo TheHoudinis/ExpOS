@@ -21,7 +21,7 @@ GENESIS_ISO := $(BUILD)/ExpOS-0.9-x86_64.iso
 OVMF_CODE  ?= /usr/share/edk2/x64/OVMF_CODE.4m.fd
 OVMF_VARS  ?= /usr/share/edk2/x64/OVMF_VARS.4m.fd
 
-.PHONY: all iso genesis-iso genesis-check test check display-check session-check network-check internet-check https-check search-check persistence-check run debug clean legacy-alpha-check run-alpha ayo sdk rust-sdk go-sdk c-sdk python-sdk sdk-cli-check kernel-build genesis-kernel-build
+.PHONY: all iso genesis-iso genesis-check test check display-check session-check network-check internet-check https-check search-check wikipedia-check persistence-check run debug clean legacy-alpha-check run-alpha ayo sdk rust-sdk go-sdk c-sdk python-sdk sdk-cli-check kernel-build genesis-kernel-build
 
 all: test check display-check session-check network-check persistence-check ayo sdk python-runtime-check python-check budget-check uefi-check bootmode-check startup-check
 
@@ -355,6 +355,18 @@ search-check: $(ISO)
 	grep -q "EXPOS_BROWSER_HTTP_OK status=200" $(BUILD)/search-serial.log
 	! grep -q "EXPOS_BROWSER_HTTP_ERROR" $(BUILD)/search-serial.log
 	@echo ">>> EXPOS DUCKDUCKGO HTML SEARCH TEST PASSED <<<"
+
+wikipedia-check: $(ISO)
+	rm -f $(BUILD)/wikipedia-serial.log
+	rm -f $(BUILD)/wikipedia-state.img
+	truncate -s $(STATE_SIZE) $(BUILD)/wikipedia-state.img
+	set +e; timeout 60 $(QEMU) -drive file=$(BUILD)/wikipedia-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-wikipedia-input.txt > $(BUILD)/wikipedia-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
+	grep -q "EXPOS_WIKIPEDIA_READER request_bytes=" $(BUILD)/wikipedia-serial.log
+	grep -q "EXPOS_TLS_VERIFIED host=en.wikipedia.org version=1.3" $(BUILD)/wikipedia-serial.log
+	grep -q "EXPOS_WIKIPEDIA_READY bytes=" $(BUILD)/wikipedia-serial.log
+	grep -q "EXPOS_BROWSER_HTTP_OK status=200" $(BUILD)/wikipedia-serial.log
+	! grep -q "EXPOS_BROWSER_HTTP_ERROR" $(BUILD)/wikipedia-serial.log
+	@echo ">>> EXPOS LIVE WIKIPEDIA READER TEST PASSED <<<"
 
 persistence-check: $(ISO)
 	rm -f $(BUILD)/persistence-state.img $(BUILD)/persistence-write.log $(BUILD)/persistence-read.log

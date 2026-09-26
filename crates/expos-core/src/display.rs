@@ -10,6 +10,56 @@ use crate::{Fin, Text};
 const MAX_SURFACES: usize = 16;
 const MAX_DISPLAY_EVENTS: usize = 32;
 
+/// ExpDisplay v2 extends the original protocol without changing Form ABI v1.
+/// Clients can negotiate these capabilities before using optional operations.
+pub const EXPDISPLAY_PROTOCOL_VERSION: u16 = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DisplayFeatures(u32);
+
+impl DisplayFeatures {
+    pub const ATOMIC_SURFACE_STATE: Self = Self(1 << 0);
+    pub const DAMAGE_REGIONS: Self = Self(1 << 1);
+    pub const MULTI_REGION_DAMAGE: Self = Self(1 << 2);
+    pub const FRAME_CALLBACKS: Self = Self(1 << 3);
+    pub const OUTPUT_DAMAGE: Self = Self(1 << 4);
+    pub const ALPHA_BUFFERS: Self = Self(1 << 5);
+
+    pub const fn contains(self, feature: Self) -> bool {
+        self.0 & feature.0 == feature.0
+    }
+
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DisplayProtocolInfo {
+    pub version: u16,
+    pub max_surfaces: u16,
+    pub max_events: u16,
+    pub features: DisplayFeatures,
+}
+
+pub const fn protocol_info() -> DisplayProtocolInfo {
+    DisplayProtocolInfo {
+        version: EXPDISPLAY_PROTOCOL_VERSION,
+        max_surfaces: MAX_SURFACES as u16,
+        max_events: MAX_DISPLAY_EVENTS as u16,
+        features: DisplayFeatures::ATOMIC_SURFACE_STATE
+            .union(DisplayFeatures::DAMAGE_REGIONS)
+            .union(DisplayFeatures::MULTI_REGION_DAMAGE)
+            .union(DisplayFeatures::FRAME_CALLBACKS)
+            .union(DisplayFeatures::OUTPUT_DAMAGE)
+            .union(DisplayFeatures::ALPHA_BUFFERS),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rect {
     pub x: i16,
@@ -238,6 +288,41 @@ impl DisplayServer {
             .ok_or(DisplayError::Invalid)?;
         add_pending_damage(surface, clipped);
         Ok(())
+    }
+
+    /// Stage multiple damage rectangles as one validated v2 request.
+    /// Validation is atomic: an invalid rectangle leaves pending state intact.
+    pub fn damage_regions(
+        &mut self,
+        owner: Fin,
+        surface_id: u32,
+        regions: &[Rect],
+    ) -> Result<usize, DisplayError> {
+        if regions.is_empty() {
+            return Err(DisplayError::Invalid);
+        }
+        let index = self.owned_index(owner, surface_id)?;
+        let bounds = self.surfaces[index]
+            .as_ref()
+            .map(|surface| surface_bounds(surface.pending.rect))
+            .ok_or(DisplayError::NotFound)?;
+        for region in regions {
+            if region.width == 0
+                || region.height == 0
+                || intersect_damage(*region, bounds).is_none()
+            {
+                return Err(DisplayError::Invalid);
+            }
+        }
+        let surface = self.surfaces[index]
+            .as_mut()
+            .expect("owned surface remains populated");
+        for region in regions {
+            let clipped = intersect_damage(*region, bounds)
+                .expect("multi-region damage was validated before mutation");
+            add_pending_damage(surface, clipped);
+        }
+        Ok(regions.len())
     }
 
     pub fn set_position(
@@ -989,5 +1074,45 @@ mod tests {
         assert!(BufferFormat::Argb8888.has_alpha());
         assert_eq!(BufferFormat::Rgb565.bits_per_pixel(), 16);
         assert!(!BufferFormat::Rgb565.has_alpha());
+    }
+
+    #[test]
+    fn v2_advertises_only_implemented_features() {
+        let info = protocol_info();
+        assert_eq!(info.version, 2);
+        assert_eq!(info.max_surfaces, MAX_SURFACES as u16);
+        assert!(info
+            .features
+            .contains(DisplayFeatures::ATOMIC_SURFACE_STATE));
+        assert!(info.features.contains(DisplayFeatures::MULTI_REGION_DAMAGE));
+        assert!(info.features.contains(DisplayFeatures::FRAME_CALLBACKS));
+        assert_ne!(info.features.bits(), 0);
+    }
+
+    #[test]
+    fn v2_multi_region_damage_validates_before_mutating() {
+        let owner = Fin::from_u128(20);
+        let mut display = DisplayServer::new();
+        let surface = display
+            .create_surface(owner, "v2", SurfaceRole::Window, Rect::new(0, 0, 100, 100))
+            .unwrap();
+        display.commit(owner, surface).unwrap();
+        display.complete_frame();
+        assert_eq!(
+            display.damage_regions(
+                owner,
+                surface,
+                &[Rect::new(2, 3, 4, 5), Rect::new(40, 50, 6, 7)]
+            ),
+            Ok(2)
+        );
+        assert_eq!(
+            display.damage_regions(
+                owner,
+                surface,
+                &[Rect::new(1, 1, 2, 2), Rect::new(0, 0, 0, 1)]
+            ),
+            Err(DisplayError::Invalid)
+        );
     }
 }
