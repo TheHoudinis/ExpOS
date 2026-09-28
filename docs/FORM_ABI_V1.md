@@ -61,11 +61,13 @@ possible.
 Numbers 7–15, 21–31, 37–47, and 49–255 are reserved. Implementations must not
 assign private meanings in those ranges.
 
-Calls that exchange bytes use execution-context buffer grants, not raw kernel
-pointers. The grant format and native call-gate transport are not frozen yet;
-until they land, native buffer-bearing calls must return `UNSUPPORTED`. The
-call numbers and record layout are frozen now so SDK source does not depend on
-Rust kernel structures while that transport is built.
+The native call gate consumes this frozen request directly and validates CFC,
+requester, target, Dimension, expiry, revocation and the operation derived from
+the call number before dispatch. Ayo's `PACKAGE_TRANSACTION` is the first live
+consumer. Calls that exchange bytes use execution-context buffer grants, not
+raw kernel pointers; that grant format and isolated user-mode transport remain
+unfrozen, so buffer-bearing calls without a validated grant return
+`UNSUPPORTED`.
 
 ## Compatibility promise
 

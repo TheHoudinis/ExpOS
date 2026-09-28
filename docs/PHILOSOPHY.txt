@@ -139,9 +139,11 @@ each CFC keeps a distinct storage key, salt/key envelope, and AEAD domain.
 ExpFS recovery retains eight rotating checkpoints per CFC plus a protected
 immutable installation baseline. Encrypted-CFC recovery state is authenticated
 by its storage protection. Normal commits, rotation, and restores cannot
-overwrite that baseline. Exact AEAD selection, Argon2id parameters,
-key-envelope/nonce format, checkpoint encoding, and crash-consistent rotation
-are intentionally left to a dedicated storage specification.
+overwrite that baseline. The first native storage specification selects
+XChaCha20-Poly1305, Argon2id v1.3 at 64 MiB/3 passes/1 lane, a wrapped 32-byte
+storage key, and nonces bound to CFC identity, generation, and disk domain.
+Alternating current-state slots and the eight rotating checkpoints implement
+this scheme; protected-baseline encoding and password-rewrap remain open.
 
 6. FORM RESOLUTION
 

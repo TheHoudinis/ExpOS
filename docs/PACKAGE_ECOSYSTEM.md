@@ -64,6 +64,7 @@ A package counts toward the 50-package milestone only when it has:
 
 The compiled seed catalog is useful offline and release-trusted, but its small
 `.form` activation artifacts are not a substitute for a public repository full
-of third-party native implementations. Connecting Ayo's JSON bridge to native
-ExpFS Handles and deploying the signed registry are still required platform
-work.
+of third-party native implementations. Desktop Ayo transactions now pass the
+native frozen Form ABI v1 gate with a requester-owned Package Handle and store
+durable app state in ExpFS. Deploying the signed public registry and an isolated
+third-party implementation loader remain platform work.

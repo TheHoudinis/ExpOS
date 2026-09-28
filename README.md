@@ -29,12 +29,12 @@ ExpOS is the Form-native operating system described by
   commits, multi-region damage, presentation-complete frame events and alpha
   buffers; bounded damage-region scanout, double-buffered Bochs/QEMU output and
   selectable 60, 75, 120 or 144 Hz pacing remain compatible with Form ABI v1;
-- a flat dark desktop with an application menu and taskbar, no default or
-  pinned applications, and movable, closable, minimizable and maximizable
-  windows;
+- a flat dark desktop with a list/grid application menu, direct entries for
+  installed Ayo apps, menu density/content/category/motion controls, and a
+  taskbar with movable, closable, minimizable and maximizable windows;
 - an interactive Settings control center for appearance, windows, taskbar,
   display, performance, input, network, Wi-Fi, Bluetooth, privacy and system
-  behavior, including six themes, seven procedural wallpapers, four cursor
+  and menu behavior, including six themes, seven procedural wallpapers, four cursor
   themes, five font faces and three real font weights;
 - readable case-sensitive 8x8 framebuffer text with runtime face/weight
   rasterization and an expanded 8x16 VGA console font;
@@ -72,10 +72,12 @@ Each encrypted CFC receives an independent random storage key. Argon2id derives
 a key-encryption key (KEK) from the Operator password to wrap and unlock that
 storage key, and persistent CFC state uses authenticated encryption (AEAD).
 Recovery retains eight rotating checkpoints plus a protected immutable
-installation baseline per CFC. Exact AEAD selection, Argon2id parameters,
-key-envelope/nonce layout and authenticated/protected checkpoint encoding remain
-implementation work; the current CRC format already performs header-last
-rotation for current state and eight full-state checkpoint slots.
+installation baseline per CFC.
+The on-disk suite is now XChaCha20-Poly1305 with deterministic per-slot nonces
+bound to CFC identity, generation and storage domain. Basic uses Argon2id v1.3
+with 64 MiB, three passes and one lane. Current state and all eight rotating
+checkpoint slots are authenticated-encrypted; the immutable installation
+baseline payload remains separate future work.
 
 Native UEFI is the default Genesis and normal boot path; BIOS remains a
 compatibility, recovery, and development fallback. **Architect** is the official
@@ -93,10 +95,10 @@ and stores only a salted password verifier for the initial Operator. `make
 genesis-check` installs to a blank disk, reboots without the ISO, logs in with
 that Operator, and shuts down.
 
-This is deliberately not yet the Basic installer: Basic remains gated because
-its mandatory Argon2id-wrapped storage key and AEAD ExpFS are not implemented.
-The current Architect slice claims the whole ATA primary-master disk and is
-explicitly unencrypted. It is QEMU/OVMF-tested; safe physical-disk selection,
+Genesis now offers Basic with mandatory encrypted CFC storage and Architect as
+the explicitly unencrypted development choice. The automated end-to-end
+`genesis-check` installs, disk-boots and authenticates both paths; both claim
+the whole ATA primary-master disk. Safe physical-disk selection,
 AHCI/NVMe/VirtIO-block, USB input/media, BIOS installation, Secure Boot, and a
 graphical installer remain open.
 
@@ -109,8 +111,8 @@ persistence path. Accounts and settings now load from and commit through the
 same ExpFS current-state transaction; EXPOST03 is only a boot-time migration
 fallback. Typed execution contexts now reach scheduler admission and
 per-context budget accounting. Native checkpoint capture/restore and the
-Architect Genesis construction path are live; the protected installation baseline, Argon2id key
-wrapping, AEAD storage, real page-table switching, interrupts/preemption, and
+Architect Genesis construction path, Basic key wrapping, and AEAD ExpFS are live;
+the protected installation baseline, real page-table switching, interrupts/preemption, and
 user-mode CPU context switching remain implementation work.
 
 The 32-bit Diamond II source remains isolated under `legacy/alpha32/` as a
@@ -193,8 +195,8 @@ Passwords are never stored as plaintext or reversible ciphertext: ExpOS stores
 a per-account salt and a PBKDF2-HMAC-SHA256 verifier with 25,000 rounds.
 Password arguments are masked while typed and omitted from shell history.
 This describes the current account-login verifier only. It is distinct from the
-approved future Argon2id KEK used to wrap a random per-CFC storage key; the
-current state image is not storage-encrypted.
+Argon2id KEK used by encrypted Basic CFCs to wrap a random per-CFC storage key.
+Development and Architect images remain unencrypted unless created as Basic.
 
 ## Desktop
 
@@ -233,7 +235,7 @@ sent to DuckDuckGo's non-JavaScript HTML search; prefix a query with `?` for the
 same behavior.
 
 Settings controls are clickable and keyboard-accessible. Its category and row
-viewports follow the selection, so all eleven pages and long Windows/Appearance
+viewports follow the selection, so all twelve pages and long Menu/Windows/Appearance
 lists remain usable at 480p. Appearance, taskbar, status-area, border,
 contrast, pointer-speed, theme, wallpaper, cursor and font changes take effect
 immediately and persist. Five allocation-free bitmap faces and Light, Regular
@@ -247,10 +249,13 @@ click/sloppy/pointer focus. Off-screen travel is configurable from contained to
 reachable. The Taskbar page controls bottom/top/left/right placement, nine
 panel sizes, start/center/end app alignment, edge-reveal auto-hide,
 translucency, horizontal app labels and hardware-RTC seconds. The cursor shadow
-is independently switchable. Across Appearance, Windows and Taskbar, 603
+is independently switchable. The Menu page controls list/grid layout, density,
+icon scale, built-in and installed-app visibility, categories, motion and hints;
+installed Ayo apps open directly from this launcher rather than a nested Apps
+list. Across the customization pages, 632
 selectable values are directly wired to rendering, geometry or interaction.
 That includes 256 persisted accent colors and 252 wallpaper variants across
-seven procedural patterns. The compact persistent-state schema validates 620
+seven procedural patterns. The compact persistent-state schema validates 628
 selectable states in total; the schema and desktop counts overlap and are not
 additive.
 
@@ -377,8 +382,9 @@ Ayo. Kernel-private Rust layouts are explicitly outside the ABI.
 
 The project driver supports fixed Rust, Go, and C recipes and emits a
 deterministic Ayo tar artifact plus SHA-256 receipt. `run` is a host-development
-run: native user-mode call-gate transport and isolated binary loading remain
-unfinished and are not claimed by the SDK.
+run. The kernel now dispatches `PACKAGE_TRANSACTION` through the frozen native
+call gate and a requester-owned Package Handle; a general isolated third-party
+binary loader and user-mode buffer-grant transport remain unfinished.
 
 ## Console
 

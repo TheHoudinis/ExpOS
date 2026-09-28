@@ -45,11 +45,12 @@ does not use the password directly as the data key. Persistent state of an
 encrypted CFC requires AEAD. Every CFC retains eight rotating checkpoints plus
 a protected immutable installation baseline; encrypted CFC recovery state is
 authenticated by its storage protection. Normal writes, rotation, and restore
-may not replace that baseline. Exact AEAD choice, Argon2id parameters,
-key-envelope layout, nonce construction, authenticated checkpoint format, and
-encrypted crash-consistency protocol remain to be specified and implemented.
-The current plaintext/CRC adapter already uses header-last current-state commits
-and an eight-slot full-database checkpoint ring.
+may not replace that baseline. The implemented suite is XChaCha20-Poly1305;
+Basic uses Argon2id v1.3 with 64 MiB, three passes and one lane to wrap a random
+32-byte key. Nonces bind that key to CFC identity, generation and slot domain.
+Alternating current-state commits and the eight-slot checkpoint ring are
+authenticated-encrypted whenever the CFC has a storage key. The immutable
+installation-baseline payload remains pending.
 
 The approved confinement/enforcement names are `ExpScope` for CFC/Dimension-
 aware confinement, `ExpSeal` for monotonic capability reduction, and
@@ -137,8 +138,8 @@ retained for compatibility, recovery, and development.
     adapter now persists eight complete CFC database checkpoints, rotates the
     oldest slot, lists retained state IDs and restores a selected checkpoint
     into the alternating current-state slots before reboot. Checkpoints are
-    CRC-verified but not yet encrypted/authenticated, and the protected
-    installation-baseline payload is not yet on disk.
+    XChaCha20-Poly1305 authenticated encryption is applied for encrypted CFCs;
+    the protected installation-baseline payload is not yet on disk.
 
 ## Trust boundaries
 
@@ -244,9 +245,10 @@ retained for compatibility, recovery, and development.
   taskbar can occupy any edge, use
   one of nine thicknesses, align running apps at start/center/end, auto-hide and
   reveal at that edge, blend translucently, show horizontal labels, and include
-  RTC seconds. The eleven-category Settings UI computes compact category/row
+  RTC seconds. The twelve-category Settings UI adds a Menu page for list/grid
+  layout, density, scale, content visibility, categories and motion, and computes compact category/row
   viewports so the selected item remains visible at 480p. Appearance, Windows
-  and Taskbar expose 603 directly working selectable values. Its
+  Taskbar and Menu expose 632 directly working selectable values. Its
   Display page also selects a 60, 75, 120 or 144 Hz compositor presentation
   target and optional VSync. These are software-pacing targets, not negotiated
   physical monitor modes. The Performance page independently controls window
@@ -305,20 +307,20 @@ retained for compatibility, recovery, and development.
   display mode, theme, wallpaper variant, cursor, accent,
   backdrop, pointer speed, presentation rate, VSync, shadows, wallpaper
   effects, presentation policy and desktop/connectivity flags. A tagged compact
-  extension in the preference record persists and sanitizes 620
+  extension in the preference record persists and sanitizes 628
   accepted states for font face/weight; window radius, border, titlebar,
   opacity, off-screen allowance, snap and focus; taskbar edge, size, alignment,
   auto-hide, translucency, labels and clock precision. This
   count represents accepted selector states and both states of booleans, not
-  620 independent rows. Older compatible records receive
+  628 independent rows. Older compatible records receive
   conservative extension defaults; they default to 60 Hz with VSync enabled and
   use the low-cost renderer policy. Fresh state remains 480p/60 Hz with effects,
   translucency, animations, cursor shadow and off-screen travel disabled. Form
   records, Notes `.txt` content, Ayo application state and PIMP revisions share
-  the durable ExpFS CFC snapshot and eight-checkpoint recovery ring. The current
-  CRC journal is plaintext and is not the approved per-CFC AEAD store; it has
-  neither an Argon2id-wrapped random storage key nor a protected installation
-  baseline.
+  the durable ExpFS CFC snapshot and eight-checkpoint recovery ring. Encrypted
+  Basic CFCs use their Argon2id-wrapped random key for XChaCha20-Poly1305
+  snapshots; unencrypted Architect/development records retain CRC. The
+  protected installation baseline is not yet on disk.
 - Network is a Driver Form protected by requester-bound Network Handles and
   PIMP policy. Its current polling RTL8139 path implements Ethernet, ARP,
   DHCP-configured IPv4 with a conservative fallback, ICMP echo,
@@ -363,8 +365,10 @@ retained for compatibility, recovery, and development.
 - Form ABI v1 freezes language-neutral 72-byte requests, 40-byte responses,
   call/status numbers, FIN caller identity, and explicit Handles for identity,
   IPC, display, input/events, time, storage, networking, browser navigation,
-  and package transactions. Rust, Go, C, and Python contracts are tested; the
-  native user-mode call gate and isolated implementation loader remain pending.
+  and package transactions. Rust, Go, C, and Python contracts are tested. The
+  native gate validates CFC, requester, target, Dimension and operation before
+  dispatch, and Ayo installs use it; isolated implementation loading and
+  user-mode buffer grants remain pending.
 - PIMP accepts only known keys and typed values. DIESE never silently resolves
   an equal-precedence conflict.
 - ExpFS transaction commit validates all staged records and capacity before
@@ -380,8 +384,9 @@ Genesis/default path; see `BOOT.md` for hardware limits.
 The `ayo` JSON store remains a
 host-development bridge that makes transactions inspectable. It serializes
 updates with a lock, pending journal, atomic rename and recovery snapshot, but
-is not the native persistent format and will be replaced by kernel Form Handle
-calls.
+is not the native persistent format. Desktop Ayo package mutations now cross a
+native `PACKAGE_TRANSACTION` call gate with a requester-owned Form Handle and
+persist their state in ExpFS.
 
 The 32-bit alpha is quarantined under `legacy/alpha32`. Its code may be ported,
 but its paths, owner/group modes, file descriptors, sudo-like ACL behavior and
@@ -390,8 +395,8 @@ process naming must not leak into the new public model.
 Form contents, relationships, PIMP state, accounts and desktop preferences are
 fixed-capacity records in the persistent ExpFS CFC snapshot. Mutations publish
 transactionally with a journal generation; the recovery catalog retains eight
-complete checkpoints. The current storage path is intentionally bounded and is
-not yet the encrypted per-CFC storage design.
+complete checkpoints. Encrypted CFCs protect these snapshots with the CFC's
+unwrapped storage key; unencrypted Architect/development state retains CRC.
 
 Alpha.12 includes the runtime-selectable 480p/720p/1080p empty-start desktop,
 normal case-sensitive text, Notes, a richer graphical Terminal with two-eye

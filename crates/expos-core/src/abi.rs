@@ -1,4 +1,4 @@
-use crate::{Fin, Operations};
+use crate::{CapabilityBroker, CfcFin, Fin, Operations};
 
 /// The stable, language-neutral contract between executable Forms and ExpOS.
 /// Kernel releases may change freely behind this boundary, but they must not
@@ -129,6 +129,96 @@ impl AbiRequest {
     }
 }
 
+/// Native kernel call-gate for the frozen Form ABI v1 wire contract.
+///
+/// The request remains the same 72-byte language-neutral record used by the
+/// SDKs.  The gate adds the missing runtime boundary: it derives the required
+/// operation from the frozen call number, binds the request to one CFC,
+/// Dimension and target Form, and validates the caller-owned Form Handle
+/// before dispatching any service implementation.
+pub struct NativeCallGate<'a> {
+    broker: &'a CapabilityBroker,
+    cfc: CfcFin,
+    target: Fin,
+    dimension: Fin,
+}
+
+impl<'a> NativeCallGate<'a> {
+    pub const fn new(
+        broker: &'a CapabilityBroker,
+        cfc: CfcFin,
+        target: Fin,
+        dimension: Fin,
+    ) -> Self {
+        Self {
+            broker,
+            cfc,
+            target,
+            dimension,
+        }
+    }
+
+    pub fn dispatch(
+        &self,
+        request: AbiRequest,
+        tick: u64,
+        service: impl FnOnce(AbiCall, [u64; 6]) -> AbiResponse,
+    ) -> AbiResponse {
+        let operation = match request.validate() {
+            Ok(operation) => operation,
+            Err(status) => return AbiResponse::status(status),
+        };
+        if self.cfc.is_zero() || self.target.is_zero() || self.dimension.is_zero() {
+            return AbiResponse::status(AbiStatus::Invalid);
+        }
+        if self
+            .broker
+            .authorize_in(
+                self.cfc,
+                request.handle_id,
+                self.target,
+                self.dimension,
+                operation,
+                tick,
+            )
+            .is_err()
+            || self
+                .broker
+                .authorize_requester(
+                    request.handle_id,
+                    request.caller,
+                    self.target,
+                    self.dimension,
+                    operation,
+                    tick,
+                )
+                .is_err()
+        {
+            return AbiResponse::status(AbiStatus::Denied);
+        }
+        let Some(call) = AbiCall::from_raw(request.call) else {
+            return AbiResponse::status(AbiStatus::Unsupported);
+        };
+        service(call, request.arguments)
+    }
+}
+
+impl AbiResponse {
+    pub const fn status(status: AbiStatus) -> Self {
+        Self {
+            status: status as u16,
+            values: [0; 4],
+        }
+    }
+
+    pub const fn ok(values: [u64; 4]) -> Self {
+        Self {
+            status: AbiStatus::Ok as u16,
+            values,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,5 +286,46 @@ mod tests {
             .validate(),
             Err(AbiStatus::Unsupported)
         );
+    }
+
+    #[test]
+    fn native_call_gate_requires_the_callers_cfc_bound_handle() {
+        let cfc = CfcFin::from_u128(1);
+        let caller = Fin::from_u128(2);
+        let target = Fin::from_u128(3);
+        let dimension = Fin::from_u128(4);
+        let mut broker = CapabilityBroker::new(cfc);
+        let handle = broker
+            .issue_for(
+                caller,
+                crate::Authority::Operator,
+                target,
+                dimension,
+                Operations::PACKAGE,
+                100,
+            )
+            .unwrap();
+        let request = AbiRequest {
+            version: FORM_ABI_VERSION,
+            call: AbiCall::PackageTransaction as u16,
+            caller,
+            handle_id: handle.id,
+            arguments: [7, 9, 0, 0, 0, 0],
+        };
+        let response = NativeCallGate::new(&broker, cfc, target, dimension).dispatch(
+            request,
+            1,
+            |call, arguments| {
+                assert_eq!(call, AbiCall::PackageTransaction);
+                assert_eq!(&arguments[..2], &[7, 9]);
+                AbiResponse::ok([42, 0, 0, 0])
+            },
+        );
+        assert_eq!(AbiStatus::from_raw(response.status), Some(AbiStatus::Ok));
+        assert_eq!(response.values[0], 42);
+
+        let denied = NativeCallGate::new(&broker, CfcFin::from_u128(99), target, dimension)
+            .dispatch(request, 1, |_, _| panic!("foreign CFC reached service"));
+        assert_eq!(AbiStatus::from_raw(denied.status), Some(AbiStatus::Denied));
     }
 }

@@ -20,16 +20,17 @@ both require Internet access.
 | Packages | `Ayo` boot Package Form and Go `ayo v3`; categorized 25-package built-in Prism catalog with honest `x86_64`/`host` architecture metadata; `slap NAME` catalog installs and `install` compatibility spelling; searchable `glance`/TUI; offline/HTTPS catalogs and explicit Ed25519 trust state; SHA-256 artifact verification; raw/tar/tar.gz extraction; owned-file receipts and collision protection; atomic dependency install, uninstall, rollback and crash recovery; no package scripts or links |
 | Graphics | `ExpDisplay` v2 Service Form with feature discovery, atomically validated multi-region damage and unchanged Form ABI v1; fresh-state 480p/60 Hz and Efficient-renderer defaults; runtime 640x480 (480p), 1280x720 (720p) and 1920x1080 (1080p) Bochs/QEMU XRGB scanout with XRGB8888, ARGB8888 and RGB565 client formats; two-page virtual framebuffer with explicit boot/login presentation, verified VBE Y-offset flips, bounded allocation-free damage clipping/coalescing and direct-front recovery when a flip is rejected; submitted/copied region and pixel, collapse and flip-failure counters; rejected modes automatically retry at 480p; selectable 60/75/120/144 Hz compositor targets, optional bounded-retrace VSync, frame/miss/timeout diagnostics; responsive flat dark desktop with compact menu and all-edge taskbar, no default or pinned apps, movable/minimizable/maximizable/closeable windows, configurable bounded off-screen travel and snapping, Notes and eleven surfaces; Form-owned pending surface state, atomic commit, coalesced presentation-bound `FrameDone`, configure/focus/key/pointer events, z-order and hit testing; bounded pure-motion input coalescing that preserves key/button edges; VGA text-mode restoration on exit; `desktop`, `displayinfo`, `displaydiag`, `safevideo/displayreset` |
 | Browser | Native `Browser` Interface Form; fixed-capacity HTML title/heading/paragraph/list/link/button parsing, scrolling and graphical rendering; tag/class/id/inline CSS subset; deterministic document title/text/style/visibility and click-handler JavaScript subset; local `expos://` navigation plus capability-gated native `http://` and authenticated TLS 1.3 `https://` fetches over cached DNS/TCP/HTTP; plain address-bar text searches DuckDuckGo's canonical non-JavaScript HTML endpoint, follows at most three redirects without allowing an HTTPS-to-HTTP downgrade, and projects up to eight result titles and links; DuckDuckGo Wikipedia wrappers are unwrapped and direct Wikipedia article links use the live verified HTTPS REST summary reader; verified `www.youtube.com` HTML fetch is not video playback |
-| Desktop apps | Dark graphical Terminal, Browser, Form registry, Ayo package manager, System, Games, Notes and shared Ayo Apps host; twenty installable native tools include live RTC calendar/clock, network and system status, ExpFS generation and persistent package/tool state in an `AyoApps.state` Data Form; Notes creates and revises `.txt` Data Forms; Settings has eleven pages with 603 directly wired values, including 256 accent colors and 252 wallpaper variants, while the persistent schema accepts 620 selectable states (overlapping counts); compact category/row viewport scrolling keeps long pages usable at 480p; configurable fonts, window geometry/opacity/focus, all-edge taskbar, auto-hide, status clock, rendering policy and radios; Terminal has 40-line scrollback, 24-entry history, two-eye `neofetch` and `windowreset`; every app can close and reopen |
-| SDK / ABI | Frozen Form ABI v1 call/status numbers and 72-byte request / 40-byte response layout; FIN + Handle boundary for identity, IPC, display, input, time, storage, networking, browser and package services; tested Rust, Go, C and Python contracts; deterministic `expos build/run/test/package` project tool; `FormABI` Interface Form with `formabi` diagnostics (`goabi` compatibility alias); native user-mode transport remains queued |
+| Desktop apps | Dark graphical Terminal, Browser, Form registry, Ayo package manager, System, Games, Notes and an internal native-app host; installed Ayo apps appear directly in the main menu instead of a nested Apps launcher; twenty installable native tools include live RTC calendar/clock, network and system status, ExpFS generation and persistent package/tool state in an `AyoApps.state` Data Form; Notes creates and revises `.txt` Data Forms; Settings has twelve pages with 632 directly wired values, including 256 accent colors, 252 wallpaper variants and nine menu controls, while the persistent schema accepts 628 selectable states (overlapping counts); list/grid layout, density, scale, category and visibility controls; compact category/row viewport scrolling keeps long pages usable at 480p; configurable fonts, window geometry/opacity/focus, all-edge taskbar, auto-hide, status clock, rendering policy and radios; Terminal has 40-line scrollback, 24-entry history, two-eye `neofetch` and `windowreset`; every app can close and reopen |
+| SDK / ABI | Frozen Form ABI v1 call/status numbers and 72-byte request / 40-byte response layout; FIN + Handle boundary for identity, IPC, display, input, time, storage, networking, browser and package services; native CFC/requester/target/Dimension/operation gate used by Ayo `PACKAGE_TRANSACTION`; tested Rust, Go, C and Python contracts; deterministic `expos build/run/test/package` project tool; `FormABI` Interface Form with `formabi` diagnostics (`goabi` compatibility alias); isolated user-mode loading and buffer grants remain queued |
 | Hardware | `date/clock`, `timers`, `cpuinfo`, `features/kernelcaps`, `lspci`, `neofetch/sysinfo`, `mem/free`, VGA and COM1 consoles, calibrated CPUID/fallback TSC timing, PS/2 keyboard/mouse, dedicated primary-master ATA PIO state transport, RTL8139 bus-master DMA, Ethernet/ARP/DHCP/IPv4/ICMP/UDP/DNS/TCP/HTTP/TLS, PCI Wi-Fi/Bluetooth class discovery with honest driver/connection state, ANSI serial input, RDRAND detection and CPUID/control-register reporting |
-| System | Graphical-or-console boot chooser and mutually switchable login; bright white-on-black command deck with cyan/green identity accents, structured startup banner, grouped help and aligned status panel; Operator/Power/Guest capability authority; persistent twelve-slot accounts; salted PBKDF2-HMAC-SHA256 password verifiers; persistent desktop/connectivity preferences with fail-safe decoding; ExpFS dual-current-slot plus eight-checkpoint CRC recovery; `users`, `useradd`, `userdel`, `passwd`, `login`, `logout`, `status`, `kstat`, `ps`, `dmesg/bootlog`, `stateinfo`, combined `diag/diagnose`, `ifconfig`, `ping`, `dns`, `fetch`, `netstat`, history, `whoami`, `reboot`, `shutdown` |
-| Genesis | Native-UEFI hybrid `ExpOS-0.9-x86_64.iso`; explicitly unencrypted whole-disk Architect flow with destructive confirmation; primary/backup GPT, FAT32 ESP and `EFI/BOOT/BOOTX64.EFI`; minted CFC/Primary Dimension identities and hashed initial Operator seed; automated install, disk-only reboot, login and shutdown proof. Basic is security-gated until mandatory Argon2id + AEAD storage lands |
+| System | Graphical-or-console boot chooser and mutually switchable login; bright white-on-black command deck with cyan/green identity accents, structured startup banner, grouped help and aligned system status panel; Operator/Power/Guest capability authority; persistent twelve-slot accounts; salted PBKDF2-HMAC-SHA256 login verifiers; persistent desktop/connectivity preferences with fail-safe decoding; ExpFS dual-current-slot plus eight checkpoints using XChaCha20-Poly1305 for encrypted CFCs and CRC for unencrypted development/Architect state; `users`, `useradd`, `userdel`, `passwd`, `login`, `logout`, `status`, `kstat`, `ps`, `dmesg/bootlog`, `stateinfo`, combined `diag/diagnose`, `ifconfig`, `ping`, `dns`, `fetch`, `netstat`, history, `whoami`, `reboot`, `shutdown` |
+| Genesis | Native-UEFI hybrid `ExpOS-0.9-x86_64.iso`; encrypted whole-disk Basic and explicitly unencrypted Architect choices with destructive confirmation; Basic random per-CFC key wrapped by Argon2id v1.3 (64 MiB, 3 passes, 1 lane), boot-time password unlock and XChaCha20-Poly1305 ExpFS; primary/backup GPT, FAT32 ESP and `EFI/BOOT/BOOTX64.EFI`; minted CFC/Primary Dimension identities and hashed initial Operator seed; automated Basic and Architect install, disk-only reboot, login and shutdown proof |
 | Utilities | `calc`, `factor`, `len`, `hex`, `reverse/rev`, `tolower`, `toupper`, `rand`, `sleep`, `true`, `false` |
 
 Native Form contents use fixed 512-byte records that are transactionally
 persisted with Form metadata, Dimensions, relationships, PIMP network state,
-revisions and allocator state in alternating CRC-verified ExpFS CFC snapshots.
+revisions and allocator state in alternating verified ExpFS CFC snapshots.
+Encrypted CFCs use AEAD; unencrypted state uses CRC compatibility records.
 `make persistence-check` proves `mkform MyNotes; write MyNotes hello` survives a
 shutdown and fresh boot. Delete is
 recovery-aware: it moves a Form to Recoverable; the core only permits final
@@ -46,8 +47,8 @@ interaction options disabled.
 
 ## Approved architecture and landed semantic foundations
 
-The Genesis/CFC target is fixed, and its unencrypted Architect vertical slice
-has landed, while the protected Basic path remains incomplete:
+The Genesis/CFC target is fixed. Architect remains the unencrypted development
+path, while Basic now requires the landed encrypted-storage path:
 
 - every CFC has its own typed FIN, required nonempty name, and exactly one
   Primary Dimension;
@@ -75,8 +76,9 @@ root-issuance cutoff with strict attenuation; and fixed-capacity context-keyed
 ExpBudget accounting; and Form-native scheduler contexts carrying CFC,
 Dimension, FIN, address-space, Handle, event, CPU and budget state. Cooperative
 admission/dispatch and per-context budget charging are live. Genesis now builds
-and verifies a bootable UEFI Architect installer; it is not yet an encrypted
-Basic installer, protected-baseline restore engine,
+a UEFI installer with encrypted Basic and unencrypted Architect choices; the
+automated disk-install reboot check covers both. It is not yet a
+protected-baseline restore engine,
 page-table sandbox, durable seal registry, interrupt scheduler or user-mode
 context switcher.
 
@@ -103,10 +105,10 @@ Dimension interfaces exist for them.
 Persistent accounts are typed ExpFS records, not yet executable Account Forms,
 and the PBKDF2 login path does not claim lockout, hardware-backed keys or a
 complete modern identity policy. Mouse wheel input and GPU acceleration are not
-implemented. The PBKDF2 account verifier is not the approved Argon2id storage-key
-wrapper. ExpFS current-state snapshots and eight rotating full-state
-checkpoints are CFC-bound and transactional, but still lack AEAD and a
-protected on-disk installation baseline. The old plaintext account/settings slots are accepted
+implemented. The PBKDF2 account verifier is separate from the implemented
+Argon2id storage-key wrapper. ExpFS current-state snapshots and eight rotating
+full-state checkpoints are CFC-bound, transactional and AEAD-protected for
+encrypted CFCs, but still lack a protected on-disk installation baseline. The old plaintext account/settings slots are accepted
 only as migration input and are no longer the native commit destination.
 The new native UEFI path, retained BIOS fallback, and Operator-only single-user
 mode are QEMU-tested;

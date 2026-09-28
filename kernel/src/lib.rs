@@ -152,7 +152,8 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
 
     #[cfg(not(feature = "genesis-installer"))]
     {
-        let genesis_config = genesis::load();
+        let mut input = input::Input::new();
+        let genesis_config = genesis::load(&mut input);
         let report = match genesis_config {
             Some(config) => expos_core::bootstrap_with_identity(
                 config.cfc_fin,
@@ -174,7 +175,12 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
             }
             Err(error) => panic!("Form-native bootstrap failed: {:?}", error),
         };
-        expfs_store::initialize(report.cfc_fin, report.cfc_name, report.stable_fin);
+        expfs_store::initialize(
+            report.cfc_fin,
+            report.cfc_name,
+            report.stable_fin,
+            genesis_config.and_then(|config| config.storage_key),
+        );
         state::initialize();
         let preferences = state::preferences();
         if let Some(mode) = framebuffer::DisplayMode::from_persisted(preferences.display_mode) {
@@ -183,7 +189,6 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
         session::initialize_with_seed(genesis_config.map(|config| config.operator.0));
         println!();
         println!("Core architecture online. Starting session manager.");
-        let mut input = input::Input::new();
         let requested_mode = session::choose_boot_mode(&mut input);
         boot::set_single_user(requested_mode == session::BootMode::SingleUser);
         if boot::single_user() {

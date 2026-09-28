@@ -135,9 +135,11 @@ storage-encryption key. Persistent CFC state uses authenticated encryption
 Recovery retains eight rotating checkpoints per CFC plus one protected
 installation baseline. Encrypted-CFC recovery state is authenticated by its
 storage protection. Normal checkpoint rotation and restore operations must
-never overwrite the baseline. The exact AEAD construction, Argon2id parameters,
-on-disk envelope, checkpoint encoding, and crash-consistent update algorithm
-remain implementation specifications rather than being invented here.
+never overwrite the baseline. The landed native format uses
+XChaCha20-Poly1305, Argon2id v1.3 at 64 MiB/3 passes/1 lane, a wrapped 32-byte
+storage key, and nonce domains bound to CFC identity, generation, and disk
+slot. Alternating current-state slots and eight rotating encrypted checkpoints
+are implemented; protected-baseline encoding and password rewrap remain open.
 
 4. FORMS — IMPORTANT TERMINOLOGY
 
@@ -874,8 +876,8 @@ making them canonical:
 -   Exact checkpoint encoding, rotation, restore, and crash-consistency
     algorithm within the approved eight-checkpoint-plus-baseline model.
 -   Garbage collection inside and outside the retained recovery set.
--   Exact AEAD algorithm, Argon2id parameter set, key-envelope layout, nonce
-    construction, and password-rewrap transaction.
+-   Protected-baseline encoding and the password-rewrap transaction for the
+    landed XChaCha20-Poly1305/Argon2id storage format.
 -   Exact ExpLoader format and boot protocol.
 -   Secure Boot design.
 -   Exact ASL bootstrap ordering.

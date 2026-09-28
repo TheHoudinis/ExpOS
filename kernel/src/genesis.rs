@@ -2,9 +2,9 @@
 //!
 //! Genesis deliberately writes a standards-based GPT + FAT32 EFI System
 //! Partition, while ExpFS remains the CFC-owned transactional database in the
-//! reserved pre-partition area. The initial vertical slice supports an
-//! explicitly unencrypted Architect installation. Basic stays gated until its
-//! mandatory Argon2id + AEAD storage protection is implemented.
+//! reserved pre-partition area. Basic installations use a random per-CFC
+//! storage key, Argon2id key wrapping and XChaCha20-Poly1305 authenticated
+//! ExpFS snapshots; Architect retains an explicit unencrypted option.
 
 #![cfg_attr(not(any(test, feature = "genesis-installer")), allow(dead_code))]
 
@@ -13,7 +13,7 @@ use expos_core::{CfcFin, Fin, Text};
 
 const MANIFEST_LBA: u32 = 40;
 const MANIFEST_MAGIC: [u8; 8] = *b"EXGEN001";
-const MANIFEST_VERSION: u16 = 1;
+const MANIFEST_VERSION: u16 = 2;
 const EFI_PARTITION_START: u32 = 2048;
 const GPT_ENTRY_SECTORS: u32 = 32;
 const FAT_RESERVED_SECTORS: u32 = 32;
@@ -41,6 +41,16 @@ pub struct GenesisConfig {
     pub primary_fin: Fin,
     pub primary_name: Text,
     pub operator: session::StoredGenesisAccount,
+    pub storage_key: Option<[u8; crate::crypto::STORAGE_KEY_LEN]>,
+    storage_envelope: Option<StorageEnvelope>,
+}
+
+#[derive(Clone, Copy)]
+struct StorageEnvelope {
+    salt: [u8; crate::crypto::STORAGE_SALT_LEN],
+    nonce: [u8; crate::crypto::STORAGE_NONCE_LEN],
+    wrapped_key: [u8; crate::crypto::STORAGE_KEY_LEN],
+    tag: [u8; crate::crypto::STORAGE_TAG_LEN],
 }
 
 trait BlockDevice {
@@ -66,11 +76,48 @@ impl BlockDevice for storage::Device {
 }
 
 /// Load installation identity before the Form-native bootstrap runs.
-pub fn load() -> Option<GenesisConfig> {
+pub fn load(input: &mut crate::input::Input) -> Option<GenesisConfig> {
     let device = storage::initialize().ok()?;
     let mut sector = [0_u8; storage::SECTOR_SIZE];
     device.read_sector(MANIFEST_LBA, &mut sector).ok()?;
-    decode_manifest(&sector)
+    let mut config = decode_manifest(&sector)?;
+    let Some(envelope) = config.storage_envelope else {
+        return Some(config);
+    };
+    crate::println!("Encrypted CFC storage detected: {}", config.cfc_name);
+    loop {
+        let mut password = read_line(input, "Unlock password: ", true);
+        let mut kek = match crate::crypto::storage_kek(line_bytes(&password), &envelope.salt) {
+            Ok(key) => key,
+            Err(()) => {
+                crate::crypto::wipe(&mut password);
+                crate::println!("Storage-key derivation failed.");
+                continue;
+            }
+        };
+        let mut storage_key = envelope.wrapped_key;
+        let aad = storage_envelope_aad(config.cfc_fin, config.primary_fin);
+        let opened = crate::crypto::open_storage(
+            &kek,
+            &envelope.nonce,
+            &aad,
+            &mut storage_key,
+            &envelope.tag,
+        )
+        .is_ok();
+        crate::crypto::wipe(&mut kek);
+        crate::crypto::wipe(&mut password);
+        if opened {
+            config.storage_key = Some(storage_key);
+            crate::slog!(
+                "EXPOS_CFC_UNLOCKED cfc={} suite=xchacha20poly1305\r\n",
+                config.cfc_fin
+            );
+            return Some(config);
+        }
+        crate::crypto::wipe(&mut storage_key);
+        crate::println!("Wrong password or damaged CFC key envelope.");
+    }
 }
 
 #[cfg(feature = "genesis-installer")]
@@ -84,23 +131,19 @@ pub fn run() -> ! {
     println!("ExpOS Genesis Engine");
     println!("Construct a Central Inflation Fabric");
     println!("----------------------------------------");
-    println!("1. Basic      (requires encrypted storage; not available yet)");
+    println!("1. Basic      (encrypted CFC storage)");
     println!("2. Architect  (whole disk, unencrypted preview)");
     let mut input = Input::new();
-    loop {
+    let basic = loop {
         let mode = read_line(&mut input, "Installation mode [1/2]: ", false);
         if line(&mode) == "1" {
-            println!(
-                "Basic is gated: its mandatory Argon2id + AEAD protection is not implemented."
-            );
-            println!("Genesis will not silently create an insecure Basic installation.");
-            continue;
+            break true;
         }
         if line(&mode) == "2" {
-            break;
+            break false;
         }
         println!("Choose 1 or 2.");
-    }
+    };
 
     let mut device = match storage::initialize() {
         Ok(device) => device,
@@ -119,12 +162,29 @@ pub fn run() -> ! {
 
     let cfc_name = prompt_text(&mut input, "CFC name: ");
     let primary_name = prompt_text(&mut input, "Primary Dimension name: ");
-    let operator = loop {
+    let entropy = unsafe { core::arch::x86_64::_rdtsc() } as u128;
+    let cfc_fin = CfcFin::from_u128(0x4745_4e45_5349_5300_0000_0000_0000_0000 | entropy);
+    let primary_fin =
+        Fin::from_u128(0x4449_4d45_4e53_494f_0000_0000_0000_0000 | entropy.rotate_left(41));
+    let (operator, storage_key, storage_envelope) = loop {
         let mut password = read_line(&mut input, "Operator password (8-23 characters): ", true);
         match session::genesis_operator(line_bytes(&password)) {
             Ok(record) => {
+                let (storage_key, storage_envelope) = if basic {
+                    println!("Deriving Argon2id key envelope (64 MiB, 3 passes)...");
+                    match create_storage_envelope(cfc_fin, primary_fin, line_bytes(&password)) {
+                        Ok((key, envelope)) => (Some(key), Some(envelope)),
+                        Err(()) => {
+                            crypto::wipe(&mut password);
+                            println!("Could not create encrypted CFC key envelope.");
+                            continue;
+                        }
+                    }
+                } else {
+                    (None, None)
+                };
                 crypto::wipe(&mut password);
-                break record;
+                break (record, storage_key, storage_envelope);
             }
             Err(error) => {
                 crypto::wipe(&mut password);
@@ -133,16 +193,14 @@ pub fn run() -> ! {
         }
     };
 
-    let entropy = unsafe { core::arch::x86_64::_rdtsc() } as u128;
-    let cfc_fin = CfcFin::from_u128(0x4745_4e45_5349_5300_0000_0000_0000_0000 | entropy);
-    let primary_fin =
-        Fin::from_u128(0x4449_4d45_4e53_494f_0000_0000_0000_0000 | entropy.rotate_left(41));
     let config = GenesisConfig {
         cfc_fin,
         cfc_name,
         primary_fin,
         primary_name,
         operator: session::StoredGenesisAccount(operator),
+        storage_key,
+        storage_envelope,
     };
 
     println!("Creating GPT and EFI System Partition...");
@@ -157,7 +215,10 @@ pub fn run() -> ! {
     );
     println!("[ok] CFC {}", cfc_fin);
     println!("[ok] Primary Dimension {}", primary_fin);
-    println!("[ok] ExpFS reserved and Operator seed written");
+    println!(
+        "[ok] ExpFS reserved and Operator seed written ({})",
+        if basic { "encrypted" } else { "unencrypted" }
+    );
     println!("[ok] EFI/BOOT/BOOTX64.EFI installed");
     println!();
     println!("Installation complete. Remove the USB, then press Enter to reboot.");
@@ -183,7 +244,6 @@ fn prompt_text(input: &mut crate::input::Input, prompt: &str) -> Text {
     }
 }
 
-#[cfg(feature = "genesis-installer")]
 fn read_line(input: &mut crate::input::Input, prompt: &str, secret: bool) -> [u8; 33] {
     crate::print!("{}", prompt);
     let mut output = [0_u8; 33];
@@ -219,7 +279,6 @@ fn line(value: &[u8; 33]) -> &str {
     core::str::from_utf8(line_bytes(value)).unwrap_or("")
 }
 
-#[cfg(feature = "genesis-installer")]
 fn line_bytes(value: &[u8; 33]) -> &[u8] {
     &value[..value[32] as usize]
 }
@@ -259,7 +318,7 @@ impl FatGeometry {
             let data = partition_sectors
                 .checked_sub(FAT_RESERVED_SECTORS + FAT_COUNT * fat_sectors)
                 .ok_or(GenesisError::DiskTooSmall)?;
-            let required = ((data + 2) * 4 + 511) / 512;
+            let required = ((data + 2) * 4).div_ceil(512);
             if required == fat_sectors {
                 break data;
             }
@@ -268,7 +327,7 @@ impl FatGeometry {
         if clusters < FAT32_MIN_CLUSTERS {
             return Err(GenesisError::DiskTooSmall);
         }
-        let file_clusters = ((file_bytes as u64 + 511) / 512) as u32;
+        let file_clusters = (file_bytes as u64).div_ceil(512) as u32;
         if file_clusters + DIRECTORY_CLUSTERS > clusters {
             return Err(GenesisError::PayloadTooLarge);
         }
@@ -477,7 +536,7 @@ fn write_fat32<D: BlockDevice>(
 fn fat_value(cluster: u32, file_clusters: u32) -> u32 {
     match cluster {
         0 => 0x0FFF_FFF8,
-        1 | 2 | 3 | 4 => 0x0FFF_FFFF,
+        1..=4 => 0x0FFF_FFFF,
         current if current >= 5 && current < 5 + file_clusters => {
             if current + 1 == 5 + file_clusters {
                 0x0FFF_FFFF
@@ -505,12 +564,54 @@ fn directory_entry(
     put_u32(sector, offset + 28, size);
 }
 
+fn storage_envelope_aad(cfc: CfcFin, primary: Fin) -> [u8; 40] {
+    let mut aad = [0_u8; 40];
+    aad[..8].copy_from_slice(b"EXPCFCK1");
+    aad[8..24].copy_from_slice(&cfc.bytes());
+    aad[24..40].copy_from_slice(&primary.bytes());
+    aad
+}
+
+#[cfg(feature = "genesis-installer")]
+fn create_storage_envelope(
+    cfc: CfcFin,
+    primary: Fin,
+    password: &[u8],
+) -> Result<([u8; crate::crypto::STORAGE_KEY_LEN], StorageEnvelope), ()> {
+    let salt = crate::crypto::random_material::<{ crate::crypto::STORAGE_SALT_LEN }>(b"kdf-salt");
+    let nonce = crate::crypto::random_material::<{ crate::crypto::STORAGE_NONCE_LEN }>(b"key-wrap");
+    let storage_key =
+        crate::crypto::random_material::<{ crate::crypto::STORAGE_KEY_LEN }>(b"cfc-key");
+    let mut wrapped_key = storage_key;
+    let mut kek = crate::crypto::storage_kek(password, &salt)?;
+    let tag = crate::crypto::seal_storage(
+        &kek,
+        &nonce,
+        &storage_envelope_aad(cfc, primary),
+        &mut wrapped_key,
+    )?;
+    crate::crypto::wipe(&mut kek);
+    Ok((
+        storage_key,
+        StorageEnvelope {
+            salt,
+            nonce,
+            wrapped_key,
+            tag,
+        },
+    ))
+}
+
 fn encode_manifest(config: GenesisConfig) -> [u8; 512] {
     let mut sector = [0_u8; 512];
     sector[..8].copy_from_slice(&MANIFEST_MAGIC);
     put_u16(&mut sector, 8, MANIFEST_VERSION);
-    sector[10] = 2; // Architect
-    sector[11] = 0; // explicitly unencrypted
+    sector[10] = if config.storage_envelope.is_some() {
+        1
+    } else {
+        2
+    };
+    sector[11] = u8::from(config.storage_envelope.is_some());
     sector[16..32].copy_from_slice(&config.cfc_fin.bytes());
     sector[32..48].copy_from_slice(&config.primary_fin.bytes());
     put_text(&mut sector, 48, config.cfc_name);
@@ -523,14 +624,25 @@ fn encode_manifest(config: GenesisConfig) -> [u8; 512] {
     put_u32(&mut sector, 187, account.kdf_rounds);
     sector[191] = account.authority;
     sector[192] = u8::from(account.occupied);
+    if let Some(envelope) = config.storage_envelope {
+        sector[193..209].copy_from_slice(&envelope.salt);
+        sector[209..233].copy_from_slice(&envelope.nonce);
+        sector[233..265].copy_from_slice(&envelope.wrapped_key);
+        sector[265..281].copy_from_slice(&envelope.tag);
+        put_u32(&mut sector, 281, crate::crypto::STORAGE_ARGON2_MEMORY_KIB);
+        put_u32(&mut sector, 285, crate::crypto::STORAGE_ARGON2_PASSES);
+        sector[289] = crate::crypto::STORAGE_ARGON2_LANES as u8;
+        sector[290] = 1; // XChaCha20-Poly1305 suite
+    }
     let checksum = crc32(&sector[..508]);
     put_u32(&mut sector, 508, checksum);
     sector
 }
 
 fn decode_manifest(sector: &[u8; 512]) -> Option<GenesisConfig> {
+    let version = u16::from_le_bytes([sector[8], sector[9]]);
     if sector[..8] != MANIFEST_MAGIC
-        || u16::from_le_bytes([sector[8], sector[9]]) != MANIFEST_VERSION
+        || !(1..=MANIFEST_VERSION).contains(&version)
         || crc32(&sector[..508]) != get_u32(sector, 508)
     {
         return None;
@@ -550,12 +662,34 @@ fn decode_manifest(sector: &[u8; 512]) -> Option<GenesisConfig> {
     account.kdf_rounds = get_u32(sector, 187);
     account.authority = sector[191];
     account.occupied = sector[192] == 1;
+    let storage_envelope = if version >= 2 && sector[11] == 1 {
+        if sector[10] != 1
+            || get_u32(sector, 281) != crate::crypto::STORAGE_ARGON2_MEMORY_KIB
+            || get_u32(sector, 285) != crate::crypto::STORAGE_ARGON2_PASSES
+            || sector[289] != crate::crypto::STORAGE_ARGON2_LANES as u8
+            || sector[290] != 1
+        {
+            return None;
+        }
+        Some(StorageEnvelope {
+            salt: sector[193..209].try_into().ok()?,
+            nonce: sector[209..233].try_into().ok()?,
+            wrapped_key: sector[233..265].try_into().ok()?,
+            tag: sector[265..281].try_into().ok()?,
+        })
+    } else if sector[11] == 0 {
+        None
+    } else {
+        return None;
+    };
     Some(GenesisConfig {
         cfc_fin,
         cfc_name,
         primary_fin,
         primary_name,
         operator: session::StoredGenesisAccount(account),
+        storage_key: None,
+        storage_envelope,
     })
 }
 
@@ -646,6 +780,8 @@ mod tests {
             operator: session::StoredGenesisAccount(
                 session::genesis_operator(b"correct-horse").unwrap(),
             ),
+            storage_key: None,
+            storage_envelope: None,
         }
     }
 
@@ -678,6 +814,29 @@ mod tests {
         assert_eq!(&disk.bytes[app..app + payload.len()], payload);
         let manifest = MANIFEST_LBA as usize * 512;
         assert_eq!(&disk.bytes[manifest..manifest + 8], &MANIFEST_MAGIC);
+    }
+
+    #[test]
+    fn encrypted_manifest_preserves_versioned_key_envelope_without_plaintext_key() {
+        let mut original = config();
+        original.storage_key = Some([0xAA; crate::crypto::STORAGE_KEY_LEN]);
+        original.storage_envelope = Some(StorageEnvelope {
+            salt: [1; crate::crypto::STORAGE_SALT_LEN],
+            nonce: [2; crate::crypto::STORAGE_NONCE_LEN],
+            wrapped_key: [3; crate::crypto::STORAGE_KEY_LEN],
+            tag: [4; crate::crypto::STORAGE_TAG_LEN],
+        });
+        let encoded = encode_manifest(original);
+        assert_eq!(encoded[10], 1);
+        assert_eq!(encoded[11], 1);
+        assert!(!encoded
+            .windows(crate::crypto::STORAGE_KEY_LEN)
+            .any(|w| w == [0xAA; 32]));
+        let decoded = decode_manifest(&encoded).unwrap();
+        assert!(decoded.storage_key.is_none());
+        let envelope = decoded.storage_envelope.unwrap();
+        assert_eq!(envelope.salt, [1; crate::crypto::STORAGE_SALT_LEN]);
+        assert_eq!(envelope.wrapped_key, [3; crate::crypto::STORAGE_KEY_LEN]);
     }
 
     #[test]

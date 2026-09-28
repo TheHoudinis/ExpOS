@@ -36,10 +36,12 @@ baseline. Even if an
 Architect installation reuses one entered password, CFC keys, key envelopes,
 AEAD domains, and storage remain independent.
 
-The encrypted portion remains an approved target flow, not behavior of the
-current development image. Exact loader/key-envelope exchange, AEAD algorithm, Argon2id parameters,
-nonce format, checkpoint format, and recovery selection UI remain implementation
-work.
+Genesis Basic implements this flow with Argon2id v1.3 (64 MiB, three passes,
+one lane), a random 32-byte CFC storage key, and XChaCha20-Poly1305. Boot unlocks
+the manifest envelope before ExpFS decoding. Current-state and rotating
+checkpoint slots use authenticated encryption with nonce domains bound to CFC,
+generation and disk slot. The protected immutable baseline and recovery
+selection UI remain implementation work.
 
 Build dependencies include Clang, GNU PE-capable ld, NASM, GCC, Rust, Make,
 QEMU, and OVMF. Override `OVMF_CODE` and `OVMF_VARS` for another firmware path.
@@ -65,8 +67,8 @@ reported video memory before drawing; it does not assume the BIOS BAR address.
 Hardware drivers, interrupts and memory isolation retain their current
 limitations. This build is unsigned and does not implement Secure Boot.
 
-Genesis now has a separate native-UEFI installation build. Its first supported
-vertical slice is Architect, whole-disk and explicitly unencrypted. It writes
+Genesis now has a separate native-UEFI installation build. It offers encrypted
+Basic and explicitly unencrypted Architect whole-disk choices. It writes
 primary/backup GPT structures, a FAT32 EFI System Partition, the runtime at
 `EFI/BOOT/BOOTX64.EFI`, and a checksummed manifest with new CFC and Primary
 Dimension identities plus a salted Operator password verifier. On first
@@ -74,9 +76,9 @@ installed boot those identities drive core bootstrap and the Operator becomes
 an ExpFS account record. `make genesis-check` proves ISO install, ISO-free disk
 boot, Operator login, and shutdown.
 
-Basic remains gated rather than silently weakened. The current state database
-is still plaintext and does not implement the approved CFC key envelope, AEAD,
-protected installation baseline, or password-driven unlock flow. The Architect
-slice currently sees only the ATA primary master and does not enumerate model
+Basic never offers an encryption-off switch. Its current-state and checkpoint
+database is authenticated-encrypted and boot performs password-driven key
+unwrap before decoding ExpFS. The protected immutable baseline remains pending.
+The installer currently sees only the ATA primary master and does not enumerate model
 or serial identities, so it is not yet approved for physical-disk use. The
 automated check modifies only its generated blank image.

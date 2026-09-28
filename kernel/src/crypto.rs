@@ -2,11 +2,24 @@
 //! manager.  Passwords are stored as versioned PBKDF2-HMAC-SHA256 verifiers;
 //! they are never serialized as plaintext or with reversible encryption.
 
+use alloc::vec;
+use argon2::{Algorithm, Argon2, Block, Params, Version};
+use chacha20poly1305::{
+    aead::{AeadInPlace, KeyInit},
+    Tag, XChaCha20Poly1305, XNonce,
+};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 pub const PASSWORD_HASH_LEN: usize = 32;
 pub const PASSWORD_SALT_LEN: usize = 16;
 pub const PASSWORD_KDF_ROUNDS: u32 = 25_000;
+pub const STORAGE_KEY_LEN: usize = 32;
+pub const STORAGE_SALT_LEN: usize = 16;
+pub const STORAGE_NONCE_LEN: usize = 24;
+pub const STORAGE_TAG_LEN: usize = 16;
+pub const STORAGE_ARGON2_MEMORY_KIB: u32 = 65_536;
+pub const STORAGE_ARGON2_PASSES: u32 = 3;
+pub const STORAGE_ARGON2_LANES: u32 = 1;
 
 const SHA256_INITIAL: [u32; 8] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
@@ -205,6 +218,8 @@ pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 }
 
 static SALT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+#[cfg(feature = "genesis-installer")]
+static STORAGE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SaltEntropy {
@@ -237,6 +252,114 @@ pub fn password_salt(context: &[u8]) -> ([u8; PASSWORD_SALT_LEN], SaltEntropy) {
             SaltEntropy::Degraded
         },
     )
+}
+
+/// Derive the key-encryption key used only to wrap a CFC's random storage key.
+/// Account verification remains a separate PBKDF2 record; changing an account
+/// password rewraps this key rather than re-encrypting every ExpFS record.
+pub fn storage_kek(
+    password: &[u8],
+    salt: &[u8; STORAGE_SALT_LEN],
+) -> Result<[u8; STORAGE_KEY_LEN], ()> {
+    storage_kek_with_params(
+        password,
+        salt,
+        STORAGE_ARGON2_MEMORY_KIB,
+        STORAGE_ARGON2_PASSES,
+        STORAGE_ARGON2_LANES,
+    )
+}
+
+fn storage_kek_with_params(
+    password: &[u8],
+    salt: &[u8; STORAGE_SALT_LEN],
+    memory_kib: u32,
+    passes: u32,
+    lanes: u32,
+) -> Result<[u8; STORAGE_KEY_LEN], ()> {
+    let params = Params::new(memory_kib, passes, lanes, Some(STORAGE_KEY_LEN)).map_err(|_| ())?;
+    let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut memory = vec![Block::default(); memory_kib as usize];
+    let mut output = [0_u8; STORAGE_KEY_LEN];
+    let result = argon
+        .hash_password_into_with_memory(password, salt, &mut output, &mut memory)
+        .map_err(|_| ());
+    for block in &mut memory {
+        *block = Block::default();
+    }
+    result.map(|()| output)
+}
+
+/// Encrypt and authenticate bytes in place with the initial ExpFS AEAD suite.
+pub fn seal_storage(
+    key: &[u8; STORAGE_KEY_LEN],
+    nonce: &[u8; STORAGE_NONCE_LEN],
+    associated_data: &[u8],
+    bytes: &mut [u8],
+) -> Result<[u8; STORAGE_TAG_LEN], ()> {
+    let cipher = XChaCha20Poly1305::new(key.into());
+    let tag = cipher
+        .encrypt_in_place_detached(XNonce::from_slice(nonce), associated_data, bytes)
+        .map_err(|_| ())?;
+    Ok(tag.into())
+}
+
+/// Authenticate before releasing plaintext. A modified payload, CFC identity,
+/// generation, slot header or tag is rejected without decoding any records.
+pub fn open_storage(
+    key: &[u8; STORAGE_KEY_LEN],
+    nonce: &[u8; STORAGE_NONCE_LEN],
+    associated_data: &[u8],
+    bytes: &mut [u8],
+    tag: &[u8; STORAGE_TAG_LEN],
+) -> Result<(), ()> {
+    let cipher = XChaCha20Poly1305::new(key.into());
+    cipher
+        .decrypt_in_place_detached(
+            XNonce::from_slice(nonce),
+            associated_data,
+            bytes,
+            Tag::from_slice(tag),
+        )
+        .map_err(|_| ())
+}
+
+/// Mint independent key, salt or nonce material. RDRAND is mixed when present;
+/// TSC, an atomic sequence and a caller context prevent reuse on small VMs.
+#[cfg(feature = "genesis-installer")]
+pub fn random_material<const N: usize>(context: &[u8]) -> [u8; N] {
+    let mut output = [0_u8; N];
+    let mut offset = 0;
+    while offset < N {
+        let sequence = STORAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let ticks = unsafe { core::arch::x86_64::_rdtsc() };
+        let random = hardware_random().unwrap_or(0);
+        let mut digest = Sha256::new();
+        digest.update(b"ExpOS CFC storage entropy v1");
+        digest.update(context);
+        digest.update(&sequence.to_le_bytes());
+        digest.update(&ticks.to_le_bytes());
+        digest.update(&random.to_le_bytes());
+        let block = digest.finalize();
+        let count = (N - offset).min(block.len());
+        output[offset..offset + count].copy_from_slice(&block[..count]);
+        offset += count;
+    }
+    output
+}
+
+pub fn storage_nonce(
+    key: &[u8; STORAGE_KEY_LEN],
+    cfc: &[u8; 16],
+    generation: u64,
+    domain: u32,
+) -> [u8; STORAGE_NONCE_LEN] {
+    let generation = generation.to_le_bytes();
+    let domain = domain.to_le_bytes();
+    let digest = hmac_sha256(key, &[b"ExpOS ExpFS nonce v1", cfc, &generation, &domain]);
+    digest[..STORAGE_NONCE_LEN]
+        .try_into()
+        .unwrap_or([0; STORAGE_NONCE_LEN])
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -320,5 +443,29 @@ mod tests {
         assert!(constant_time_eq(&[1, 2, 3], &[1, 2, 3]));
         assert!(!constant_time_eq(&[0, 2, 3], &[1, 2, 3]));
         assert!(!constant_time_eq(&[1, 2], &[1, 2, 3]));
+    }
+
+    #[test]
+    fn storage_aead_binds_ciphertext_and_cfc_metadata() {
+        let key = [7_u8; STORAGE_KEY_LEN];
+        let nonce = [9_u8; STORAGE_NONCE_LEN];
+        let mut payload = *b"transactional ExpFS";
+        let plaintext = payload;
+        let tag = seal_storage(&key, &nonce, b"cfc=1,generation=2", &mut payload).unwrap();
+        assert_ne!(payload, plaintext);
+        open_storage(&key, &nonce, b"cfc=1,generation=2", &mut payload, &tag).unwrap();
+        assert_eq!(payload, plaintext);
+
+        let mut rejected = *b"transactional ExpFS";
+        let tag = seal_storage(&key, &nonce, b"cfc=1", &mut rejected).unwrap();
+        assert!(open_storage(&key, &nonce, b"cfc=2", &mut rejected, &tag).is_err());
+    }
+
+    #[test]
+    fn argon2id_kek_uses_password_and_salt() {
+        let salt = [3_u8; STORAGE_SALT_LEN];
+        let first = storage_kek_with_params(b"correct horse", &salt, 32, 2, 1).unwrap();
+        let second = storage_kek_with_params(b"wrong horse", &salt, 32, 2, 1).unwrap();
+        assert_ne!(first, second);
     }
 }

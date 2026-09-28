@@ -25,6 +25,12 @@ pub const PREF_WALLPAPER_EFFECTS: u16 = 1 << 10;
 /// Let damaged commits bypass the software cadence wait. Hardware
 /// VSync remains independently controlled by `vsync`.
 pub const PREF_RESPONSIVE_PRESENTATION: u16 = 1 << 11;
+/// Launcher visibility flags use negative/default-off semantics so disks from
+/// before menu customization continue to show both built-in and Ayo apps.
+pub const PREF_MENU_HIDE_BUILTINS: u16 = 1 << 12;
+pub const PREF_MENU_HIDE_INSTALLED: u16 = 1 << 13;
+pub const PREF_MENU_GRID: u16 = 1 << 14;
+pub const PREF_MENU_CATEGORIES: u16 = 1 << 15;
 
 const MAGIC: [u8; 8] = *b"EXPOST03";
 const FORMAT_VERSION: u16 = 3;
@@ -126,7 +132,7 @@ pub const UI_SCALE_CHOICES: u8 = UI_SCALE_PERCENT.len() as u8;
 pub const SCROLL_SPEED_CHOICES: u8 = SCROLL_STEPS.len() as u8;
 pub const FOCUS_POLICY_CHOICES: u8 = FOCUS_POLICY_NAMES.len() as u8;
 pub const WINDOW_OPACITY_CHOICES: u8 = WINDOW_OPACITY_ALPHA.len() as u8;
-pub const CUSTOMIZATION_BOOLEAN_CONTROLS: usize = 8;
+pub const CUSTOMIZATION_BOOLEAN_CONTROLS: usize = 12;
 pub const COLOR_AND_WALLPAPER_CHOICES: usize = 256 + 252;
 
 /// Total number of distinct selectable values represented by the customization
@@ -981,7 +987,11 @@ fn sanitize_preferences(mut value: PersistentPreferences) -> PersistentPreferenc
         | PREF_WIFI_ENABLED
         | PREF_WINDOW_SHADOWS
         | PREF_WALLPAPER_EFFECTS
-        | PREF_RESPONSIVE_PRESENTATION;
+        | PREF_RESPONSIVE_PRESENTATION
+        | PREF_MENU_HIDE_BUILTINS
+        | PREF_MENU_HIDE_INSTALLED
+        | PREF_MENU_GRID
+        | PREF_MENU_CATEGORIES;
     value
 }
 
@@ -1146,7 +1156,7 @@ mod tests {
 
     #[test]
     fn customization_surface_exposes_more_than_five_hundred_real_values() {
-        assert_eq!(CUSTOMIZATION_SELECTABLE_VALUES, 620);
+        assert_eq!(CUSTOMIZATION_SELECTABLE_VALUES, 628);
         const { assert!(CUSTOMIZATION_SELECTABLE_VALUES >= 500) };
     }
 
@@ -1250,17 +1260,28 @@ mod tests {
     }
 
     #[test]
-    fn performance_preference_flags_round_trip_and_unknown_bits_are_removed() {
+    fn performance_and_menu_preference_flags_round_trip() {
         let mut data = PersistentData::new();
-        data.preferences.flags =
-            PREF_WINDOW_SHADOWS | PREF_WALLPAPER_EFFECTS | PREF_RESPONSIVE_PRESENTATION | 0xF000;
+        data.preferences.flags = PREF_WINDOW_SHADOWS
+            | PREF_WALLPAPER_EFFECTS
+            | PREF_RESPONSIVE_PRESENTATION
+            | PREF_MENU_HIDE_BUILTINS
+            | PREF_MENU_HIDE_INSTALLED
+            | PREF_MENU_GRID
+            | PREF_MENU_CATEGORIES;
         let mut encoded = [0_u8; SLOT_LEN];
         encode_slot(&data, 14, &mut encoded);
 
         let decoded = decode_slot(&encoded, 1).unwrap();
         assert_eq!(
             decoded.data.preferences.flags,
-            PREF_WINDOW_SHADOWS | PREF_WALLPAPER_EFFECTS | PREF_RESPONSIVE_PRESENTATION
+            PREF_WINDOW_SHADOWS
+                | PREF_WALLPAPER_EFFECTS
+                | PREF_RESPONSIVE_PRESENTATION
+                | PREF_MENU_HIDE_BUILTINS
+                | PREF_MENU_HIDE_INSTALLED
+                | PREF_MENU_GRID
+                | PREF_MENU_CATEGORIES
         );
     }
 

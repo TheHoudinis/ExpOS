@@ -4,7 +4,7 @@
 //! inactive payload sectors first and its header sector last, so interruption
 //! cannot replace the previous valid generation with a partial transaction.
 
-use crate::{println, slog, storage};
+use crate::{crypto, println, slog, storage};
 use expos_core::{
     CfcFin, Dimension, Fin, Form, FormHandle, FormKind, Lifecycle, NetworkPolicy, Operations,
     Relationship, RelationshipKind, Text,
@@ -20,7 +20,7 @@ pub const ACCOUNTS_RECORD_CAPACITY: usize = 12 * 80;
 pub const CHECKPOINT_CAPACITY: usize = 8;
 
 const MAGIC: [u8; 8] = *b"EXPFSDB1";
-const FORMAT_VERSION: u16 = 1;
+const FORMAT_VERSION: u16 = 2;
 const HEADER_LEN: usize = 64;
 const SLOT_SECTORS: usize = 24;
 const SLOT_LEN: usize = SLOT_SECTORS * storage::SECTOR_SIZE;
@@ -115,6 +115,7 @@ struct RuntimeStore {
     generation: u64,
     active_slot: u8,
     checkpoints: [Option<CheckpointInfo>; CHECKPOINT_CAPACITY],
+    storage_key: Option<[u8; crypto::STORAGE_KEY_LEN]>,
 }
 
 impl RuntimeStore {
@@ -128,6 +129,7 @@ impl RuntimeStore {
             generation: 0,
             active_slot: 1,
             checkpoints: [None; CHECKPOINT_CAPACITY],
+            storage_key: None,
         }
     }
 }
@@ -149,7 +151,12 @@ pub struct CheckpointInfo {
     pub slot: u8,
 }
 
-pub fn initialize(cfc: CfcFin, cfc_name: Text, primary_dimension: Fin) {
+pub fn initialize(
+    cfc: CfcFin,
+    cfc_name: Text,
+    primary_dimension: Fin,
+    storage_key: Option<[u8; crypto::STORAGE_KEY_LEN]>,
+) {
     let device = match storage::initialize() {
         Ok(device) if device.sectors() >= MINIMUM_DISK_SECTORS => device,
         Ok(device) => {
@@ -168,20 +175,30 @@ pub fn initialize(cfc: CfcFin, cfc_name: Text, primary_dimension: Fin) {
         }
     };
 
-    let first = read_slot(device, 0).ok().filter(|slot| {
-        slot.snapshot.cfc == cfc && slot.snapshot.primary_dimension == primary_dimension
-    });
-    let second = read_slot(device, 1).ok().filter(|slot| {
-        slot.snapshot.cfc == cfc && slot.snapshot.primary_dimension == primary_dimension
-    });
+    let first = read_slot(device, 0, storage_key.as_ref())
+        .ok()
+        .filter(|slot| {
+            slot.snapshot.cfc == cfc && slot.snapshot.primary_dimension == primary_dimension
+        });
+    let second = read_slot(device, 1, storage_key.as_ref())
+        .ok()
+        .filter(|slot| {
+            slot.snapshot.cfc == cfc && slot.snapshot.primary_dimension == primary_dimension
+        });
     let selected = newest(first, second);
     let mut store = STORE.lock();
     store.device = Some(device);
     store.cfc = cfc;
     store.cfc_name = cfc_name;
     store.primary_dimension = primary_dimension;
+    store.storage_key = storage_key;
     for index in 0..CHECKPOINT_CAPACITY {
-        if let Ok(checkpoint) = read_at(device, checkpoint_lba(index), index as u8) {
+        if let Ok(checkpoint) = read_at(
+            device,
+            checkpoint_lba(index),
+            index as u8,
+            storage_key.as_ref(),
+        ) {
             if checkpoint.snapshot.cfc == cfc
                 && checkpoint.snapshot.primary_dimension == primary_dimension
             {
@@ -375,9 +392,20 @@ pub fn record_checkpoint() -> Result<CheckpointInfo, StoreError> {
         })
         .ok_or(StoreError::VerificationFailed)?;
     let mut encoded = [0_u8; SLOT_LEN];
-    encode_slot(&snapshot, state_id, &mut encoded)?;
+    encode_slot(
+        &snapshot,
+        state_id,
+        store.storage_key.as_ref(),
+        checkpoint_lba(slot),
+        &mut encoded,
+    )?;
     write_at(device, checkpoint_lba(slot), &encoded)?;
-    let verified = read_at(device, checkpoint_lba(slot), slot as u8)?;
+    let verified = read_at(
+        device,
+        checkpoint_lba(slot),
+        slot as u8,
+        store.storage_key.as_ref(),
+    )?;
     if verified.generation != state_id
         || verified.snapshot.cfc != snapshot.cfc
         || verified.snapshot.journal_sequence != snapshot.journal_sequence
@@ -413,6 +441,7 @@ pub fn restore_checkpoint(state_id: u64) -> Result<u64, StoreError> {
         device,
         checkpoint_lba(checkpoint.slot as usize),
         checkpoint.slot,
+        store.storage_key.as_ref(),
     )?
     .snapshot;
     if let Some(current) = store.snapshot {
@@ -469,14 +498,22 @@ fn commit_locked(store: &mut RuntimeStore, snapshot: Snapshot) -> Result<u64, St
     let device = store.device.ok_or(StoreError::Unavailable)?;
     let generation = store.generation.wrapping_add(1).max(1);
     let target_slot = store.active_slot ^ 1;
-    let mut encoded = [0_u8; SLOT_LEN];
-    encode_slot(&snapshot, generation, &mut encoded)?;
     let base = slot_lba(target_slot);
+    let mut encoded = [0_u8; SLOT_LEN];
+    encode_slot(
+        &snapshot,
+        generation,
+        store.storage_key.as_ref(),
+        base,
+        &mut encoded,
+    )?;
     write_at(device, base, &encoded)?;
-    let verified = read_at(device, base, target_slot).map_err(|error| match error {
-        StoreError::Disk(error) => StoreError::Disk(error),
-        _ => StoreError::VerificationFailed,
-    })?;
+    let verified = read_at(device, base, target_slot, store.storage_key.as_ref()).map_err(
+        |error| match error {
+            StoreError::Disk(error) => StoreError::Disk(error),
+            _ => StoreError::VerificationFailed,
+        },
+    )?;
     if verified.generation != generation
         || verified.snapshot.cfc != snapshot.cfc
         || verified.snapshot.journal_sequence != snapshot.journal_sequence
@@ -559,6 +596,8 @@ fn validate_snapshot(snapshot: &Snapshot) -> Result<(), StoreError> {
 fn encode_slot(
     snapshot: &Snapshot,
     generation: u64,
+    storage_key: Option<&[u8; crypto::STORAGE_KEY_LEN]>,
+    nonce_domain: u32,
     output: &mut [u8; SLOT_LEN],
 ) -> Result<(), StoreError> {
     output.fill(0);
@@ -653,18 +692,37 @@ fn encode_slot(
     put_u64(output, 16, generation);
     output[24..40].copy_from_slice(&snapshot.cfc.bytes());
     put_u32(output, 40, snapshot.journal_sequence);
-    let payload_crc = crc32(&output[HEADER_LEN..]);
-    put_u32(output, 48, payload_crc);
-    let header_crc = crc32(&output[..52]);
-    put_u32(output, 52, header_crc);
+    if let Some(key) = storage_key {
+        output[44] = 1;
+        output[45] = 1; // XChaCha20-Poly1305
+        let nonce = crypto::storage_nonce(key, &snapshot.cfc.bytes(), generation, nonce_domain);
+        let (header, payload) = output.split_at_mut(HEADER_LEN);
+        let tag = crypto::seal_storage(key, &nonce, &header[..48], payload)
+            .map_err(|_| StoreError::VerificationFailed)?;
+        header[48..64].copy_from_slice(&tag);
+    } else {
+        let payload_crc = crc32(&output[HEADER_LEN..]);
+        put_u32(output, 48, payload_crc);
+        let header_crc = crc32(&output[..52]);
+        put_u32(output, 52, header_crc);
+    }
     Ok(())
 }
 
-fn read_slot(device: storage::Device, slot: u8) -> Result<DecodedSlot, StoreError> {
-    read_at(device, slot_lba(slot), slot)
+fn read_slot(
+    device: storage::Device,
+    slot: u8,
+    storage_key: Option<&[u8; crypto::STORAGE_KEY_LEN]>,
+) -> Result<DecodedSlot, StoreError> {
+    read_at(device, slot_lba(slot), slot, storage_key)
 }
 
-fn read_at(device: storage::Device, base: u32, slot: u8) -> Result<DecodedSlot, StoreError> {
+fn read_at(
+    device: storage::Device,
+    base: u32,
+    slot: u8,
+    storage_key: Option<&[u8; crypto::STORAGE_KEY_LEN]>,
+) -> Result<DecodedSlot, StoreError> {
     let mut encoded = [0_u8; SLOT_LEN];
     for sector_index in 0..SLOT_SECTORS {
         let mut sector = [0_u8; storage::SECTOR_SIZE];
@@ -674,19 +732,42 @@ fn read_at(device: storage::Device, base: u32, slot: u8) -> Result<DecodedSlot, 
         let start = sector_index * storage::SECTOR_SIZE;
         encoded[start..start + storage::SECTOR_SIZE].copy_from_slice(&sector);
     }
-    decode_slot(&encoded, slot).ok_or(StoreError::VerificationFailed)
+    decode_slot(&encoded, slot, storage_key, base).ok_or(StoreError::VerificationFailed)
 }
 
-fn decode_slot(input: &[u8; SLOT_LEN], slot: u8) -> Option<DecodedSlot> {
-    if input[..8] != MAGIC
-        || get_u16(input, 8) != FORMAT_VERSION
-        || get_u16(input, 10) as usize != HEADER_LEN
-        || get_u32(input, 12) as usize != PAYLOAD_LEN
-        || crc32(&input[..52]) != get_u32(input, 52)
-        || crc32(&input[HEADER_LEN..]) != get_u32(input, 48)
+fn decode_slot(
+    encoded: &[u8; SLOT_LEN],
+    slot: u8,
+    storage_key: Option<&[u8; crypto::STORAGE_KEY_LEN]>,
+    nonce_domain: u32,
+) -> Option<DecodedSlot> {
+    let version = get_u16(encoded, 8);
+    if encoded[..8] != MAGIC
+        || !(1..=FORMAT_VERSION).contains(&version)
+        || get_u16(encoded, 10) as usize != HEADER_LEN
+        || get_u32(encoded, 12) as usize != PAYLOAD_LEN
     {
         return None;
     }
+    let encrypted = version >= 2 && encoded[44] == 1;
+    let mut decoded = *encoded;
+    if encrypted {
+        if encoded[45] != 1 {
+            return None;
+        }
+        let key = storage_key?;
+        let generation = get_u64(encoded, 16);
+        let cfc_bytes: [u8; 16] = encoded[24..40].try_into().ok()?;
+        let nonce = crypto::storage_nonce(key, &cfc_bytes, generation, nonce_domain);
+        let tag: [u8; crypto::STORAGE_TAG_LEN] = encoded[48..64].try_into().ok()?;
+        let (header, payload) = decoded.split_at_mut(HEADER_LEN);
+        crypto::open_storage(key, &nonce, &header[..48], payload, &tag).ok()?;
+    } else if crc32(&encoded[..52]) != get_u32(encoded, 52)
+        || crc32(&encoded[HEADER_LEN..]) != get_u32(encoded, 48)
+    {
+        return None;
+    }
+    let input = &decoded;
     let generation = get_u64(input, 16);
     if generation == 0 {
         return None;
@@ -1102,8 +1183,8 @@ mod tests {
     fn disk_snapshot_round_trips_form_graph_and_content() {
         let source = snapshot();
         let mut encoded = [0_u8; SLOT_LEN];
-        encode_slot(&source, 11, &mut encoded).unwrap();
-        let decoded = decode_slot(&encoded, 0).unwrap();
+        encode_slot(&source, 11, None, 0, &mut encoded).unwrap();
+        let decoded = decode_slot(&encoded, 0, None, 0).unwrap();
         assert_eq!(decoded.generation, 11);
         assert_eq!(decoded.snapshot.cfc, source.cfc);
         assert_eq!(decoded.snapshot.journal_sequence, 7);
@@ -1117,8 +1198,28 @@ mod tests {
     #[test]
     fn corruption_invalidates_the_snapshot() {
         let mut encoded = [0_u8; SLOT_LEN];
-        encode_slot(&snapshot(), 1, &mut encoded).unwrap();
+        encode_slot(&snapshot(), 1, None, 0, &mut encoded).unwrap();
         encoded[HEADER_LEN + 700] ^= 0x80;
-        assert!(decode_slot(&encoded, 0).is_none());
+        assert!(decode_slot(&encoded, 0, None, 0).is_none());
+    }
+
+    #[test]
+    fn encrypted_snapshot_requires_key_and_authenticates_header_payload_and_domain() {
+        let source = snapshot();
+        let key = [0x42_u8; crypto::STORAGE_KEY_LEN];
+        let mut encoded = [0_u8; SLOT_LEN];
+        encode_slot(&source, 12, Some(&key), 64, &mut encoded).unwrap();
+        assert_eq!(encoded[44], 1);
+        assert_ne!(
+            &encoded[HEADER_LEN..HEADER_LEN + 16],
+            &source.primary_dimension.bytes()
+        );
+        assert!(decode_slot(&encoded, 0, None, 64).is_none());
+        assert!(decode_slot(&encoded, 0, Some(&[1; crypto::STORAGE_KEY_LEN]), 64).is_none());
+        assert!(decode_slot(&encoded, 0, Some(&key), 65).is_none());
+        let decoded = decode_slot(&encoded, 0, Some(&key), 64).unwrap();
+        assert_eq!(decoded.snapshot.cfc, source.cfc);
+        encoded[HEADER_LEN + 9] ^= 1;
+        assert!(decode_slot(&encoded, 0, Some(&key), 64).is_none());
     }
 }

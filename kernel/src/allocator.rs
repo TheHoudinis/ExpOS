@@ -9,7 +9,9 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(not(test))]
-const HEAP_BYTES: usize = 8 * 1024 * 1024;
+// Genesis Basic's approved Argon2id profile uses 64 MiB of working memory.
+// Keep a bounded margin for TLS, desktop documents and allocator metadata.
+const HEAP_BYTES: usize = 80 * 1024 * 1024;
 
 #[cfg(not(test))]
 #[repr(C, align(4096))]

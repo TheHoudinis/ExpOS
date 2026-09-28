@@ -12,12 +12,6 @@ root = Path(__file__).resolve().parents[1]
 build = root / "build/genesis"
 code = os.environ.get("OVMF_CODE", "/usr/share/edk2/x64/OVMF_CODE.4m.fd")
 vars_template = os.environ.get("OVMF_VARS", "/usr/share/edk2/x64/OVMF_VARS.4m.fd")
-target = build / "genesis-check-target.img"
-target.write_bytes(b"")
-with target.open("r+b") as disk:
-    disk.truncate(96 * 1024 * 1024)
-
-
 def firmware(name: str) -> list[str]:
     variables = build / f"OVMF-{name}-vars.fd"
     shutil.copyfile(vars_template, variables)
@@ -70,38 +64,70 @@ base = [
     "qemu-system-x86_64", "-machine", "pc", "-cpu", "max", "-m", "256M",
     "-vga", "std", "-display", "none", "-serial", "stdio", "-no-reboot",
 ]
-install_command = base + firmware("genesis-install") + [
-    "-drive", f"file={target},format=raw,if=ide,index=0",
-    "-cdrom", "build/ExpOS-0.9-x86_64.iso", "-boot", "once=d",
-]
-install_input = (root / "tests/qemu-genesis-input.txt").read_bytes() + b"\n"
-install_status, install_output = run(
-    "install", install_command, b"Installation mode [1/2]:", install_input, 90
-)
-assert install_status == 0, f"installer failed ({install_status}); see build/genesis/install-serial.log"
-for marker in (
-    b"EXPOS_GENESIS_INSTALLED",
-    b"EFI/BOOT/BOOTX64.EFI installed",
-    b"Installation complete",
-):
-    assert marker in install_output, f"installer omitted {marker!r}"
 
-boot_command = base + firmware("genesis-boot") + [
-    "-drive", f"file={target},format=raw,if=ide,index=0",
-    "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-]
-boot_status, boot_output = run(
-    "boot",
-    boot_command,
-    b"EXPOS_BOOT_MODE_READY",
-    b"2\noperator\ncorrect-horse\nshutdown\n",
-    60,
-)
-assert boot_status == 33, f"installed boot failed ({boot_status}); see build/genesis/boot-serial.log"
-for marker in (
-    b"EXPOS_ACCOUNTS_READY source=genesis persisted=true",
-    b"EXPOS_LOGIN_OK user=operator",
-    b"EXPOS_COMMAND_OK shutdown",
-):
-    assert marker in boot_output, f"installed boot omitted {marker!r}"
-print("Genesis ISO install, disk boot, Operator login, and shutdown completed")
+
+def check_variant(name: str, mode: bytes, encrypted: bool) -> None:
+    target = build / f"genesis-{name}-target.img"
+    target.write_bytes(b"")
+    with target.open("r+b") as disk:
+        disk.truncate(96 * 1024 * 1024)
+
+    install_command = base + firmware(f"{name}-install") + [
+        "-drive", f"file={target},format=raw,if=ide,index=0",
+        "-cdrom", "build/ExpOS-0.9-x86_64.iso", "-boot", "once=d",
+    ]
+    common = b"ERASE\nTest Fabric\nPrimary\ncorrect-horse\n\n"
+    install_status, install_output = run(
+        f"{name}-install",
+        install_command,
+        b"Installation mode [1/2]:",
+        mode + b"\n" + common,
+        180 if encrypted else 90,
+    )
+    assert install_status == 0, (
+        f"{name} installer failed ({install_status}); "
+        f"see build/genesis/{name}-install-serial.log"
+    )
+    for marker in (
+        b"EXPOS_GENESIS_INSTALLED",
+        b"EFI/BOOT/BOOTX64.EFI installed",
+        b"Installation complete",
+    ):
+        assert marker in install_output, f"{name} installer omitted {marker!r}"
+
+    boot_command = base + firmware(f"{name}-boot") + [
+        "-drive", f"file={target},format=raw,if=ide,index=0",
+        "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+    ]
+    if encrypted:
+        ready = b"Unlock password:"
+        boot_input = b"correct-horse\n2\noperator\ncorrect-horse\nshutdown\n"
+        timeout = 180
+    else:
+        ready = b"EXPOS_BOOT_MODE_READY"
+        boot_input = b"2\noperator\ncorrect-horse\nshutdown\n"
+        timeout = 60
+    boot_status, boot_output = run(
+        f"{name}-boot", boot_command, ready, boot_input, timeout
+    )
+    assert boot_status == 33, (
+        f"{name} installed boot failed ({boot_status}); "
+        f"see build/genesis/{name}-boot-serial.log"
+    )
+    for marker in (
+        b"EXPOS_ACCOUNTS_READY source=genesis persisted=true",
+        b"EXPOS_LOGIN_OK user=operator",
+        b"EXPOS_COMMAND_OK shutdown",
+    ):
+        assert marker in boot_output, f"{name} installed boot omitted {marker!r}"
+    if encrypted:
+        assert b"EXPOS_CFC_UNLOCKED" in boot_output
+        assert b"suite=xchacha20poly1305" in boot_output
+        disk_bytes = target.read_bytes()
+        assert b"correct-horse" not in disk_bytes
+        assert disk_bytes[64 * 512 + 44] == 1, "ExpFS slot A is not encrypted"
+
+
+check_variant("architect", b"2", False)
+check_variant("basic", b"1", True)
+print("Genesis Architect and encrypted Basic install, disk boot, login, and shutdown completed")

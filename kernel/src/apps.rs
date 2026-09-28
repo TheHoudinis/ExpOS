@@ -146,7 +146,7 @@ const APPS: [PackageApp; PACKAGE_COUNT] = [
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ManagerAction {
     Changed,
-    Installed,
+    InstallRequested,
     Open,
 }
 
@@ -185,7 +185,7 @@ impl NativeApps {
         match key {
             crate::input::KEY_UP => self.selected = self.selected.saturating_sub(1),
             crate::input::KEY_DOWN => self.selected = (self.selected + 1).min(PACKAGE_COUNT - 1),
-            b'i' | b'I' => return Some(self.install_selected()),
+            b'i' | b'I' => return Some(ManagerAction::InstallRequested),
             b'\n' => {
                 if self.is_installed(self.selected) {
                     self.active = self.selected;
@@ -193,7 +193,7 @@ impl NativeApps {
                     self.mark_persistent_change();
                     return Some(ManagerAction::Open);
                 }
-                return Some(self.install_selected());
+                return Some(ManagerAction::InstallRequested);
             }
             _ => return None,
         }
@@ -217,7 +217,7 @@ impl NativeApps {
         let action_y = rect.height as i16 - 58;
         if (action_y..action_y + 38).contains(&local_y) {
             if (rect.width as i16 - 252..rect.width as i16 - 140).contains(&local_x) {
-                return Some(self.install_selected());
+                return Some(ManagerAction::InstallRequested);
             }
             if (rect.width as i16 - 128..rect.width as i16 - 20).contains(&local_x)
                 && self.is_installed(self.selected)
@@ -231,11 +231,70 @@ impl NativeApps {
         None
     }
 
-    fn install_selected(&mut self) -> ManagerAction {
+    pub fn commit_install_selected(&mut self) {
         self.installed |= 1 << self.selected;
         self.mark_persistent_change();
         self.notice = "Verified -> DIESE -> PIMP -> installed Interface Form.";
-        ManagerAction::Installed
+    }
+
+    pub const fn selected_index(&self) -> usize {
+        self.selected
+    }
+
+    pub const fn active_index(&self) -> usize {
+        self.active
+    }
+
+    pub const fn installed_count(&self) -> usize {
+        self.installed.count_ones() as usize
+    }
+
+    pub const fn installed_at(&self, ordinal: usize) -> Option<usize> {
+        let mut index = 0;
+        let mut seen = 0;
+        while index < PACKAGE_COUNT {
+            if self.is_installed(index) {
+                if seen == ordinal {
+                    return Some(index);
+                }
+                seen += 1;
+            }
+            index += 1;
+        }
+        None
+    }
+
+    pub fn activate_installed(&mut self, index: usize) -> bool {
+        if index >= PACKAGE_COUNT || !self.is_installed(index) {
+            return false;
+        }
+        self.active = index;
+        self.clear_input();
+        true
+    }
+
+    pub const fn app_name(index: usize) -> &'static str {
+        if index < PACKAGE_COUNT {
+            APPS[index].name
+        } else {
+            "App"
+        }
+    }
+
+    pub const fn app_category(index: usize) -> &'static str {
+        if index < PACKAGE_COUNT {
+            APPS[index].category
+        } else {
+            "Other"
+        }
+    }
+
+    pub const fn app_accent(index: usize) -> u32 {
+        if index < PACKAGE_COUNT {
+            APPS[index].accent
+        } else {
+            color::CYAN
+        }
     }
 
     pub const fn persistence_generation(&self) -> u32 {
@@ -375,14 +434,6 @@ impl NativeApps {
             return false;
         }
         match key {
-            crate::input::KEY_LEFT => {
-                self.shift_active(-1);
-                true
-            }
-            crate::input::KEY_RIGHT => {
-                self.shift_active(1);
-                true
-            }
             0x08 => {
                 self.input_len = self.input_len.saturating_sub(1);
                 true
@@ -425,35 +476,19 @@ impl NativeApps {
         }
         let local_x = x - rect.x;
         let local_y = y - rect.y;
-        if self.active == 6 && (210..466).contains(&local_x) && (116..372).contains(&local_y) {
-            let column = ((local_x - 210) / 32) as u64;
+        if self.active == 6 && (40..296).contains(&local_x) && (116..372).contains(&local_y) {
+            let column = ((local_x - 40) / 32) as u64;
             let row = ((local_y - 116) / 32) as u64;
             self.pixels ^= 1_u64 << (row * 8 + column);
             self.mark_persistent_change();
             return true;
         }
-        if self.active == 16 && (220..500).contains(&local_x) && (170..260).contains(&local_y) {
+        if self.active == 16 && (50..330).contains(&local_x) && (240..334).contains(&local_y) {
             self.counter = self.counter.saturating_add(1);
             self.mark_persistent_change();
             return true;
         }
         false
-    }
-
-    fn shift_active(&mut self, direction: i8) {
-        for step in 1..=PACKAGE_COUNT {
-            let index = if direction < 0 {
-                (self.active + PACKAGE_COUNT - step) % PACKAGE_COUNT
-            } else {
-                (self.active + step) % PACKAGE_COUNT
-            };
-            if self.is_installed(index) {
-                self.active = index;
-                self.clear_input();
-                self.mark_persistent_change();
-                break;
-            }
-        }
     }
 
     fn clear_input(&mut self) {
@@ -465,19 +500,10 @@ impl NativeApps {
         let x = rect.x as i32;
         let y = rect.y as i32;
         let width = rect.width as i32;
-        framebuffer::rect(x + 18, y + 48, 150, rect.height as i32 - 66, 0x000D_1218);
-        framebuffer::text(x + 34, y + 66, "AYO APPS", color::WHITE, 1);
-        framebuffer::text(x + 34, y + 88, "<  SWITCH  >", color::MUTED, 1);
         if self.installed == 0 {
+            framebuffer::text(x + 34, y + 96, "NO PACKAGE APPS INSTALLED", color::MUTED, 2);
             framebuffer::text(
-                x + 204,
-                y + 96,
-                "NO PACKAGE APPS INSTALLED",
-                color::MUTED,
-                2,
-            );
-            framebuffer::text(
-                x + 204,
+                x + 34,
                 y + 136,
                 "Open Ayo, choose a package, then Install.",
                 color::INK,
@@ -486,34 +512,9 @@ impl NativeApps {
             return;
         }
         let app = APPS[self.active];
-        let mut slot = 0;
-        for (index, package) in APPS.iter().enumerate() {
-            if !self.is_installed(index) {
-                continue;
-            }
-            if slot >= 10 {
-                break;
-            }
-            let row_y = y + 118 + slot * 27;
-            if index == self.active {
-                framebuffer::rect(x + 26, row_y - 7, 132, 23, 0x0021_2931);
-            }
-            framebuffer::text(
-                x + 34,
-                row_y,
-                package.name,
-                if index == self.active {
-                    package.accent
-                } else {
-                    color::MUTED
-                },
-                1,
-            );
-            slot += 1;
-        }
-        framebuffer::text(x + 198, y + 58, app.name, app.accent, 2);
-        framebuffer::text(x + 200, y + 88, app.summary, color::MUTED, 1);
-        self.render_tool(x + 198, y + 112, width - 222, rect.height as i32 - 142);
+        framebuffer::text(x + 28, y + 58, app.name, app.accent, 2);
+        framebuffer::text(x + 30, y + 88, app.summary, color::MUTED, 1);
+        self.render_tool(x + 28, y + 112, width - 56, rect.height as i32 - 142);
     }
 
     fn render_tool(&self, x: i32, y: i32, width: i32, height: i32) {
@@ -685,7 +686,7 @@ impl NativeApps {
                 framebuffer::text(
                     x + 22,
                     y + height - 24,
-                    "Type to work  //  LEFT RIGHT switches installed apps",
+                    "Type to work  //  reopen another app from the main menu",
                     color::MUTED,
                     1,
                 );
@@ -981,7 +982,11 @@ mod tests {
     fn durable_app_state_roundtrips_without_restoring_transient_input() {
         let mut apps = NativeApps::new();
         apps.selected = 6;
-        assert_eq!(apps.install_selected(), ManagerAction::Installed);
+        apps.commit_install_selected();
+        assert_eq!(apps.installed_count(), 1);
+        assert_eq!(apps.installed_at(0), Some(6));
+        assert!(apps.activate_installed(6));
+        assert_eq!(apps.active_index(), 6);
         apps.active = 6;
         apps.pixels = 0x55AA;
         apps.counter = 42;

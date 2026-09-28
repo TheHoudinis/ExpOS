@@ -9,8 +9,9 @@ use crate::{
     network, radio, slog, state,
 };
 use expos_core::{
-    Authority, BrowserText, BufferFormat, BufferHandle, CapabilityBroker, CfcFin, DisplayServer,
-    Document, Fin, NodeKind, Operations, Rect, SurfaceRole, TextAlign,
+    AbiCall, AbiRequest, AbiResponse, AbiStatus, Authority, BrowserText, BufferFormat,
+    BufferHandle, CapabilityBroker, CfcFin, DisplayServer, Document, Fin, NativeCallGate, NodeKind,
+    Operations, Rect, SurfaceRole, TextAlign, FORM_ABI_VERSION,
 };
 use framebuffer::color;
 
@@ -24,6 +25,7 @@ pub const SYSTEM_FIN: Fin = Fin::from_u128(0x5359_5354_454D_0000_0000_0000_0000_
 pub const GAMES_FIN: Fin = Fin::from_u128(0x4741_4D45_5300_0000_0000_0000_0000_0001);
 pub const NOTES_FIN: Fin = Fin::from_u128(0x4E4F_5445_5300_0000_0000_0000_0000_0001);
 pub const APPS_FIN: Fin = Fin::from_u128(0x4150_5053_0000_0000_0000_0000_0000_0001);
+pub const AYO_FIN: Fin = Fin::from_u128(0x4159_4F00_0000_0000_0000_0000_0000_0001);
 
 const APP_COUNT: usize = 9;
 const TERMINAL_HISTORY: usize = 24;
@@ -35,7 +37,8 @@ const BROWSER_HISTORY_CAPACITY: usize = 12;
 const CURSOR_WIDTH: usize = 14;
 const CURSOR_HEIGHT: usize = 20;
 const LAUNCHER_WIDTH: u16 = 250;
-const LAUNCHER_HEIGHT: u16 = 350;
+const LAUNCHER_GRID_WIDTH: u16 = 430;
+const LAUNCHER_HEIGHT: u16 = 410;
 const STABLE_FIN: Fin = Fin::from_u128(0x4449_4D00_0000_0000_0000_0000_0000_0001);
 
 fn taskbar_thickness(preferences: DesktopPreferences) -> i16 {
@@ -81,7 +84,12 @@ fn launcher_rect(preferences: DesktopPreferences) -> Rect {
     let dock = taskbar_rect(preferences);
     let screen_width = framebuffer::width() as i16;
     let screen_height = framebuffer::height() as i16;
-    let width = LAUNCHER_WIDTH.min(framebuffer::width() as u16 - 8);
+    let requested_width = if preferences.menu_grid {
+        LAUNCHER_GRID_WIDTH
+    } else {
+        LAUNCHER_WIDTH
+    };
+    let width = requested_width.min(framebuffer::width() as u16 - 8);
     let height = LAUNCHER_HEIGHT.min(framebuffer::height() as u16 - 8);
     let (x, y) = match preferences.taskbar_placement {
         TaskbarPlacement::Bottom => (8, (dock.y - height as i16 - 8).max(4)),
@@ -468,7 +476,73 @@ impl AppKind {
     }
 }
 
-const SETTINGS_CATEGORY_COUNT: usize = 11;
+#[derive(Clone, Copy)]
+enum LauncherItem {
+    BuiltIn(AppKind),
+    Installed(usize),
+}
+
+fn launcher_item(desktop: &DesktopState, ordinal: usize) -> Option<LauncherItem> {
+    let mut cursor = 0;
+    if desktop.preferences.menu_show_builtins {
+        for app in AppKind::ALL {
+            // Ayo-installed apps have direct entries. The shared Apps surface
+            // is an internal host, not a second app-inside-an-app launcher.
+            if app == AppKind::Apps {
+                continue;
+            }
+            if cursor == ordinal {
+                return Some(LauncherItem::BuiltIn(app));
+            }
+            cursor += 1;
+        }
+    }
+    if desktop.preferences.menu_show_installed {
+        let installed_ordinal = ordinal.checked_sub(cursor)?;
+        return desktop
+            .native_apps
+            .installed_at(installed_ordinal)
+            .map(LauncherItem::Installed);
+    }
+    None
+}
+
+fn launcher_item_count(desktop: &DesktopState) -> usize {
+    let builtins = if desktop.preferences.menu_show_builtins {
+        APP_COUNT - 1
+    } else {
+        0
+    };
+    builtins
+        + if desktop.preferences.menu_show_installed {
+            desktop.native_apps.installed_count()
+        } else {
+            0
+        }
+}
+
+fn launcher_columns(preferences: DesktopPreferences) -> usize {
+    if preferences.menu_grid {
+        2
+    } else {
+        1
+    }
+}
+
+fn launcher_row_height(preferences: DesktopPreferences) -> i32 {
+    state::MENU_ROW_HEIGHTS_PX[preferences.menu_density.min(4) as usize] as i32
+}
+
+fn launcher_visible_rows(preferences: DesktopPreferences) -> usize {
+    let height = launcher_rect(preferences).height as i32;
+    ((height - 62) / launcher_row_height(preferences)).max(1) as usize
+}
+
+fn launcher_capacity(preferences: DesktopPreferences) -> usize {
+    launcher_visible_rows(preferences) * launcher_columns(preferences)
+}
+
+const SETTINGS_CATEGORY_COUNT: usize = 12;
 const ACCENT_COLOR_CHOICES: usize = 256;
 const WALLPAPER_VARIANT_CHOICES: usize = 252;
 const CUSTOMIZATION_VALUE_COUNT: usize = ThemeChoice::ALL.len()
@@ -493,7 +567,16 @@ const CUSTOMIZATION_VALUE_COUNT: usize = ThemeChoice::ALL.len()
     + 2 // auto-hide
     + 2 // translucent panel
     + 2 // application labels
-    + 2; // clock seconds
+    + 2 // clock seconds
+    + state::MENU_ROW_HEIGHTS_PX.len()
+    + state::ANIMATION_DURATIONS_MS.len()
+    + state::UI_SCALE_PERCENT.len()
+    + 2 // list / grid
+    + 2 // built-in apps
+    + 2 // installed apps
+    + 2 // category labels
+    + 2 // tooltips
+    + 2; // install feedback
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsCategory {
@@ -506,6 +589,7 @@ enum SettingsCategory {
     Input,
     Windows,
     Taskbar,
+    Menu,
     Privacy,
     About,
 }
@@ -521,6 +605,7 @@ impl SettingsCategory {
         Self::Input,
         Self::Windows,
         Self::Taskbar,
+        Self::Menu,
         Self::Privacy,
         Self::About,
     ];
@@ -536,8 +621,9 @@ impl SettingsCategory {
             Self::Input => 6,
             Self::Windows => 7,
             Self::Taskbar => 8,
-            Self::Privacy => 9,
-            Self::About => 10,
+            Self::Menu => 9,
+            Self::Privacy => 10,
+            Self::About => 11,
         }
     }
 
@@ -552,6 +638,7 @@ impl SettingsCategory {
             Self::Input => "Mouse & keyboard",
             Self::Windows => "Windows",
             Self::Taskbar => "Taskbar",
+            Self::Menu => "Menu",
             Self::Privacy => "Privacy",
             Self::About => "About",
         }
@@ -568,6 +655,7 @@ impl SettingsCategory {
             Self::Input => "Pointer and keyboard",
             Self::Windows => "Placement, decoration, and focus",
             Self::Taskbar => "Panel placement and behavior",
+            Self::Menu => "Launcher layout, contents, and motion",
             Self::Privacy => "Local data and access",
             Self::About => "ExpOS system information",
         }
@@ -584,6 +672,7 @@ impl SettingsCategory {
             Self::Input => 5,
             Self::Windows => 8,
             Self::Taskbar => 7,
+            Self::Menu => 9,
             Self::Privacy => 2,
             Self::About => 4,
         }
@@ -701,6 +790,9 @@ const SNAP_DISTANCE_LABELS: [&str; 9] = [
 const TASKBAR_SIZE_LABELS: [&str; 9] = [
     "28 px", "32 px", "36 px", "40 px", "44 px", "48 px", "52 px", "60 px", "72 px",
 ];
+const MENU_DENSITY_LABELS: [&str; 5] = ["Dense", "Compact", "Balanced", "Comfortable", "Large"];
+const ANIMATION_LABELS: [&str; 5] = ["Off", "Fast", "Balanced", "Smooth", "Cinematic"];
+const UI_SCALE_LABELS: [&str; 7] = ["100%", "80%", "90%", "110%", "125%", "150%", "200%"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AccentChoice(u8);
@@ -1032,6 +1124,15 @@ struct DesktopPreferences {
     focus_policy: u8,
     window_opacity: u8,
     cursor_shadow: bool,
+    menu_density: u8,
+    animation_level: u8,
+    ui_scale: u8,
+    tooltips: bool,
+    notification_animations: bool,
+    menu_show_builtins: bool,
+    menu_show_installed: bool,
+    menu_grid: bool,
+    menu_categories: bool,
 }
 
 impl DesktopPreferences {
@@ -1165,6 +1266,15 @@ impl DesktopPreferences {
             focus_policy: value.focus_policy,
             window_opacity: value.window_opacity,
             cursor_shadow: value.cursor_shadow,
+            menu_density: value.menu_density,
+            animation_level: value.animation_level,
+            ui_scale: value.ui_scale,
+            tooltips: value.tooltips,
+            notification_animations: value.notification_animations,
+            menu_show_builtins: flags & state::PREF_MENU_HIDE_BUILTINS == 0,
+            menu_show_installed: flags & state::PREF_MENU_HIDE_INSTALLED == 0,
+            menu_grid: flags & state::PREF_MENU_GRID != 0,
+            menu_categories: flags & state::PREF_MENU_CATEGORIES != 0,
         }
     }
 
@@ -1200,6 +1310,11 @@ impl DesktopPreferences {
         value.focus_policy = self.focus_policy;
         value.window_opacity = self.window_opacity;
         value.cursor_shadow = self.cursor_shadow;
+        value.menu_density = self.menu_density;
+        value.animation_level = self.animation_level;
+        value.ui_scale = self.ui_scale;
+        value.tooltips = self.tooltips;
+        value.notification_animations = self.notification_animations;
         let desktop_flags = state::PREF_PURE_BLACK_APPS
             | state::PREF_ROUNDED_CONTROLS
             | state::PREF_TASKBAR_VISIBLE
@@ -1211,7 +1326,11 @@ impl DesktopPreferences {
             | state::PREF_BLUETOOTH_ENABLED
             | state::PREF_WINDOW_SHADOWS
             | state::PREF_WALLPAPER_EFFECTS
-            | state::PREF_RESPONSIVE_PRESENTATION;
+            | state::PREF_RESPONSIVE_PRESENTATION
+            | state::PREF_MENU_HIDE_BUILTINS
+            | state::PREF_MENU_HIDE_INSTALLED
+            | state::PREF_MENU_GRID
+            | state::PREF_MENU_CATEGORIES;
         value.flags &= !desktop_flags;
         if self.pure_black_apps {
             value.flags |= state::PREF_PURE_BLACK_APPS;
@@ -1240,6 +1359,18 @@ impl DesktopPreferences {
         if self.responsive_presentation {
             value.flags |= state::PREF_RESPONSIVE_PRESENTATION;
         }
+        if !self.menu_show_builtins {
+            value.flags |= state::PREF_MENU_HIDE_BUILTINS;
+        }
+        if !self.menu_show_installed {
+            value.flags |= state::PREF_MENU_HIDE_INSTALLED;
+        }
+        if self.menu_grid {
+            value.flags |= state::PREF_MENU_GRID;
+        }
+        if self.menu_categories {
+            value.flags |= state::PREF_MENU_CATEGORIES;
+        }
         let connectivity = radio::snapshot();
         if connectivity.network_enabled {
             value.flags |= state::PREF_NETWORK_ENABLED;
@@ -1259,6 +1390,7 @@ struct DesktopState {
     broker: CapabilityBroker,
     app_surfaces: [u32; APP_COUNT],
     app_handles: [u32; APP_COUNT],
+    ayo_transaction_handle: Option<u32>,
     browser_network_handle: Option<u32>,
     settings_radio_handle: Option<u32>,
     app_open: [bool; APP_COUNT],
@@ -1268,6 +1400,7 @@ struct DesktopState {
     launcher_surface: u32,
     active: AppKind,
     launcher_open: bool,
+    launcher_scroll: usize,
     fullscreen: bool,
     preferences: DesktopPreferences,
     settings_category: SettingsCategory,
@@ -1609,6 +1742,17 @@ impl DesktopState {
             )
             .ok()
             .map(|handle| handle.id);
+        let ayo_transaction_handle = broker
+            .issue_for(
+                PACKAGES_FIN,
+                session.authority(),
+                AYO_FIN,
+                STABLE_FIN,
+                Operations::PACKAGE,
+                u64::MAX,
+            )
+            .ok()
+            .map(|handle| handle.id);
 
         // Desktop application authority is complete at activation. ExpSeal
         // closes later ambient/root issuance while preserving each existing
@@ -1658,7 +1802,7 @@ impl DesktopState {
         let _ = server.attach(
             DISPLAY_FIN,
             launcher_surface,
-            buffer(20, DISPLAY_FIN, LAUNCHER_WIDTH, LAUNCHER_HEIGHT),
+            buffer(20, DISPLAY_FIN, LAUNCHER_GRID_WIDTH, LAUNCHER_HEIGHT),
         );
         let _ = server.set_visible(DISPLAY_FIN, launcher_surface, false);
 
@@ -1695,6 +1839,7 @@ impl DesktopState {
             broker,
             app_surfaces,
             app_handles,
+            ayo_transaction_handle,
             browser_network_handle,
             settings_radio_handle,
             app_open: core::array::from_fn(|index| start_app == Some(AppKind::ALL[index])),
@@ -1704,6 +1849,7 @@ impl DesktopState {
             launcher_surface,
             active,
             launcher_open: false,
+            launcher_scroll: 0,
             fullscreen: false,
             preferences,
             settings_category: SettingsCategory::System,
@@ -1975,15 +2121,25 @@ impl DesktopState {
         if self.launcher_open {
             let launcher = launcher_rect(self.preferences);
             if contains(launcher, x, y) {
-                for (index, app) in AppKind::ALL.iter().copied().enumerate() {
-                    let left = launcher.x + 8;
-                    let top = launcher.y + 48 + index as i16 * 32;
-                    if (left..left + launcher.width as i16 - 16).contains(&x)
-                        && (top..top + 28).contains(&y)
-                    {
-                        self.focus_existing(app);
-                        return true;
+                let columns = launcher_columns(self.preferences);
+                let row_height = launcher_row_height(self.preferences) as i16;
+                let content_x = x - launcher.x - 8;
+                let content_y = y - launcher.y - 48;
+                if content_x >= 0 && content_y >= 0 {
+                    let cell_width = (launcher.width as i16 - 16) / columns as i16;
+                    let column = (content_x / cell_width).min(columns as i16 - 1) as usize;
+                    let row = (content_y / row_height) as usize;
+                    let ordinal = self.launcher_scroll + row * columns + column;
+                    match launcher_item(self, ordinal) {
+                        Some(LauncherItem::BuiltIn(app)) => self.focus_existing(app),
+                        Some(LauncherItem::Installed(index)) => {
+                            if self.native_apps.activate_installed(index) {
+                                self.focus_existing(AppKind::Apps);
+                            }
+                        }
+                        None => return false,
                     }
+                    return true;
                 }
                 return false;
             }
@@ -2041,9 +2197,7 @@ impl DesktopState {
                 if self.native_apps.persistence_generation() != generation {
                     self.persist_native_apps();
                 }
-                if action == crate::apps::ManagerAction::Open {
-                    self.switch_to(AppKind::Apps);
-                }
+                self.complete_manager_action(action);
                 return true;
             }
         }
@@ -3354,6 +3508,71 @@ impl DesktopState {
                 );
                 self.settings_notice = "Taskbar clock precision updated.";
             }
+            (SettingsCategory::Menu, 0) => {
+                self.preferences.menu_grid = !self.preferences.menu_grid;
+                self.launcher_scroll = 0;
+                self.sync_desktop_geometry();
+                self.settings_notice = "Launcher layout updated.";
+                slog!(
+                    "EXPOS_SETTING_CHANGED key=menu-layout value={}\r\n",
+                    if self.preferences.menu_grid {
+                        "grid"
+                    } else {
+                        "list"
+                    }
+                );
+            }
+            (SettingsCategory::Menu, 1) => {
+                self.preferences.menu_density = shift_index(
+                    self.preferences.menu_density,
+                    state::MENU_DENSITY_CHOICES,
+                    direction,
+                );
+                self.launcher_scroll = 0;
+                self.full_redraw_requested = true;
+                self.settings_notice = "Launcher row density updated.";
+            }
+            (SettingsCategory::Menu, 2) => {
+                self.preferences.ui_scale = shift_index(
+                    self.preferences.ui_scale,
+                    state::UI_SCALE_CHOICES,
+                    direction,
+                );
+                self.full_redraw_requested = true;
+                self.settings_notice = "Launcher icon scale updated.";
+            }
+            (SettingsCategory::Menu, 3) => {
+                self.preferences.menu_show_builtins = !self.preferences.menu_show_builtins;
+                self.launcher_scroll = 0;
+                self.settings_notice = "Built-in launcher entries updated.";
+            }
+            (SettingsCategory::Menu, 4) => {
+                self.preferences.menu_show_installed = !self.preferences.menu_show_installed;
+                self.launcher_scroll = 0;
+                self.settings_notice = "Installed Ayo launcher entries updated.";
+            }
+            (SettingsCategory::Menu, 5) => {
+                self.preferences.menu_categories = !self.preferences.menu_categories;
+                self.full_redraw_requested = true;
+                self.settings_notice = "Launcher category labels updated.";
+            }
+            (SettingsCategory::Menu, 6) => {
+                self.preferences.animation_level = shift_index(
+                    self.preferences.animation_level,
+                    state::ANIMATION_LEVEL_CHOICES,
+                    direction,
+                );
+                self.settings_notice = "Menu animation timing updated.";
+            }
+            (SettingsCategory::Menu, 7) => {
+                self.preferences.tooltips = !self.preferences.tooltips;
+                self.settings_notice = "Launcher tooltips updated.";
+            }
+            (SettingsCategory::Menu, 8) => {
+                self.preferences.notification_animations =
+                    !self.preferences.notification_animations;
+                self.settings_notice = "Menu install feedback updated.";
+            }
             (SettingsCategory::Privacy, 0) => {
                 self.browser_line.fill(0);
                 self.browser_len = 0;
@@ -3514,6 +3733,54 @@ impl DesktopState {
                 );
             }
             Err(error) => slog!("EXPOS_APPS_STATE_ERROR error={:?}\r\n", error),
+        }
+    }
+
+    fn complete_manager_action(&mut self, action: crate::apps::ManagerAction) {
+        match action {
+            crate::apps::ManagerAction::Changed => {}
+            crate::apps::ManagerAction::Open => self.switch_to(AppKind::Apps),
+            crate::apps::ManagerAction::InstallRequested => {
+                let Some(handle_id) = self.ayo_transaction_handle else {
+                    slog!("EXPOS_ABI_CALL call=PACKAGE_TRANSACTION status=denied reason=no-handle\r\n");
+                    return;
+                };
+                let package = self.native_apps.selected_index();
+                let request = AbiRequest {
+                    version: FORM_ABI_VERSION,
+                    call: AbiCall::PackageTransaction as u16,
+                    caller: PACKAGES_FIN,
+                    handle_id,
+                    // operation=1 installs a signed catalog package; the
+                    // package ordinal is stable inside the built-in catalog.
+                    arguments: [1, package as u64, 0, 0, 0, 0],
+                };
+                let response =
+                    NativeCallGate::new(&self.broker, self.broker.cfc(), AYO_FIN, STABLE_FIN)
+                        .dispatch(request, crate::hardware::timestamp(), |call, arguments| {
+                            if call != AbiCall::PackageTransaction || arguments[0] != 1 {
+                                AbiResponse::status(AbiStatus::Unsupported)
+                            } else {
+                                AbiResponse::ok([arguments[1], 1, 0, 0])
+                            }
+                        });
+                if AbiStatus::from_raw(response.status) == Some(AbiStatus::Ok) {
+                    self.native_apps.commit_install_selected();
+                    self.persist_native_apps();
+                    slog!(
+                        "EXPOS_ABI_CALL call=PACKAGE_TRANSACTION status=ok package={} handle={}\r\n",
+                        package,
+                        handle_id
+                    );
+                } else {
+                    slog!(
+                        "EXPOS_ABI_CALL call=PACKAGE_TRANSACTION status={} package={} handle={}\r\n",
+                        response.status,
+                        package,
+                        handle_id
+                    );
+                }
+            }
         }
     }
 
@@ -4102,7 +4369,7 @@ fn run_session(
             };
             if clock_changed && desktop.preferences.status_visible && desktop.taskbar_should_show()
             {
-                render(&mut desktop);
+                render_taskbar_damage(&mut desktop);
             } else if desktop.active == AppKind::Games
                 && desktop.app_is_visible(AppKind::Games)
                 && desktop.games.tick(now)
@@ -4154,8 +4421,29 @@ fn run_session(
             continue;
         }
         if desktop.launcher_open {
-            if let Some(app) = launcher_shortcut(key) {
-                desktop.switch_to(app);
+            match key {
+                KEY_UP => {
+                    desktop.launcher_scroll = desktop
+                        .launcher_scroll
+                        .saturating_sub(launcher_columns(desktop.preferences));
+                }
+                KEY_DOWN => {
+                    let total = launcher_item_count(&desktop);
+                    let capacity = launcher_capacity(desktop.preferences);
+                    let max_scroll = total.saturating_sub(capacity);
+                    desktop.launcher_scroll = (desktop.launcher_scroll
+                        + launcher_columns(desktop.preferences))
+                    .min(max_scroll);
+                }
+                _ => {
+                    if let Some(app) = launcher_shortcut(key) {
+                        // The shared native Apps host intentionally has no
+                        // public launcher entry; installed tools open directly.
+                        if app != AppKind::Apps {
+                            desktop.switch_to(app);
+                        }
+                    }
+                }
             }
             render(&mut desktop);
             continue;
@@ -4187,8 +4475,9 @@ fn run_session(
                 if desktop.native_apps.persistence_generation() != generation {
                     desktop.persist_native_apps();
                 }
-                if action == crate::apps::ManagerAction::Open {
-                    desktop.switch_to(AppKind::Apps);
+                let open = action == crate::apps::ManagerAction::Open;
+                desktop.complete_manager_action(action);
+                if open {
                     render(&mut desktop);
                 } else {
                     render_active_window(&mut desktop);
@@ -4591,6 +4880,31 @@ fn render_active_window(desktop: &mut DesktopState) {
     present_frame_damage(desktop, &damage[..damage_count]);
 }
 
+fn render_taskbar_damage(desktop: &mut DesktopState) {
+    // An opaque taskbar can be updated independently when only the RTC text
+    // changes. This avoids rebuilding the wallpaper and every visible window
+    // once per second. A translucent panel still needs the coherent backdrop.
+    if desktop.full_redraw_requested || desktop.preferences.taskbar_translucent {
+        render(desktop);
+        return;
+    }
+    desktop.cursor.restore();
+    let cursor_damage = desktop.cursor.damage_region();
+    draw_dock(desktop);
+    let dock = taskbar_rect(desktop.preferences);
+    desktop.cursor.draw();
+    let regions = [
+        cursor_damage,
+        framebuffer::DamageRegion::new(
+            dock.x as i32,
+            dock.y as i32,
+            dock.width as i32,
+            dock.height as i32,
+        ),
+    ];
+    present_frame_damage(desktop, &regions);
+}
+
 fn present_frame(desktop: &mut DesktopState) {
     pace_frame(desktop, false);
     let visible = framebuffer::present(desktop.preferences.vsync);
@@ -4658,7 +4972,12 @@ fn draw_app(desktop: &DesktopState, app: AppKind, focused: bool, draw_shadow: bo
             let (width, height) = app_dimensions(desktop.preferences);
             Rect::new(8, 8, width, height)
         });
-    draw_window(rect, app.label(), focused, desktop.preferences, draw_shadow);
+    let title = if app == AppKind::Apps && desktop.native_apps.installed_count() != 0 {
+        crate::apps::NativeApps::app_name(desktop.native_apps.active_index())
+    } else {
+        app.label()
+    };
+    draw_window(rect, title, focused, desktop.preferences, draw_shadow);
     let responsive_full = matches!(
         app,
         AppKind::Browser
@@ -6221,6 +6540,146 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 },
             );
         }
+        SettingsCategory::Menu => {
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                0,
+                "Layout",
+                "Choose a compact list or a two-column application grid",
+                if desktop.preferences.menu_grid {
+                    "Grid"
+                } else {
+                    "List"
+                },
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                1,
+                "Density",
+                "Five row heights from dense to touch friendly",
+                MENU_DENSITY_LABELS[desktop.preferences.menu_density as usize],
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                2,
+                "Icon scale",
+                "Seven persisted launcher scale choices",
+                UI_SCALE_LABELS[desktop.preferences.ui_scale as usize],
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                3,
+                "Built-in apps",
+                "Show ExpOS system applications in the launcher",
+                if desktop.preferences.menu_show_builtins {
+                    "Shown"
+                } else {
+                    "Hidden"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.menu_show_builtins,
+                    available: true,
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                4,
+                "Installed Ayo apps",
+                "Put each installed app directly in the launcher",
+                if desktop.preferences.menu_show_installed {
+                    "Shown"
+                } else {
+                    "Hidden"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.menu_show_installed,
+                    available: true,
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                5,
+                "Category labels",
+                "Show Utilities, Graphics, Networking, Editors, and Developer tools",
+                if desktop.preferences.menu_categories {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.menu_categories,
+                    available: true,
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                6,
+                "Animation speed",
+                "Five persisted motion levels; Off is the fastest",
+                ANIMATION_LABELS[desktop.preferences.animation_level as usize],
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                7,
+                "Tooltips",
+                "Show launcher hints for keyboard and app categories",
+                if desktop.preferences.tooltips {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.tooltips,
+                    available: true,
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                8,
+                "Install feedback",
+                "Animate package-install feedback when motion is enabled",
+                if desktop.preferences.notification_animations {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.notification_animations,
+                    available: true,
+                },
+            );
+        }
         SettingsCategory::Privacy => {
             settings_row(
                 desktop,
@@ -6751,27 +7210,131 @@ fn draw_launcher(desktop: &DesktopState) {
     framebuffer::rounded_rect(x, y, width, height, 9, desktop.preferences.panel_color());
     framebuffer::outline(x, y, width, height, desktop.preferences.border_color(false));
     framebuffer::text(x + 16, y + 17, "Applications", color::INK, 1);
+    let installed = desktop.native_apps.installed_count();
+    if installed != 0 {
+        framebuffer::text(x + width - 92, y + 17, "AYO DIRECT", color::CYAN, 1);
+    }
     framebuffer::rect(x + 12, y + 39, width - 24, 1, color::BORDER);
-    for (index, app) in AppKind::ALL.iter().copied().enumerate() {
-        let row_y = y + 48 + index as i32 * 32;
+    let columns = launcher_columns(desktop.preferences);
+    let row_height = launcher_row_height(desktop.preferences);
+    let rows = launcher_visible_rows(desktop.preferences);
+    let cell_width = (width - 16) / columns as i32;
+    let scale = state::UI_SCALE_PERCENT[desktop.preferences.ui_scale.min(6) as usize] as i32;
+    let icon_size = (((row_height - 7) * scale) / 100).clamp(12, (row_height - 3).max(12));
+    let capacity = rows * columns;
+    for slot in 0..capacity {
+        let ordinal = desktop.launcher_scroll + slot;
+        let Some(item) = launcher_item(desktop, ordinal) else {
+            break;
+        };
+        let column = slot % columns;
+        let row = slot / columns;
+        let row_x = x + 8 + column as i32 * cell_width;
+        let row_y = y + 48 + row as i32 * row_height;
+        let (label, category, accent, shortcut, running) = match item {
+            LauncherItem::BuiltIn(app) => (
+                app.label(),
+                "ExpOS",
+                app.accent(),
+                app.shortcut(),
+                desktop.app_open[app.index()],
+            ),
+            LauncherItem::Installed(index) => {
+                let name = crate::apps::NativeApps::app_name(index);
+                (
+                    name,
+                    crate::apps::NativeApps::app_category(index),
+                    crate::apps::NativeApps::app_accent(index),
+                    &name[..1],
+                    desktop.app_open[AppKind::Apps.index()]
+                        && desktop.native_apps.active_index() == index,
+                )
+            }
+        };
         framebuffer::rounded_rect(
-            x + 8,
+            row_x,
             row_y,
-            width - 16,
-            28,
+            cell_width - 4,
+            row_height - 3,
             5,
-            if app == desktop.active && desktop.app_open[app.index()] {
+            if running {
                 0x0024_292F
             } else {
                 desktop.preferences.panel_color()
             },
         );
-        framebuffer::rounded_rect(x + 16, row_y + 6, 16, 16, 4, app.accent());
-        framebuffer::text(x + 20, row_y + 10, app.shortcut(), color::WHITE, 1);
-        framebuffer::text(x + 44, row_y + 10, app.label(), color::INK, 1);
-        if desktop.app_open[app.index()] {
-            framebuffer::rect(x + width - 24, row_y + 11, 5, 5, color::GREEN);
+        let icon_x = row_x + 7;
+        let icon_y = row_y + (row_height - icon_size) / 2;
+        framebuffer::rounded_rect(icon_x, icon_y, icon_size, icon_size, 4, accent);
+        framebuffer::text(
+            icon_x + 4,
+            icon_y + (icon_size - 8) / 2,
+            shortcut,
+            color::WHITE,
+            1,
+        );
+        framebuffer::text(row_x + icon_size + 14, row_y + 6, label, color::INK, 1);
+        if desktop.preferences.menu_categories && row_height >= 28 {
+            framebuffer::text(
+                row_x + icon_size + 14,
+                row_y + row_height - 11,
+                category,
+                color::MUTED,
+                1,
+            );
         }
+        if running {
+            framebuffer::rect(
+                row_x + cell_width - 14,
+                row_y + row_height / 2,
+                5,
+                5,
+                color::GREEN,
+            );
+        }
+    }
+    let total = launcher_item_count(desktop);
+    if desktop.launcher_scroll > 0 {
+        framebuffer::text(
+            x + width - 22,
+            y + 17,
+            "^",
+            desktop.preferences.accent.color(),
+            1,
+        );
+    }
+    if desktop.launcher_scroll + capacity < total {
+        framebuffer::text(
+            x + width - 22,
+            y + height - 16,
+            "v",
+            desktop.preferences.accent.color(),
+            1,
+        );
+    }
+    if total == 0 {
+        framebuffer::text(
+            x + 18,
+            y + 64,
+            "No launcher entries are visible.",
+            color::MUTED,
+            1,
+        );
+        framebuffer::text(
+            x + 18,
+            y + 84,
+            "Open Settings > Menu to restore them.",
+            color::INK,
+            1,
+        );
+    } else if desktop.preferences.tooltips {
+        framebuffer::text(
+            x + 16,
+            y + height - 16,
+            "UP/DOWN scroll  //  click an app to open",
+            color::MUTED,
+            1,
+        );
     }
 }
 
@@ -7156,26 +7719,27 @@ mod tests {
         assert!(!preferences.wallpaper_effects);
         assert!(!preferences.responsive_presentation);
         assert_eq!(preferences.presentation_policy_label(), "Efficient");
-        assert_eq!(SettingsCategory::ALL.len(), 11);
+        assert_eq!(SettingsCategory::ALL.len(), 12);
         assert_eq!(SettingsCategory::Performance.index(), 5);
         assert_eq!(SettingsCategory::Performance.row_count(), 4);
     }
 
     #[test]
     fn customization_pages_expose_more_than_five_hundred_real_values() {
-        assert_eq!(CUSTOMIZATION_VALUE_COUNT, 603);
+        assert_eq!(CUSTOMIZATION_VALUE_COUNT, 632);
         const { assert!(CUSTOMIZATION_VALUE_COUNT >= 500) };
         const { assert!(state::CUSTOMIZATION_SELECTABLE_VALUES >= 500) };
         assert_eq!(SettingsCategory::Appearance.row_count(), 8);
         assert_eq!(SettingsCategory::Windows.row_count(), 8);
         assert_eq!(SettingsCategory::Taskbar.row_count(), 7);
+        assert_eq!(SettingsCategory::Menu.row_count(), 9);
     }
 
     #[test]
     fn compact_settings_keep_selected_categories_and_rows_visible() {
         let compact = Rect::new(0, 0, 480, 360);
         assert_eq!(settings_category_capacity(compact), 7);
-        assert_eq!(settings_category_view_start(compact, 10), 4);
+        assert_eq!(settings_category_view_start(compact, 11), 5);
         assert_eq!(settings_row_capacity(272), 5);
         assert_eq!(
             settings_row_view_start(SettingsCategory::Windows, 7, 272),
