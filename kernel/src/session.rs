@@ -94,7 +94,7 @@ pub struct LoginResult {
 
 /// Opaque hashed Operator credential passed from Genesis into first-boot
 /// account initialization. Plaintext passwords never cross this boundary.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StoredGenesisAccount(pub(crate) state::StoredAccount);
 
 impl Session {

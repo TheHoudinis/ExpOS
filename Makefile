@@ -21,7 +21,7 @@ GENESIS_ISO := $(BUILD)/ExpOS-0.9-x86_64.iso
 OVMF_CODE  ?= /usr/share/edk2/x64/OVMF_CODE.4m.fd
 OVMF_VARS  ?= /usr/share/edk2/x64/OVMF_VARS.4m.fd
 
-.PHONY: all iso genesis-iso genesis-check test check display-check session-check network-check internet-check https-check search-check wikipedia-check persistence-check run debug clean legacy-alpha-check run-alpha ayo sdk rust-sdk go-sdk c-sdk python-sdk sdk-cli-check kernel-build genesis-kernel-build
+.PHONY: all iso genesis-iso genesis-check genesis-display-check run-genesis test check display-check session-check network-check internet-check https-check search-check wikipedia-check persistence-check run debug clean legacy-alpha-check run-alpha ayo sdk rust-sdk go-sdk c-sdk python-sdk sdk-cli-check kernel-build genesis-kernel-build
 
 all: test check display-check session-check network-check persistence-check ayo sdk python-runtime-check python-check budget-check uefi-check bootmode-check startup-check
 
@@ -82,6 +82,12 @@ genesis-iso: $(GENESIS_ISO)
 
 genesis-check: $(GENESIS_ISO)
 	OVMF_CODE=$(OVMF_CODE) OVMF_VARS=$(OVMF_VARS) python3 tests/check-genesis.py
+
+genesis-display-check: $(GENESIS_ISO)
+	OVMF_CODE=$(OVMF_CODE) OVMF_VARS=$(OVMF_VARS) python3 tests/check-genesis-display.py
+
+run-genesis: $(GENESIS_ISO)
+	OVMF_CODE=$(OVMF_CODE) OVMF_VARS=$(OVMF_VARS) python3 tools/run-genesis-qemu.py
 
 # Native firmware image: the validated ELF payload is embedded in a relocatable
 # PE32+ UEFI application. No third-party bootloader runs in this path.

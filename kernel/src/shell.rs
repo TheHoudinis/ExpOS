@@ -489,6 +489,21 @@ impl Shell {
                 }
                 true
             }
+            "baseline" => {
+                match crate::expfs_store::baseline() {
+                    crate::expfs_store::BaselineState::Ready(info) => println!(
+                        "Protected installation baseline: generation {}, journal sequence {}.",
+                        info.generation, info.journal_sequence
+                    ),
+                    crate::expfs_store::BaselineState::Missing => {
+                        println!("Protected installation baseline: not established")
+                    }
+                    crate::expfs_store::BaselineState::Damaged => {
+                        println!("Protected installation baseline: damaged; restore is blocked")
+                    }
+                }
+                true
+            }
             "restorepoint" => {
                 let Some(state_id) = words.next().and_then(|value| value.parse::<u64>().ok())
                 else {
@@ -501,6 +516,18 @@ impl Shell {
                         port::reboot();
                     }
                     Err(error) => println!("restorepoint: {}", error.message()),
+                }
+                true
+            }
+            "restorebaseline" => {
+                match crate::expfs_store::restore_baseline() {
+                    Ok(_) => {
+                        println!(
+                            "Restored the protected installation baseline; rebooting into it."
+                        );
+                        port::reboot();
+                    }
+                    Err(error) => println!("restorebaseline: {}", error.message()),
                 }
                 true
             }
@@ -1017,7 +1044,9 @@ impl Shell {
         println!("  SESSION    users login logout useradd userdel passwd");
         println!("  FORMS      forms inspect resolve mkform execute retire activate reclaim");
         println!("  DATA       view/cat write append head delete recover move copy");
-        println!("  STORAGE    hexdump du shasum df which checkpoint checkpoints restorepoint");
+        println!(
+            "  STORAGE    hexdump du shasum df which checkpoint checkpoints baseline restorepoint restorebaseline"
+        );
         println!("  MODEL      packages dimensions makedim journal policy handles");
         println!("  AUTHORITY  grant revoke handlecheck pimp relate unrelate relationships");
         println!("  DISPLAY    desktop browser displayinfo displaydiag safevideo displayreset");
@@ -2758,7 +2787,9 @@ fn is_shell_command(name: &str) -> bool {
             | "journal"
             | "checkpoint"
             | "checkpoints"
+            | "baseline"
             | "restorepoint"
+            | "restorebaseline"
             | "history"
             | "uptime"
             | "ps"
@@ -2840,6 +2871,7 @@ fn is_mutating_command(name: &str) -> bool {
             | "passwd"
             | "checkpoint"
             | "restorepoint"
+            | "restorebaseline"
             | "mkform"
             | "write"
             | "append"
@@ -2905,6 +2937,7 @@ fn is_operator_command(name: &str) -> bool {
             | "passwd"
             | "checkpoint"
             | "restorepoint"
+            | "restorebaseline"
             | "delete"
             | "retire"
             | "reclaim"

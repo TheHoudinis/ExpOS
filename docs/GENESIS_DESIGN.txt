@@ -56,6 +56,12 @@ automatic. - Hardware capability isolation should reduce problems such
 as graphics-driver instability. - ExpFS/CFC recovery should allow very
 fast rollback to earlier system states.
 
+The landed UEFI installer now replaces the stale firmware frame with a styled,
+bounded ExpOS framebuffer console. Mode selection, prompts, masked password
+input and installation progress are visible through the same QEMU window and
+validated with PS/2 input plus captured scanout. A richer mouse-first wizard is
+still future presentation work; the construction semantics below are unchanged.
+
 The desired emotional reaction is: “Where is the C: drive?” “Where are
 my files?” “I query by FIN?” “I can roll the whole system back?”
 
@@ -139,7 +145,9 @@ never overwrite the baseline. The landed native format uses
 XChaCha20-Poly1305, Argon2id v1.3 at 64 MiB/3 passes/1 lane, a wrapped 32-byte
 storage key, and nonce domains bound to CFC identity, generation, and disk
 slot. Alternating current-state slots and eight rotating encrypted checkpoints
-are implemented; protected-baseline encoding and password rewrap remain open.
+are implemented. The protected baseline is now a separate non-rotating ExpFS
+slot with its own nonce domain and an Operator-only restore path; password
+rewrap remains open.
 
 4. FORMS — IMPORTANT TERMINOLOGY
 
@@ -876,8 +884,8 @@ making them canonical:
 -   Exact checkpoint encoding, rotation, restore, and crash-consistency
     algorithm within the approved eight-checkpoint-plus-baseline model.
 -   Garbage collection inside and outside the retained recovery set.
--   Protected-baseline encoding and the password-rewrap transaction for the
-    landed XChaCha20-Poly1305/Argon2id storage format.
+-   The password-rewrap transaction for the landed
+    XChaCha20-Poly1305/Argon2id storage format.
 -   Exact ExpLoader format and boot protocol.
 -   Secure Boot design.
 -   Exact ASL bootstrap ordering.

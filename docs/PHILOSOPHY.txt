@@ -143,7 +143,8 @@ overwrite that baseline. The first native storage specification selects
 XChaCha20-Poly1305, Argon2id v1.3 at 64 MiB/3 passes/1 lane, a wrapped 32-byte
 storage key, and nonces bound to CFC identity, generation, and disk domain.
 Alternating current-state slots and the eight rotating checkpoints implement
-this scheme; protected-baseline encoding and password-rewrap remain open.
+this scheme. The protected baseline uses a separate non-rotating ExpFS slot and
+authenticated-encryption domain; password rewrap remains open.
 
 6. FORM RESOLUTION
 

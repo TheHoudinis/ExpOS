@@ -542,7 +542,7 @@ fn launcher_capacity(preferences: DesktopPreferences) -> usize {
     launcher_visible_rows(preferences) * launcher_columns(preferences)
 }
 
-const SETTINGS_CATEGORY_COUNT: usize = 12;
+const SETTINGS_CATEGORY_COUNT: usize = 14;
 const ACCENT_COLOR_CHOICES: usize = 256;
 const WALLPAPER_VARIANT_CHOICES: usize = 252;
 const CUSTOMIZATION_VALUE_COUNT: usize = ThemeChoice::ALL.len()
@@ -576,12 +576,15 @@ const CUSTOMIZATION_VALUE_COUNT: usize = ThemeChoice::ALL.len()
     + 2 // installed apps
     + 2 // category labels
     + 2 // tooltips
-    + 2; // install feedback
+    + 2 // install feedback
+    + CustomizationProfile::ALL.len(); // coordinated whole-desktop profiles
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsCategory {
     System,
+    Profiles,
     Appearance,
+    Accessibility,
     Network,
     Bluetooth,
     Display,
@@ -606,6 +609,8 @@ impl SettingsCategory {
         Self::Windows,
         Self::Taskbar,
         Self::Menu,
+        Self::Profiles,
+        Self::Accessibility,
         Self::Privacy,
         Self::About,
     ];
@@ -622,15 +627,19 @@ impl SettingsCategory {
             Self::Windows => 7,
             Self::Taskbar => 8,
             Self::Menu => 9,
-            Self::Privacy => 10,
-            Self::About => 11,
+            Self::Profiles => 10,
+            Self::Accessibility => 11,
+            Self::Privacy => 12,
+            Self::About => 13,
         }
     }
 
     const fn label(self) -> &'static str {
         match self {
             Self::System => "System",
+            Self::Profiles => "Profiles",
             Self::Appearance => "Appearance",
+            Self::Accessibility => "Accessibility",
             Self::Network => "Network & Wi-Fi",
             Self::Bluetooth => "Bluetooth",
             Self::Display => "Display",
@@ -647,7 +656,9 @@ impl SettingsCategory {
     const fn description(self) -> &'static str {
         match self {
             Self::System => "Desktop behavior",
+            Self::Profiles => "Coordinated whole-desktop styles",
             Self::Appearance => "Colors and window style",
+            Self::Accessibility => "Readability, pointer, and motion",
             Self::Network => "Connections and network access",
             Self::Bluetooth => "Nearby wireless devices",
             Self::Display => "ExpDisplay output",
@@ -664,7 +675,9 @@ impl SettingsCategory {
     const fn row_count(self) -> usize {
         match self {
             Self::System => 2,
+            Self::Profiles => CustomizationProfile::ALL.len(),
             Self::Appearance => 8,
+            Self::Accessibility => 9,
             Self::Network => 4,
             Self::Bluetooth => 2,
             Self::Display => 6,
@@ -685,6 +698,49 @@ impl SettingsCategory {
             (self.index() + 1) % SETTINGS_CATEGORY_COUNT
         };
         Self::ALL[index]
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CustomizationProfile {
+    Balanced,
+    Compact,
+    Focus,
+    Accessible,
+    Showcase,
+    Touch,
+}
+
+impl CustomizationProfile {
+    const ALL: [Self; 6] = [
+        Self::Balanced,
+        Self::Compact,
+        Self::Focus,
+        Self::Accessible,
+        Self::Showcase,
+        Self::Touch,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Balanced => "Balanced",
+            Self::Compact => "Compact",
+            Self::Focus => "Focus",
+            Self::Accessible => "Accessible",
+            Self::Showcase => "Showcase",
+            Self::Touch => "Touch friendly",
+        }
+    }
+
+    const fn description(self) -> &'static str {
+        match self {
+            Self::Balanced => "Restore the calm, efficient desktop baseline",
+            Self::Compact => "Fit more content with dense chrome and menus",
+            Self::Focus => "Remove motion and decoration for distraction-free work",
+            Self::Accessible => "Increase contrast, weight, targets, and pointer clarity",
+            Self::Showcase => "Enable rich color, depth, translucency, and motion",
+            Self::Touch => "Enlarge controls, launcher rows, titlebars, and the taskbar",
+        }
     }
 }
 
@@ -1276,6 +1332,124 @@ impl DesktopPreferences {
             menu_grid: flags & state::PREF_MENU_GRID != 0,
             menu_categories: flags & state::PREF_MENU_CATEGORIES != 0,
         }
+    }
+
+    fn with_profile(self, profile: CustomizationProfile) -> Self {
+        // Profiles intentionally leave display timing and the two system-wide
+        // visibility controls alone. They restyle the desktop without
+        // unexpectedly changing output cadence or hiding connectivity state.
+        let mut next = Self::from_persistent(state::PersistentPreferences::new());
+        next.refresh_rate = self.refresh_rate;
+        next.vsync = self.vsync;
+        next.taskbar_visible = self.taskbar_visible;
+        next.status_visible = self.status_visible;
+
+        match profile {
+            CustomizationProfile::Balanced => {}
+            CustomizationProfile::Compact => {
+                next.theme = ThemeChoice::Graphite;
+                next.pure_black_apps = false;
+                next.rounded_controls = false;
+                next.font_face = framebuffer::FontFace::from_persisted(3)
+                    .unwrap_or(framebuffer::FontFace::System);
+                next.window_corner_radius = 1;
+                next.window_border_width = 1;
+                next.window_borders = true;
+                next.titlebar_density = 0;
+                next.taskbar_size = 0;
+                next.menu_density = 0;
+                next.ui_scale = 1;
+                next.animation_level = 1;
+            }
+            CustomizationProfile::Focus => {
+                next.theme = ThemeChoice::Obsidian;
+                next.wallpaper = WallpaperChoice::Solid;
+                next.wallpaper_variant = 0;
+                next.backdrop = BackdropChoice::Black;
+                next.pure_black_apps = true;
+                next.rounded_controls = false;
+                next.window_borders = false;
+                next.window_border_width = 0;
+                next.window_shadows = false;
+                next.wallpaper_effects = false;
+                next.taskbar_autohide = true;
+                next.taskbar_translucent = false;
+                next.taskbar_labels = false;
+                next.animation_level = 0;
+                next.tooltips = false;
+                next.notification_animations = false;
+            }
+            CustomizationProfile::Accessible => {
+                next.theme = ThemeChoice::Nord;
+                next.cursor = CursorChoice::Crosshair;
+                next.high_contrast = true;
+                next.font_face = framebuffer::FontFace::from_persisted(1)
+                    .unwrap_or(framebuffer::FontFace::System);
+                next.font_weight = framebuffer::FontWeight::Bold;
+                next.window_corner_radius = 4;
+                next.window_border_width = 4;
+                next.window_borders = true;
+                next.titlebar_density = 4;
+                next.taskbar_size = 8;
+                next.taskbar_labels = true;
+                next.cursor_shadow = true;
+                next.menu_density = 4;
+                next.ui_scale = 6;
+                next.animation_level = 0;
+                next.tooltips = true;
+                next.notification_animations = false;
+            }
+            CustomizationProfile::Showcase => {
+                next.theme = ThemeChoice::Aurora;
+                next.wallpaper = WallpaperChoice::Aurora;
+                next.wallpaper_variant = 145;
+                next.cursor = CursorChoice::Accent;
+                next.accent = AccentChoice::from_persisted(145);
+                next.backdrop = BackdropChoice::Midnight;
+                next.pure_black_apps = false;
+                next.rounded_controls = true;
+                next.window_shadows = true;
+                next.wallpaper_effects = true;
+                next.responsive_presentation = true;
+                next.window_corner_radius = 7;
+                next.window_border_width = 2;
+                next.window_borders = true;
+                next.titlebar_density = 2;
+                next.window_opacity = 2;
+                next.taskbar_size = 4;
+                next.taskbar_alignment = TaskbarAlignment::Center;
+                next.taskbar_translucent = true;
+                next.taskbar_labels = true;
+                next.cursor_shadow = true;
+                next.menu_density = 2;
+                next.animation_level = 3;
+                next.ui_scale = 4;
+                next.tooltips = true;
+                next.notification_animations = true;
+                next.menu_grid = true;
+                next.menu_categories = true;
+            }
+            CustomizationProfile::Touch => {
+                next.theme = ThemeChoice::Forest;
+                next.cursor = CursorChoice::Accent;
+                next.rounded_controls = true;
+                next.pointer_speed = 2;
+                next.window_corner_radius = 6;
+                next.window_border_width = 3;
+                next.window_borders = true;
+                next.titlebar_density = 4;
+                next.taskbar_size = 8;
+                next.taskbar_labels = true;
+                next.cursor_shadow = true;
+                next.menu_density = 4;
+                next.animation_level = 2;
+                next.ui_scale = 6;
+                next.tooltips = true;
+                next.menu_grid = true;
+                next.menu_categories = true;
+            }
+        }
+        next
     }
 
     fn update_persistent(
@@ -3023,6 +3197,34 @@ impl DesktopState {
         }
     }
 
+    fn apply_customization_profile(&mut self, profile: CustomizationProfile) {
+        self.preferences = self.preferences.with_profile(profile);
+        framebuffer::set_font_style(framebuffer::FontStyle::new(
+            self.preferences.font_face,
+            self.preferences.font_weight,
+        ));
+        self.cursor
+            .set_style(self.preferences.cursor, self.preferences.accent.color());
+        self.cursor.set_shadow(self.preferences.cursor_shadow);
+        self.launcher_scroll = 0;
+        self.sync_desktop_geometry();
+        self.reconstrain_windows();
+        self.reconfigure_presentation();
+        self.full_redraw_requested = true;
+        self.settings_notice = match profile {
+            CustomizationProfile::Balanced => "Balanced desktop profile applied.",
+            CustomizationProfile::Compact => "Compact desktop profile applied.",
+            CustomizationProfile::Focus => "Distraction-free desktop profile applied.",
+            CustomizationProfile::Accessible => "Accessible desktop profile applied.",
+            CustomizationProfile::Showcase => "Showcase desktop profile applied.",
+            CustomizationProfile::Touch => "Touch-friendly desktop profile applied.",
+        };
+        slog!(
+            "EXPOS_SETTING_CHANGED key=profile value={}\r\n",
+            profile.label()
+        );
+    }
+
     fn activate_setting(&mut self, direction: i8) {
         match (self.settings_category, self.settings_row) {
             (SettingsCategory::System, 0) => {
@@ -3049,6 +3251,11 @@ impl DesktopState {
                     }
                 );
                 self.settings_notice = "Status area visibility updated.";
+            }
+            (SettingsCategory::Profiles, row) => {
+                if let Some(profile) = CustomizationProfile::ALL.get(row).copied() {
+                    self.apply_customization_profile(profile);
+                }
             }
             (SettingsCategory::Appearance, 0) => {
                 self.full_redraw_requested = true;
@@ -3164,6 +3371,85 @@ impl DesktopState {
                     state::FONT_WEIGHT_NAMES[id as usize]
                 );
                 self.settings_notice = "Interface font weight updated.";
+            }
+            (SettingsCategory::Accessibility, 0) => {
+                self.preferences.high_contrast = !self.preferences.high_contrast;
+                self.full_redraw_requested = true;
+                self.settings_notice = "Contrast rendering updated.";
+            }
+            (SettingsCategory::Accessibility, 1) => {
+                let id = shift_index(
+                    self.preferences.font_face.persisted(),
+                    state::FONT_FACE_CHOICES,
+                    direction,
+                );
+                self.preferences.font_face = framebuffer::FontFace::from_persisted(id)
+                    .unwrap_or(framebuffer::FontFace::System);
+                framebuffer::set_font_style(framebuffer::FontStyle::new(
+                    self.preferences.font_face,
+                    self.preferences.font_weight,
+                ));
+                self.full_redraw_requested = true;
+                self.settings_notice = "Readable font face updated.";
+            }
+            (SettingsCategory::Accessibility, 2) => {
+                let id = shift_index(
+                    self.preferences.font_weight.persisted(),
+                    state::FONT_WEIGHT_CHOICES,
+                    direction,
+                );
+                self.preferences.font_weight = framebuffer::FontWeight::from_persisted(id)
+                    .unwrap_or(framebuffer::FontWeight::Regular);
+                framebuffer::set_font_style(framebuffer::FontStyle::new(
+                    self.preferences.font_face,
+                    self.preferences.font_weight,
+                ));
+                self.full_redraw_requested = true;
+                self.settings_notice = "Readable font weight updated.";
+            }
+            (SettingsCategory::Accessibility, 3) => {
+                self.preferences.titlebar_density = shift_index(
+                    self.preferences.titlebar_density,
+                    state::TITLEBAR_DENSITY_CHOICES,
+                    direction,
+                );
+                self.reconstrain_windows();
+                self.full_redraw_requested = true;
+                self.settings_notice = "Window drag-target size updated.";
+            }
+            (SettingsCategory::Accessibility, 4) => {
+                self.preferences.taskbar_size = shift_index(
+                    self.preferences.taskbar_size,
+                    state::TASKBAR_SIZE_CHOICES,
+                    direction,
+                );
+                self.sync_desktop_geometry();
+                self.reconstrain_windows();
+                self.settings_notice = "Taskbar target size updated.";
+            }
+            (SettingsCategory::Accessibility, 5) => {
+                self.preferences.cursor = self.preferences.cursor.shifted(direction);
+                self.cursor
+                    .set_style(self.preferences.cursor, self.preferences.accent.color());
+                self.settings_notice = "Pointer shape updated.";
+            }
+            (SettingsCategory::Accessibility, 6) => {
+                self.preferences.cursor_shadow = !self.preferences.cursor_shadow;
+                self.cursor.set_shadow(self.preferences.cursor_shadow);
+                self.full_redraw_requested = true;
+                self.settings_notice = "Pointer separation updated.";
+            }
+            (SettingsCategory::Accessibility, 7) => {
+                self.preferences.animation_level = shift_index(
+                    self.preferences.animation_level,
+                    state::ANIMATION_LEVEL_CHOICES,
+                    direction,
+                );
+                self.settings_notice = "Motion level updated.";
+            }
+            (SettingsCategory::Accessibility, 8) => {
+                self.preferences.tooltips = !self.preferences.tooltips;
+                self.settings_notice = "Interface hints updated.";
             }
             (SettingsCategory::Network, 0) => {
                 self.full_redraw_requested = true;
@@ -5899,6 +6185,21 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 },
             );
         }
+        SettingsCategory::Profiles => {
+            for (row, profile) in CustomizationProfile::ALL.iter().copied().enumerate() {
+                settings_row(
+                    desktop,
+                    content_x,
+                    y,
+                    content_width,
+                    row,
+                    profile.label(),
+                    profile.description(),
+                    "Apply",
+                    SettingControl::Action { available: true },
+                );
+            }
+        }
         SettingsCategory::Appearance => {
             settings_row(
                 desktop,
@@ -6001,6 +6302,128 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 "Light, regular, or bold strokes without changing layout",
                 state::FONT_WEIGHT_NAMES[desktop.preferences.font_weight.persisted() as usize],
                 SettingControl::Choice,
+            );
+        }
+        SettingsCategory::Accessibility => {
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                0,
+                "High contrast",
+                "Strengthen edges and active-window focus",
+                if desktop.preferences.high_contrast {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.high_contrast,
+                    available: true,
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                1,
+                "Font face",
+                "Choose the most readable bitmap letter shapes",
+                state::FONT_FACE_NAMES[desktop.preferences.font_face.persisted() as usize],
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                2,
+                "Font weight",
+                "Adjust stroke weight without changing text layout",
+                state::FONT_WEIGHT_NAMES[desktop.preferences.font_weight.persisted() as usize],
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                3,
+                "Titlebar target",
+                "Enlarge the draggable area and window controls",
+                TITLEBAR_LABELS[desktop.preferences.titlebar_density as usize],
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                4,
+                "Taskbar target",
+                "Enlarge launcher and running-application controls",
+                TASKBAR_SIZE_LABELS[desktop.preferences.taskbar_size as usize],
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                5,
+                "Pointer shape",
+                "Choose arrows or a precise crosshair",
+                desktop.preferences.cursor.label(),
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                6,
+                "Pointer shadow",
+                "Separate the pointer from similarly colored content",
+                if desktop.preferences.cursor_shadow {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.cursor_shadow,
+                    available: true,
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                7,
+                "Motion",
+                "Turn motion off or choose a comfortable duration",
+                ANIMATION_LABELS[desktop.preferences.animation_level as usize],
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                8,
+                "Interface hints",
+                "Show keyboard and application guidance",
+                if desktop.preferences.tooltips {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.tooltips,
+                    available: true,
+                },
             );
         }
         SettingsCategory::Network => {
@@ -7719,27 +8142,64 @@ mod tests {
         assert!(!preferences.wallpaper_effects);
         assert!(!preferences.responsive_presentation);
         assert_eq!(preferences.presentation_policy_label(), "Efficient");
-        assert_eq!(SettingsCategory::ALL.len(), 12);
+        assert_eq!(SettingsCategory::ALL.len(), 14);
         assert_eq!(SettingsCategory::Performance.index(), 5);
         assert_eq!(SettingsCategory::Performance.row_count(), 4);
     }
 
     #[test]
-    fn customization_pages_expose_more_than_five_hundred_real_values() {
-        assert_eq!(CUSTOMIZATION_VALUE_COUNT, 632);
-        const { assert!(CUSTOMIZATION_VALUE_COUNT >= 500) };
+    fn customization_pages_expose_more_than_six_hundred_real_values() {
+        assert_eq!(CUSTOMIZATION_VALUE_COUNT, 638);
+        const { assert!(CUSTOMIZATION_VALUE_COUNT >= 600) };
         const { assert!(state::CUSTOMIZATION_SELECTABLE_VALUES >= 500) };
+        assert_eq!(SettingsCategory::Profiles.row_count(), 6);
         assert_eq!(SettingsCategory::Appearance.row_count(), 8);
+        assert_eq!(SettingsCategory::Accessibility.row_count(), 9);
         assert_eq!(SettingsCategory::Windows.row_count(), 8);
         assert_eq!(SettingsCategory::Taskbar.row_count(), 7);
         assert_eq!(SettingsCategory::Menu.row_count(), 9);
     }
 
     #[test]
+    fn coordinated_profiles_cover_compact_focus_accessible_showcase_and_touch_needs() {
+        let mut persistent = state::PersistentPreferences::new();
+        persistent.refresh_rate = state::RefreshRate::Hz120;
+        persistent.vsync = false;
+        let current = DesktopPreferences::from_persistent(persistent);
+
+        let accessible = current.with_profile(CustomizationProfile::Accessible);
+        assert!(accessible.high_contrast);
+        assert_eq!(accessible.font_weight, framebuffer::FontWeight::Bold);
+        assert_eq!(accessible.taskbar_size, 8);
+        assert_eq!(accessible.titlebar_density, 4);
+        assert_eq!(accessible.cursor, CursorChoice::Crosshair);
+        assert_eq!(accessible.animation_level, 0);
+        assert_eq!(accessible.refresh_rate, state::RefreshRate::Hz120);
+        assert!(!accessible.vsync);
+
+        let showcase = current.with_profile(CustomizationProfile::Showcase);
+        assert!(showcase.window_shadows);
+        assert!(showcase.wallpaper_effects);
+        assert!(showcase.taskbar_translucent);
+        assert!(showcase.menu_grid);
+
+        let focus = current.with_profile(CustomizationProfile::Focus);
+        assert!(!focus.window_shadows);
+        assert!(!focus.wallpaper_effects);
+        assert!(focus.taskbar_autohide);
+        assert_eq!(focus.animation_level, 0);
+
+        let touch = current.with_profile(CustomizationProfile::Touch);
+        assert_eq!(touch.taskbar_size, 8);
+        assert_eq!(touch.menu_density, 4);
+        assert_eq!(touch.ui_scale, 6);
+    }
+
+    #[test]
     fn compact_settings_keep_selected_categories_and_rows_visible() {
         let compact = Rect::new(0, 0, 480, 360);
         assert_eq!(settings_category_capacity(compact), 7);
-        assert_eq!(settings_category_view_start(compact, 11), 5);
+        assert_eq!(settings_category_view_start(compact, 13), 7);
         assert_eq!(settings_row_capacity(272), 5);
         assert_eq!(
             settings_row_view_start(SettingsCategory::Windows, 7, 272),

@@ -32,9 +32,10 @@ ExpOS is the Form-native operating system described by
 - a flat dark desktop with a list/grid application menu, direct entries for
   installed Ayo apps, menu density/content/category/motion controls, and a
   taskbar with movable, closable, minimizable and maximizable windows;
-- an interactive Settings control center for appearance, windows, taskbar,
-  display, performance, input, network, Wi-Fi, Bluetooth, privacy and system
-  and menu behavior, including six themes, seven procedural wallpapers, four cursor
+- an interactive Settings control center for profiles, accessibility,
+  appearance, windows, taskbar, display, performance, input, network, Wi-Fi,
+  Bluetooth, privacy, system and menu behavior, including six coordinated
+  desktop profiles, six themes, seven procedural wallpapers, four cursor
   themes, five font faces and three real font weights;
 - readable case-sensitive 8x8 framebuffer text with runtime face/weight
   rasterization and an expanded 8x16 VGA console font;
@@ -76,8 +77,9 @@ installation baseline per CFC.
 The on-disk suite is now XChaCha20-Poly1305 with deterministic per-slot nonces
 bound to CFC identity, generation and storage domain. Basic uses Argon2id v1.3
 with 64 MiB, three passes and one lane. Current state and all eight rotating
-checkpoint slots are authenticated-encrypted; the immutable installation
-baseline payload remains separate future work.
+checkpoint slots plus the non-rotating installation baseline are
+authenticated-encrypted. `baseline` inspects it and the Operator-only
+`restorebaseline` command restores it without modifying the protected copy.
 
 Native UEFI is the default Genesis and normal boot path; BIOS remains a
 compatibility, recovery, and development fallback. **Architect** is the official
@@ -91,16 +93,31 @@ genesis-iso` builds `build/ExpOS-0.9-x86_64.iso`, a native-UEFI hybrid image.
 Its Architect path requires exact `ERASE` confirmation, constructs primary and
 backup GPT metadata, creates a FAT32 EFI System Partition, installs the runtime
 at `EFI/BOOT/BOOTX64.EFI`, mints and persists CFC/Primary Dimension identities,
-and stores only a salted password verifier for the initial Operator. `make
-genesis-check` installs to a blank disk, reboots without the ISO, logs in with
-that Operator, and shuts down.
+and stores only a salted password verifier for the initial Operator. Genesis
+confirms the password, shows the final whole-disk plan before `ERASE`, writes
+redundant checksummed manifests, then reads back and verifies GPT, FAT32, both
+manifests and the complete UEFI payload. `make genesis-check` installs to a
+blank disk, verifies the protected baseline, reboots without the ISO, logs in
+with that Operator, and shuts down. Installed boot requires matching valid
+manifest copies, can recover through the backup when the primary is damaged,
+and fails closed rather than falling back to a development identity when both
+copies are unusable or disagree.
 
 Genesis now offers Basic with mandatory encrypted CFC storage and Architect as
 the explicitly unencrypted development choice. The automated end-to-end
 `genesis-check` installs, disk-boots and authenticates both paths; both claim
-the whole ATA primary-master disk. Safe physical-disk selection,
-AHCI/NVMe/VirtIO-block, USB input/media, BIOS installation, Secure Boot, and a
-graphical installer remain open.
+the whole ATA primary-master disk. Genesis now activates a styled 640x480
+framebuffer console immediately after the UEFI handoff, so prompts and masked
+password input are visible in the QEMU window instead of only on serial.
+`make genesis-display-check` captures the real scanout and advances it through
+PS/2 input. Installed UEFI boot uses the same visible console for encrypted-CFC
+unlock and fail-closed manifest errors before handing off to the normal chooser.
+`make run-genesis` creates or safely reuses only a regular virtual-disk image,
+automatically ejects the installer media before reboot, and directly boots an
+image that already contains a Genesis manifest. Safe physical-disk selection,
+AHCI/NVMe/VirtIO-block, USB
+input/media, BIOS installation, Secure Boot, and a mouse-first graphical wizard
+remain open.
 
 The bounded `Cfc`/`CfcCatalog` model enforces exclusive ownership of registered
 Form and Dimension FINs. ExpScope snapshots that ownership, recovery artifacts
@@ -111,9 +128,10 @@ persistence path. Accounts and settings now load from and commit through the
 same ExpFS current-state transaction; EXPOST03 is only a boot-time migration
 fallback. Typed execution contexts now reach scheduler admission and
 per-context budget accounting. Native checkpoint capture/restore and the
-Architect Genesis construction path, Basic key wrapping, and AEAD ExpFS are live;
-the protected installation baseline, real page-table switching, interrupts/preemption, and
-user-mode CPU context switching remain implementation work.
+Architect Genesis construction path, Basic key wrapping, AEAD ExpFS and the
+protected installation-baseline restore path are live; real page-table
+switching, interrupts/preemption, and user-mode CPU context switching remain
+implementation work.
 
 The 32-bit Diamond II source remains isolated under `legacy/alpha32/` as a
 buildable migration reference.
@@ -129,6 +147,8 @@ UEFI builds/tests. Python also supplies the host SDK and test harnesses.
 make uefi           # build build/esp/EFI/BOOT/BOOTX64.EFI
 make genesis-iso    # build build/ExpOS-0.9-x86_64.iso
 make genesis-check  # install, disk-boot, log in and shut down under OVMF
+make genesis-display-check # verify visible Genesis scanout and PS/2 input
+make run-genesis     # safely install or boot the persistent QEMU disk
 make run-uefi       # boot the native firmware path with OVMF
 make bootmode-check # verify single-user account/service restrictions
 make startup-check  # verify visible UEFI/BIOS screens and real keyboard login
@@ -235,8 +255,9 @@ sent to DuckDuckGo's non-JavaScript HTML search; prefix a query with `?` for the
 same behavior.
 
 Settings controls are clickable and keyboard-accessible. Its category and row
-viewports follow the selection, so all twelve pages and long Menu/Windows/Appearance
-lists remain usable at 480p. Appearance, taskbar, status-area, border,
+viewports follow the selection, so all fourteen pages and long
+Menu/Windows/Accessibility lists remain usable at 480p. Appearance, taskbar,
+status-area, border,
 contrast, pointer-speed, theme, wallpaper, cursor and font changes take effect
 immediately and persist. Five allocation-free bitmap faces and Light, Regular
 and Bold stroke weights preserve the existing text layout while visibly
@@ -252,7 +273,11 @@ translucency, horizontal app labels and hardware-RTC seconds. The cursor shadow
 is independently switchable. The Menu page controls list/grid layout, density,
 icon scale, built-in and installed-app visibility, categories, motion and hints;
 installed Ayo apps open directly from this launcher rather than a nested Apps
-list. Across the customization pages, 632
+list. The Profiles page applies Balanced, Compact, Focus, Accessible, Showcase
+or Touch-friendly settings as one persistent transaction while preserving the
+chosen display timing and system visibility. Accessibility gathers contrast,
+font, drag-target, taskbar-target, pointer, motion and hint controls in one
+place. Across the customization pages, 638
 selectable values are directly wired to rendering, geometry or interaction.
 That includes 256 persisted accent colors and 252 wallpaper variants across
 seven procedural patterns. The compact persistent-state schema validates 628
@@ -432,10 +457,10 @@ aliases for `expbudget`.
 
 The dedicated state disk now carries alternating, CFC-bound ExpFS database
 snapshots containing Forms, content, Dimensions, relationships, revisions,
-PIMP network state, accounts and Settings preferences. The current format is
-CRC-protected rather than AEAD-protected. It captures and restores eight
-rotating full-state checkpoints; the separate protected installation baseline
-is not yet stored on disk.
+PIMP network state, accounts and Settings preferences. Unencrypted Architect
+state is CRC-protected; encrypted Basic state uses authenticated encryption.
+It captures and restores eight rotating full-state checkpoints and stores a
+separate protected installation baseline outside that rotation.
 
 ## Preserved implementation
 

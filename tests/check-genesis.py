@@ -76,13 +76,13 @@ def check_variant(name: str, mode: bytes, encrypted: bool) -> None:
         "-drive", f"file={target},format=raw,if=ide,index=0",
         "-cdrom", "build/ExpOS-0.9-x86_64.iso", "-boot", "once=d",
     ]
-    common = b"ERASE\nTest Fabric\nPrimary\ncorrect-horse\n\n"
+    common = b"Test Fabric\nPrimary\ncorrect-horse\ncorrect-horse\nERASE\n\n"
     install_status, install_output = run(
         f"{name}-install",
         install_command,
         b"Installation mode [1/2]:",
         mode + b"\n" + common,
-        180 if encrypted else 90,
+        240 if encrypted else 150,
     )
     assert install_status == 0, (
         f"{name} installer failed ({install_status}); "
@@ -91,9 +91,20 @@ def check_variant(name: str, mode: bytes, encrypted: bool) -> None:
     for marker in (
         b"EXPOS_GENESIS_INSTALLED",
         b"EFI/BOOT/BOOTX64.EFI installed",
+        b"primary/backup manifests and boot payload verified",
         b"Installation complete",
     ):
         assert marker in install_output, f"{name} installer omitted {marker!r}"
+
+    installed_bytes = target.read_bytes()
+    primary_manifest = installed_bytes[40 * 512 : 41 * 512]
+    backup_manifest = installed_bytes[41 * 512 : 42 * 512]
+    assert primary_manifest == backup_manifest, "Genesis manifest copies differ"
+    assert primary_manifest[:8] == b"EXGEN001"
+    if name == "architect":
+        with target.open("r+b") as disk:
+            disk.seek(40 * 512)
+            disk.write(b"DAMAGED!")
 
     boot_command = base + firmware(f"{name}-boot") + [
         "-drive", f"file={target},format=raw,if=ide,index=0",
@@ -116,18 +127,28 @@ def check_variant(name: str, mode: bytes, encrypted: bool) -> None:
     )
     for marker in (
         b"EXPOS_ACCOUNTS_READY source=genesis persisted=true",
+        b"EXPOS_EARLY_DISPLAY visible=true backend=bochs-vbe",
+        b"EXPOS_EXPFS_BASELINE_READY",
         b"EXPOS_LOGIN_OK user=operator",
         b"EXPOS_COMMAND_OK shutdown",
     ):
         assert marker in boot_output, f"{name} installed boot omitted {marker!r}"
+    if name == "architect":
+        assert b"EXPOS_GENESIS_MANIFEST_RECOVERED source=backup" in boot_output
+    disk_bytes = target.read_bytes()
+    assert disk_bytes[41 * 512 : 41 * 512 + 8] == b"EXGEN001"
+    baseline = 304 * 512
+    assert disk_bytes[baseline : baseline + 8] == b"EXPFSDB1"
     if encrypted:
         assert b"EXPOS_CFC_UNLOCKED" in boot_output
         assert b"suite=xchacha20poly1305" in boot_output
-        disk_bytes = target.read_bytes()
         assert b"correct-horse" not in disk_bytes
         assert disk_bytes[64 * 512 + 44] == 1, "ExpFS slot A is not encrypted"
+        assert disk_bytes[baseline + 44] == 1, "installation baseline is not encrypted"
+    else:
+        assert disk_bytes[baseline + 44] == 0, "Architect baseline should be unencrypted"
 
 
 check_variant("architect", b"2", False)
 check_variant("basic", b"1", True)
-print("Genesis Architect and encrypted Basic install, disk boot, login, and shutdown completed")
+print("Genesis verified install, redundant manifest, protected baseline, disk boot, login, and shutdown completed")

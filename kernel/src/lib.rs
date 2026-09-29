@@ -20,6 +20,7 @@ mod expfs_store;
 mod framebuffer;
 mod games;
 mod genesis;
+mod graphics_console;
 mod hardware;
 mod input;
 mod kernel_controls;
@@ -74,6 +75,7 @@ pub fn _print(args: fmt::Arguments<'_>) {
     let _ = fmt::Write::write_fmt(&mut *writer, args);
     writer.update_cursor();
     drop(writer);
+    graphics_console::write(args);
     let mut serial = serial::COM1.lock();
     let _ = fmt::Write::write_fmt(&mut *serial, args);
 }
@@ -153,7 +155,24 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
     #[cfg(not(feature = "genesis-installer"))]
     {
         let mut input = input::Input::new();
-        let genesis_config = genesis::load(&mut input);
+        let early_graphics = boot::native_uefi() && graphics_console::enable_boot();
+        slog!(
+            "EXPOS_EARLY_DISPLAY visible={} backend={}\r\n",
+            early_graphics,
+            if early_graphics {
+                "bochs-vbe"
+            } else {
+                "vga-serial"
+            }
+        );
+        let genesis_config = match genesis::load(&mut input) {
+            Ok(config) => config,
+            Err(error) => {
+                println!("[fatal] {}", error.message());
+                slog!("EXPOS_GENESIS_LOAD_FAILED error={:?}\r\n", error);
+                port::shutdown();
+            }
+        };
         let report = match genesis_config {
             Some(config) => expos_core::bootstrap_with_identity(
                 config.cfc_fin,
@@ -187,8 +206,19 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
             let _ = framebuffer::request_mode(mode);
         }
         session::initialize_with_seed(genesis_config.map(|config| config.operator.0));
+        match expfs_store::establish_baseline() {
+            Ok(info) => println!(
+                "[ok] protected installation baseline generation {} (journal {})",
+                info.generation, info.journal_sequence
+            ),
+            Err(error) => println!(
+                "[warn] protected installation baseline unavailable: {}",
+                error.message()
+            ),
+        }
         println!();
         println!("Core architecture online. Starting session manager.");
+        graphics_console::disable();
         let requested_mode = session::choose_boot_mode(&mut input);
         boot::set_single_user(requested_mode == session::BootMode::SingleUser);
         if boot::single_user() {

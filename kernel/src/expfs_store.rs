@@ -31,7 +31,8 @@ const PAYLOAD_LEN: usize = SLOT_LEN - HEADER_LEN;
 const SLOT_A_LBA: u32 = 64;
 const SLOT_B_LBA: u32 = SLOT_A_LBA + SLOT_SECTORS as u32;
 const CHECKPOINT_LBA: u32 = SLOT_B_LBA + SLOT_SECTORS as u32;
-const MINIMUM_DISK_SECTORS: u32 = CHECKPOINT_LBA + (CHECKPOINT_CAPACITY * SLOT_SECTORS) as u32;
+const BASELINE_LBA: u32 = CHECKPOINT_LBA + (CHECKPOINT_CAPACITY * SLOT_SECTORS) as u32;
+const MINIMUM_DISK_SECTORS: u32 = BASELINE_LBA + SLOT_SECTORS as u32;
 
 #[derive(Clone, Copy)]
 pub struct StoredForm {
@@ -89,6 +90,8 @@ pub enum StoreError {
     VerificationFailed,
     NoCurrentState,
     CheckpointNotFound,
+    BaselineNotFound,
+    BaselineDamaged,
 }
 
 impl StoreError {
@@ -102,6 +105,8 @@ impl StoreError {
             Self::VerificationFailed => "ExpFS commit verification failed",
             Self::NoCurrentState => "ExpFS has no current state to checkpoint",
             Self::CheckpointNotFound => "ExpFS checkpoint does not exist",
+            Self::BaselineNotFound => "ExpFS installation baseline does not exist",
+            Self::BaselineDamaged => "ExpFS installation baseline is damaged",
         }
     }
 }
@@ -115,6 +120,7 @@ struct RuntimeStore {
     generation: u64,
     active_slot: u8,
     checkpoints: [Option<CheckpointInfo>; CHECKPOINT_CAPACITY],
+    baseline: BaselineState,
     storage_key: Option<[u8; crypto::STORAGE_KEY_LEN]>,
 }
 
@@ -129,6 +135,7 @@ impl RuntimeStore {
             generation: 0,
             active_slot: 1,
             checkpoints: [None; CHECKPOINT_CAPACITY],
+            baseline: BaselineState::Missing,
             storage_key: None,
         }
     }
@@ -149,6 +156,19 @@ pub struct CheckpointInfo {
     pub state_id: u64,
     pub journal_sequence: u32,
     pub slot: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BaselineInfo {
+    pub generation: u64,
+    pub journal_sequence: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BaselineState {
+    Missing,
+    Ready(BaselineInfo),
+    Damaged,
 }
 
 pub fn initialize(
@@ -192,6 +212,7 @@ pub fn initialize(
     store.cfc_name = cfc_name;
     store.primary_dimension = primary_dimension;
     store.storage_key = storage_key;
+    store.checkpoints = [None; CHECKPOINT_CAPACITY];
     for index in 0..CHECKPOINT_CAPACITY {
         if let Ok(checkpoint) = read_at(
             device,
@@ -210,6 +231,33 @@ pub fn initialize(
             }
         }
     }
+    store.baseline = match read_at(device, BASELINE_LBA, u8::MAX, storage_key.as_ref()) {
+        Ok(baseline)
+            if baseline.snapshot.cfc == cfc
+                && baseline.snapshot.primary_dimension == primary_dimension =>
+        {
+            let info = BaselineInfo {
+                generation: baseline.generation,
+                journal_sequence: baseline.snapshot.journal_sequence,
+            };
+            println!(
+                "[ok] protected ExpFS installation baseline generation {} loaded",
+                info.generation
+            );
+            slog!(
+                "EXPOS_EXPFS_BASELINE_READY generation={} sequence={} source=disk\r\n",
+                info.generation,
+                info.journal_sequence
+            );
+            BaselineState::Ready(info)
+        }
+        _ if region_is_blank(device, BASELINE_LBA) => BaselineState::Missing,
+        _ => {
+            println!("[warn] protected ExpFS installation baseline is damaged");
+            slog!("EXPOS_EXPFS_BASELINE_DAMAGED\r\n");
+            BaselineState::Damaged
+        }
+    };
     if let Some(slot) = selected {
         store.snapshot = Some(slot.snapshot);
         store.generation = slot.generation;
@@ -362,6 +410,74 @@ pub fn available() -> bool {
 
 pub fn checkpoints() -> [Option<CheckpointInfo>; CHECKPOINT_CAPACITY] {
     STORE.lock().checkpoints
+}
+
+pub fn baseline() -> BaselineState {
+    STORE.lock().baseline
+}
+
+/// Create the one protected installation baseline if this CFC does not yet
+/// have one. A present or damaged baseline is never overwritten.
+pub fn establish_baseline() -> Result<BaselineInfo, StoreError> {
+    let mut store = STORE.lock();
+    match store.baseline {
+        BaselineState::Ready(info) => return Ok(info),
+        BaselineState::Damaged => return Err(StoreError::BaselineDamaged),
+        BaselineState::Missing => {}
+    }
+    let snapshot = store.snapshot.ok_or(StoreError::NoCurrentState)?;
+    let device = store.device.ok_or(StoreError::Unavailable)?;
+    let generation = store.generation.max(1);
+    let mut encoded = [0_u8; SLOT_LEN];
+    encode_slot(
+        &snapshot,
+        generation,
+        store.storage_key.as_ref(),
+        BASELINE_LBA,
+        &mut encoded,
+    )?;
+    write_at(device, BASELINE_LBA, &encoded)?;
+    let verified = read_at(device, BASELINE_LBA, u8::MAX, store.storage_key.as_ref())?;
+    if verified.generation != generation
+        || verified.snapshot.cfc != snapshot.cfc
+        || verified.snapshot.primary_dimension != snapshot.primary_dimension
+        || verified.snapshot.journal_sequence != snapshot.journal_sequence
+    {
+        store.baseline = BaselineState::Damaged;
+        return Err(StoreError::VerificationFailed);
+    }
+    let info = BaselineInfo {
+        generation,
+        journal_sequence: snapshot.journal_sequence,
+    };
+    store.baseline = BaselineState::Ready(info);
+    slog!(
+        "EXPOS_EXPFS_BASELINE_READY generation={} sequence={} source=created\r\n",
+        info.generation,
+        info.journal_sequence
+    );
+    Ok(info)
+}
+
+pub fn restore_baseline() -> Result<u64, StoreError> {
+    let mut store = STORE.lock();
+    match store.baseline {
+        BaselineState::Missing => return Err(StoreError::BaselineNotFound),
+        BaselineState::Damaged => return Err(StoreError::BaselineDamaged),
+        BaselineState::Ready(_) => {}
+    }
+    let device = store.device.ok_or(StoreError::Unavailable)?;
+    let mut snapshot = read_at(device, BASELINE_LBA, u8::MAX, store.storage_key.as_ref())?.snapshot;
+    if let Some(current) = store.snapshot {
+        snapshot.journal_sequence = current.journal_sequence.wrapping_add(1).max(1);
+    }
+    let generation = commit_locked(&mut store, snapshot)?;
+    slog!(
+        "EXPOS_EXPFS_BASELINE_RESTORE generation={} sequence={}\r\n",
+        generation,
+        snapshot.journal_sequence
+    );
+    Ok(generation)
 }
 
 pub fn record_checkpoint() -> Result<CheckpointInfo, StoreError> {
@@ -733,6 +849,20 @@ fn read_at(
         encoded[start..start + storage::SECTOR_SIZE].copy_from_slice(&sector);
     }
     decode_slot(&encoded, slot, storage_key, base).ok_or(StoreError::VerificationFailed)
+}
+
+fn region_is_blank(device: storage::Device, base: u32) -> bool {
+    for sector_index in 0..SLOT_SECTORS {
+        let mut sector = [0_u8; storage::SECTOR_SIZE];
+        if device
+            .read_sector(base + sector_index as u32, &mut sector)
+            .is_err()
+            || sector.iter().any(|byte| *byte != 0)
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn decode_slot(
@@ -1221,5 +1351,15 @@ mod tests {
         assert_eq!(decoded.snapshot.cfc, source.cfc);
         encoded[HEADER_LEN + 9] ^= 1;
         assert!(decode_slot(&encoded, 0, Some(&key), 64).is_none());
+    }
+
+    #[test]
+    fn protected_baseline_is_outside_checkpoint_rotation_and_has_its_own_aead_domain() {
+        assert_eq!(BASELINE_LBA, checkpoint_lba(CHECKPOINT_CAPACITY));
+        let key = [0x37_u8; crypto::STORAGE_KEY_LEN];
+        let mut encoded = [0_u8; SLOT_LEN];
+        encode_slot(&snapshot(), 3, Some(&key), BASELINE_LBA, &mut encoded).unwrap();
+        assert!(decode_slot(&encoded, u8::MAX, Some(&key), BASELINE_LBA).is_some());
+        assert!(decode_slot(&encoded, u8::MAX, Some(&key), checkpoint_lba(0)).is_none());
     }
 }

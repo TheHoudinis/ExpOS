@@ -18,6 +18,8 @@ make bootmode-check # reject Guest in single-user, test service restrictions
 make startup-check # capture visible UEFI/BIOS screens and exercise PS/2 login
 make genesis-iso   # native UEFI installer at build/ExpOS-0.9-x86_64.iso
 make genesis-check # install to a blank disk, boot it, log in, shut down
+make genesis-display-check # prove the Genesis prompt is visible and interactive
+make run-genesis   # visible installer with safe virtual-media ejection/reboot
 ```
 
 ## Approved Genesis boot and unlock model
@@ -40,8 +42,10 @@ Genesis Basic implements this flow with Argon2id v1.3 (64 MiB, three passes,
 one lane), a random 32-byte CFC storage key, and XChaCha20-Poly1305. Boot unlocks
 the manifest envelope before ExpFS decoding. Current-state and rotating
 checkpoint slots use authenticated encryption with nonce domains bound to CFC,
-generation and disk slot. The protected immutable baseline and recovery
-selection UI remain implementation work.
+generation and disk slot. A separately domained protected installation
+baseline is established after the first durable account/settings transaction;
+the console can inspect or restore it with `baseline` and `restorebaseline`.
+A graphical recovery selector remains implementation work.
 
 Build dependencies include Clang, GNU PE-capable ld, NASM, GCC, Rust, Make,
 QEMU, and OVMF. Override `OVMF_CODE` and `OVMF_VARS` for another firmware path.
@@ -70,15 +74,33 @@ limitations. This build is unsigned and does not implement Secure Boot.
 Genesis now has a separate native-UEFI installation build. It offers encrypted
 Basic and explicitly unencrypted Architect whole-disk choices. It writes
 primary/backup GPT structures, a FAT32 EFI System Partition, the runtime at
-`EFI/BOOT/BOOTX64.EFI`, and a checksummed manifest with new CFC and Primary
-Dimension identities plus a salted Operator password verifier. On first
+`EFI/BOOT/BOOTX64.EFI`, and redundant checksummed manifests with independently
+generated CFC and Primary Dimension identities plus a salted Operator password
+verifier. It confirms the Operator password and final installation plan before
+the destructive gate, then reads back the GPT, FAT32 metadata, both manifests
+and complete UEFI runtime. On first
 installed boot those identities drive core bootstrap and the Operator becomes
-an ExpFS account record. `make genesis-check` proves ISO install, ISO-free disk
-boot, Operator login, and shutdown.
+an ExpFS account record and the first durable state becomes the protected
+installation baseline. `make genesis-check` proves ISO install, redundant
+metadata, baseline creation, ISO-free disk boot, Operator login, and shutdown.
+Boot recovers from a valid backup manifest, but conflicting or wholly damaged
+installed manifests fail closed instead of selecting the development identity.
+The installer switches from OVMF GOP output to ExpOS's validated Bochs
+framebuffer and mirrors its bounded text UI there. The display check rejects a
+stale firmware frame, captures both mode-selection screens, and injects input
+through QEMU's PS/2 keyboard rather than through serial.
+Installed UEFI boot activates the same bounded console before CFC key unwrap,
+so Basic unlock failures and manifest diagnostics cannot be hidden behind the
+firmware frame. The interactive runner only accepts a blank regular image or an
+image with a Genesis manifest, refuses unknown nonblank images, ejects the ISO
+when construction completes, and boots an installed image without reattaching
+installation media.
 
 Basic never offers an encryption-off switch. Its current-state and checkpoint
 database is authenticated-encrypted and boot performs password-driven key
-unwrap before decoding ExpFS. The protected immutable baseline remains pending.
+unwrap before decoding ExpFS. Its protected immutable baseline is encrypted in
+an independent disk/nonce domain and cannot be replaced by normal checkpoint
+rotation or restore.
 The installer currently sees only the ATA primary master and does not enumerate model
 or serial identities, so it is not yet approved for physical-disk use. The
 automated check modifies only its generated blank image.

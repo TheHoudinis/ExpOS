@@ -50,7 +50,8 @@ Basic uses Argon2id v1.3 with 64 MiB, three passes and one lane to wrap a random
 32-byte key. Nonces bind that key to CFC identity, generation and slot domain.
 Alternating current-state commits and the eight-slot checkpoint ring are
 authenticated-encrypted whenever the CFC has a storage key. The immutable
-installation-baseline payload remains pending.
+installation baseline uses the same snapshot schema in a separate, non-rotating
+slot with its own authenticated-encryption domain.
 
 The approved confinement/enforcement names are `ExpScope` for CFC/Dimension-
 aware confinement, `ExpSeal` for monotonic capability reduction, and
@@ -137,9 +138,11 @@ retained for compatibility, recovery, and development.
     outside an up-to-eight-entry rotating checkpoint ring. The native ExpFS
     adapter now persists eight complete CFC database checkpoints, rotates the
     oldest slot, lists retained state IDs and restores a selected checkpoint
-    into the alternating current-state slots before reboot. Checkpoints are
-    XChaCha20-Poly1305 authenticated encryption is applied for encrypted CFCs;
-    the protected installation-baseline payload is not yet on disk.
+    into the alternating current-state slots before reboot. A protected
+    installation baseline is stored outside the ring and can only be copied
+    back into current state; checkpoint operations cannot overwrite it.
+    XChaCha20-Poly1305 authenticated encryption is applied to all recovery
+    payloads for encrypted CFCs.
 
 ## Trust boundaries
 
@@ -245,10 +248,13 @@ retained for compatibility, recovery, and development.
   taskbar can occupy any edge, use
   one of nine thicknesses, align running apps at start/center/end, auto-hide and
   reveal at that edge, blend translucently, show horizontal labels, and include
-  RTC seconds. The twelve-category Settings UI adds a Menu page for list/grid
+  RTC seconds. The fourteen-category Settings UI adds coordinated whole-desktop
+  Profiles, a dedicated Accessibility page, and a Menu page for list/grid
   layout, density, scale, content visibility, categories and motion, and computes compact category/row
   viewports so the selected item remains visible at 480p. Appearance, Windows
-  Taskbar and Menu expose 632 directly working selectable values. Its
+  Taskbar, Menu and Profiles expose 638 directly working selectable values.
+  Profiles atomically apply Balanced, Compact, Focus, Accessible, Showcase or
+  Touch-friendly combinations through the same persisted preference path. Its
   Display page also selects a 60, 75, 120 or 144 Hz compositor presentation
   target and optional VSync. These are software-pacing targets, not negotiated
   physical monitor modes. The Performance page independently controls window
@@ -320,7 +326,8 @@ retained for compatibility, recovery, and development.
   the durable ExpFS CFC snapshot and eight-checkpoint recovery ring. Encrypted
   Basic CFCs use their Argon2id-wrapped random key for XChaCha20-Poly1305
   snapshots; unencrypted Architect/development records retain CRC. The
-  protected installation baseline is not yet on disk.
+  protected installation baseline is stored outside checkpoint rotation and
+  uses its own disk/nonce domain.
 - Network is a Driver Form protected by requester-bound Network Handles and
   PIMP policy. Its current polling RTL8139 path implements Ethernet, ARP,
   DHCP-configured IPv4 with a conservative fallback, ICMP echo,

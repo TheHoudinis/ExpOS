@@ -12,6 +12,7 @@ use crate::{session, storage};
 use expos_core::{CfcFin, Fin, Text};
 
 const MANIFEST_LBA: u32 = 40;
+const MANIFEST_BACKUP_LBA: u32 = 41;
 const MANIFEST_MAGIC: [u8; 8] = *b"EXGEN001";
 const MANIFEST_VERSION: u16 = 2;
 const EFI_PARTITION_START: u32 = 2048;
@@ -25,6 +26,7 @@ const DIRECTORY_CLUSTERS: u32 = 3;
 pub enum GenesisError {
     DiskTooSmall,
     PayloadTooLarge,
+    VerificationFailed,
     Storage(storage::StorageError),
 }
 
@@ -34,7 +36,7 @@ impl From<storage::StorageError> for GenesisError {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GenesisConfig {
     pub cfc_fin: CfcFin,
     pub cfc_name: Text,
@@ -45,7 +47,28 @@ pub struct GenesisConfig {
     storage_envelope: Option<StorageEnvelope>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GenesisLoadError {
+    ManifestDamaged,
+}
+
+impl GenesisLoadError {
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::ManifestDamaged => "Genesis manifest copies are damaged or disagree",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ManifestSelection {
+    None,
+    Primary(GenesisConfig),
+    PrimaryDegraded(GenesisConfig),
+    Backup(GenesisConfig),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct StorageEnvelope {
     salt: [u8; crate::crypto::STORAGE_SALT_LEN],
     nonce: [u8; crate::crypto::STORAGE_NONCE_LEN],
@@ -55,6 +78,7 @@ struct StorageEnvelope {
 
 trait BlockDevice {
     fn sectors(&self) -> u32;
+    fn read(&self, lba: u32, output: &mut [u8; storage::SECTOR_SIZE]) -> Result<(), GenesisError>;
     fn write(&mut self, lba: u32, input: &[u8; storage::SECTOR_SIZE]) -> Result<(), GenesisError>;
     fn flush(&mut self) -> Result<(), GenesisError>;
 }
@@ -62,6 +86,10 @@ trait BlockDevice {
 impl BlockDevice for storage::Device {
     fn sectors(&self) -> u32 {
         (*self).sectors()
+    }
+
+    fn read(&self, lba: u32, output: &mut [u8; storage::SECTOR_SIZE]) -> Result<(), GenesisError> {
+        (*self).read_sector(lba, output).map_err(Into::into)
     }
 
     fn write(&mut self, lba: u32, input: &[u8; storage::SECTOR_SIZE]) -> Result<(), GenesisError> {
@@ -76,13 +104,37 @@ impl BlockDevice for storage::Device {
 }
 
 /// Load installation identity before the Form-native bootstrap runs.
-pub fn load(input: &mut crate::input::Input) -> Option<GenesisConfig> {
-    let device = storage::initialize().ok()?;
-    let mut sector = [0_u8; storage::SECTOR_SIZE];
-    device.read_sector(MANIFEST_LBA, &mut sector).ok()?;
-    let mut config = decode_manifest(&sector)?;
+pub fn load(input: &mut crate::input::Input) -> Result<Option<GenesisConfig>, GenesisLoadError> {
+    let device = match storage::initialize() {
+        Ok(device) => device,
+        Err(_) => return Ok(None),
+    };
+    let mut primary = [0_u8; storage::SECTOR_SIZE];
+    let mut backup = [0_u8; storage::SECTOR_SIZE];
+    device
+        .read_sector(MANIFEST_LBA, &mut primary)
+        .map_err(|_| GenesisLoadError::ManifestDamaged)?;
+    device
+        .read_sector(MANIFEST_BACKUP_LBA, &mut backup)
+        .map_err(|_| GenesisLoadError::ManifestDamaged)?;
+    let mut config = match select_manifest_copies(&primary, &backup)? {
+        ManifestSelection::None => return Ok(None),
+        ManifestSelection::Primary(config) => config,
+        ManifestSelection::PrimaryDegraded(config) => {
+            if !sector_blank(&backup) {
+                crate::println!("[warn] Genesis backup manifest is damaged");
+            }
+            crate::slog!("EXPOS_GENESIS_MANIFEST_DEGRADED source=primary copies=1\r\n");
+            config
+        }
+        ManifestSelection::Backup(config) => {
+            crate::println!("[warn] Genesis manifest recovered from its backup copy");
+            crate::slog!("EXPOS_GENESIS_MANIFEST_RECOVERED source=backup\r\n");
+            config
+        }
+    };
     let Some(envelope) = config.storage_envelope else {
-        return Some(config);
+        return Ok(Some(config));
     };
     crate::println!("Encrypted CFC storage detected: {}", config.cfc_name);
     loop {
@@ -113,10 +165,32 @@ pub fn load(input: &mut crate::input::Input) -> Option<GenesisConfig> {
                 "EXPOS_CFC_UNLOCKED cfc={} suite=xchacha20poly1305\r\n",
                 config.cfc_fin
             );
-            return Some(config);
+            return Ok(Some(config));
         }
         crate::crypto::wipe(&mut storage_key);
         crate::println!("Wrong password or damaged CFC key envelope.");
+    }
+}
+
+fn sector_blank(sector: &[u8; storage::SECTOR_SIZE]) -> bool {
+    sector.iter().all(|byte| *byte == 0)
+}
+
+fn select_manifest_copies(
+    primary: &[u8; storage::SECTOR_SIZE],
+    backup: &[u8; storage::SECTOR_SIZE],
+) -> Result<ManifestSelection, GenesisLoadError> {
+    match (decode_manifest(primary), decode_manifest(backup)) {
+        (Some(primary_config), Some(backup_config)) if primary_config == backup_config => {
+            Ok(ManifestSelection::Primary(primary_config))
+        }
+        (Some(_), Some(_)) => Err(GenesisLoadError::ManifestDamaged),
+        (Some(config), None) => Ok(ManifestSelection::PrimaryDegraded(config)),
+        (None, Some(config)) => Ok(ManifestSelection::Backup(config)),
+        (None, None) if sector_blank(primary) && sector_blank(backup) => {
+            Ok(ManifestSelection::None)
+        }
+        (None, None) => Err(GenesisLoadError::ManifestDamaged),
     }
 }
 
@@ -127,10 +201,16 @@ const RUNTIME_UEFI_APP: &[u8] = include_bytes!("../../build/genesis/runtime-BOOT
 pub fn run() -> ! {
     use crate::{crypto, input::Input, port, println, slog};
 
+    let graphical = crate::graphics_console::enable_genesis();
+    slog!(
+        "EXPOS_GENESIS_DISPLAY visible={} backend={}\r\n",
+        graphical,
+        if graphical { "bochs-vbe" } else { "serial" }
+    );
     println!();
-    println!("ExpOS Genesis Engine");
-    println!("Construct a Central Inflation Fabric");
-    println!("----------------------------------------");
+    println!("ExpOS Genesis Engine 2");
+    println!("Construct a verified Central Inflation Fabric");
+    println!("------------------------------------------------");
     println!("1. Basic      (encrypted CFC storage)");
     println!("2. Architect  (whole disk, unencrypted preview)");
     let mut input = Input::new();
@@ -154,20 +234,26 @@ pub fn run() -> ! {
         device.sectors() / 2048,
         device.sectors()
     );
-    println!("WARNING: every existing byte on this target will be replaced.");
-    if line(&read_line(&mut input, "Type ERASE to continue: ", false)) != "ERASE" {
-        println!("Installation cancelled; no disk writes were made.");
-        port::shutdown();
+    println!("[1/6] Preflight: checking disk geometry and UEFI payload...");
+    if let Err(error) = FatGeometry::new(device.sectors(), RUNTIME_UEFI_APP.len()) {
+        fatal(error);
     }
+    println!("[ok] target can hold the CFC database and UEFI runtime");
 
     let cfc_name = prompt_text(&mut input, "CFC name: ");
     let primary_name = prompt_text(&mut input, "Primary Dimension name: ");
-    let entropy = unsafe { core::arch::x86_64::_rdtsc() } as u128;
-    let cfc_fin = CfcFin::from_u128(0x4745_4e45_5349_5300_0000_0000_0000_0000 | entropy);
-    let primary_fin =
-        Fin::from_u128(0x4449_4d45_4e53_494f_0000_0000_0000_0000 | entropy.rotate_left(41));
+    let cfc_fin = CfcFin::from_u128(random_identity(*b"CFC!", b"genesis-cfc"));
+    let primary_fin = Fin::from_u128(random_identity(*b"DIM!", b"genesis-primary"));
     let (operator, storage_key, storage_envelope) = loop {
         let mut password = read_line(&mut input, "Operator password (8-23 characters): ", true);
+        let mut confirmation = read_line(&mut input, "Confirm Operator password: ", true);
+        if line_bytes(&password) != line_bytes(&confirmation) {
+            crypto::wipe(&mut password);
+            crypto::wipe(&mut confirmation);
+            println!("Passwords do not match; try again.");
+            continue;
+        }
+        crypto::wipe(&mut confirmation);
         match session::genesis_operator(line_bytes(&password)) {
             Ok(record) => {
                 let (storage_key, storage_envelope) = if basic {
@@ -203,10 +289,39 @@ pub fn run() -> ! {
         storage_envelope,
     };
 
-    println!("Creating GPT and EFI System Partition...");
+    println!();
+    println!("Installation plan");
+    println!(
+        "  Mode: {}",
+        if basic {
+            "Basic encrypted"
+        } else {
+            "Architect preview"
+        }
+    );
+    println!("  CFC: {}", cfc_name);
+    println!("  Primary Dimension: {}", primary_name);
+    println!("  Target: ATA primary master (whole disk)");
+    println!("WARNING: the existing partition map and accessible data will be replaced.");
+    println!("This operation is destructive, but it is not a forensic secure erase.");
+    if line(&read_line(
+        &mut input,
+        "Type ERASE to construct this CFC: ",
+        false,
+    )) != "ERASE"
+    {
+        println!("Installation cancelled; no disk writes were made.");
+        port::shutdown();
+    }
+
+    println!("[2/6] Creating primary and backup GPT metadata...");
+    println!("[3/6] Building the EFI System Partition...");
+    println!("[4/6] Installing the native UEFI runtime...");
+    println!("[5/6] Writing redundant Genesis manifests...");
     if let Err(error) = install(&mut device, RUNTIME_UEFI_APP, config) {
         fatal(error);
     }
+    println!("[6/6] Read-back verification complete.");
     slog!(
         "EXPOS_GENESIS_INSTALLED cfc={} dimension={} uefi_bytes={}\r\n",
         cfc_fin,
@@ -220,10 +335,18 @@ pub fn run() -> ! {
         if basic { "encrypted" } else { "unencrypted" }
     );
     println!("[ok] EFI/BOOT/BOOTX64.EFI installed");
+    println!("[ok] primary/backup manifests and boot payload verified");
     println!();
     println!("Installation complete. Remove the USB, then press Enter to reboot.");
     let _ = read_line(&mut input, "", false);
     port::reboot();
+}
+
+#[cfg(feature = "genesis-installer")]
+fn random_identity(prefix: [u8; 4], domain: &[u8]) -> u128 {
+    let mut bytes = crate::crypto::random_material::<16>(domain);
+    bytes[..4].copy_from_slice(&prefix);
+    u128::from_be_bytes(bytes)
 }
 
 #[cfg(feature = "genesis-installer")]
@@ -292,8 +415,58 @@ fn install<D: BlockDevice>(
     write_gpt(device, geometry)?;
     write_fat32(device, geometry, boot_app)?;
     let sector = encode_manifest(config);
+    device.write(MANIFEST_BACKUP_LBA, &sector)?;
     device.write(MANIFEST_LBA, &sector)?;
     device.flush()?;
+    verify_install(device, geometry, boot_app, config)?;
+    Ok(())
+}
+
+fn verify_install<D: BlockDevice>(
+    device: &D,
+    geometry: FatGeometry,
+    boot_app: &[u8],
+    config: GenesisConfig,
+) -> Result<(), GenesisError> {
+    let mut sector = [0_u8; storage::SECTOR_SIZE];
+    for lba in [1, geometry.total_sectors - 1] {
+        device.read(lba, &mut sector)?;
+        if sector[..8] != *b"EFI PART" {
+            return Err(GenesisError::VerificationFailed);
+        }
+        let stored_crc = get_u32(&sector, 16);
+        let mut header = sector;
+        put_u32(&mut header, 16, 0);
+        if crc32(&header[..92]) != stored_crc {
+            return Err(GenesisError::VerificationFailed);
+        }
+    }
+    device.read(geometry.partition_start, &mut sector)?;
+    if sector[82..90] != *b"FAT32   " || sector[510..512] != [0x55, 0xAA] {
+        return Err(GenesisError::VerificationFailed);
+    }
+    for lba in [MANIFEST_LBA, MANIFEST_BACKUP_LBA] {
+        device.read(lba, &mut sector)?;
+        let decoded = decode_manifest(&sector).ok_or(GenesisError::VerificationFailed)?;
+        if decoded.cfc_fin != config.cfc_fin
+            || decoded.cfc_name != config.cfc_name
+            || decoded.primary_fin != config.primary_fin
+            || decoded.primary_name != config.primary_name
+            || decoded.operator.0 != config.operator.0
+            || decoded.storage_envelope != config.storage_envelope
+        {
+            return Err(GenesisError::VerificationFailed);
+        }
+    }
+    for (index, expected) in boot_app.chunks(storage::SECTOR_SIZE).enumerate() {
+        device.read(geometry.cluster_lba(5 + index as u32), &mut sector)?;
+        if sector[..expected.len()] != *expected
+            || (expected.len() < storage::SECTOR_SIZE
+                && sector[expected.len()..].iter().any(|byte| *byte != 0))
+        {
+            return Err(GenesisError::VerificationFailed);
+        }
+    }
     Ok(())
 }
 
@@ -760,6 +933,12 @@ mod tests {
             self.sectors
         }
 
+        fn read(&self, lba: u32, output: &mut [u8; 512]) -> Result<(), GenesisError> {
+            let start = lba as usize * 512;
+            output.copy_from_slice(&self.bytes[start..start + 512]);
+            Ok(())
+        }
+
         fn write(&mut self, lba: u32, input: &[u8; 512]) -> Result<(), GenesisError> {
             let start = lba as usize * 512;
             self.bytes[start..start + 512].copy_from_slice(input);
@@ -798,6 +977,27 @@ mod tests {
     }
 
     #[test]
+    fn redundant_manifest_configs_must_agree() {
+        let first = config();
+        let mut second = config();
+        second.primary_fin = Fin::from_u128(99);
+        let first = encode_manifest(first);
+        let second = encode_manifest(second);
+        assert_eq!(
+            select_manifest_copies(&first, &second),
+            Err(GenesisLoadError::ManifestDamaged)
+        );
+        assert_eq!(
+            select_manifest_copies(&[0; storage::SECTOR_SIZE], &[0; storage::SECTOR_SIZE]),
+            Ok(ManifestSelection::None)
+        );
+        assert!(matches!(
+            select_manifest_copies(&first, &[0; storage::SECTOR_SIZE]),
+            Ok(ManifestSelection::PrimaryDegraded(_))
+        ));
+    }
+
+    #[test]
     fn installer_writes_gpt_fat_fallback_path_and_manifest() {
         let mut disk = MemoryDisk::new(72 * 2048);
         let payload = b"MZ ExpOS UEFI runtime";
@@ -814,6 +1014,11 @@ mod tests {
         assert_eq!(&disk.bytes[app..app + payload.len()], payload);
         let manifest = MANIFEST_LBA as usize * 512;
         assert_eq!(&disk.bytes[manifest..manifest + 8], &MANIFEST_MAGIC);
+        let backup = MANIFEST_BACKUP_LBA as usize * 512;
+        assert_eq!(
+            &disk.bytes[manifest..manifest + 512],
+            &disk.bytes[backup..backup + 512]
+        );
     }
 
     #[test]

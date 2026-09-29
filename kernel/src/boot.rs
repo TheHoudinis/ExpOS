@@ -6,6 +6,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 pub const UEFI_MAGIC: u32 = 0x4558_5055;
 const INFO_MAGIC: u64 = 0x4558_504f_5345_4649;
 static SINGLE_USER: AtomicBool = AtomicBool::new(false);
+static NATIVE_UEFI: AtomicBool = AtomicBool::new(false);
 static REQUESTED: AtomicU8 = AtomicU8::new(0);
 
 #[repr(C)]
@@ -30,6 +31,10 @@ pub fn single_user() -> bool {
     SINGLE_USER.load(Ordering::Acquire)
 }
 
+pub fn native_uefi() -> bool {
+    NATIVE_UEFI.load(Ordering::Acquire)
+}
+
 /// Set once at startup. Login/logout cannot enable services disabled by boot.
 pub fn set_single_user(value: bool) {
     SINGLE_USER.store(value, Ordering::Release);
@@ -49,6 +54,7 @@ pub fn requested_mode() -> Option<crate::session::BootMode> {
 /// ownership work; the current allocator uses a separately reserved kernel heap.
 pub unsafe fn initialize(magic: u32, address: u64) {
     if magic == UEFI_MAGIC {
+        NATIVE_UEFI.store(true, Ordering::Release);
         assert!(
             address >= 0x1000
                 && address <= 0x4000_0000 - core::mem::size_of::<NativeInfo>() as u64
@@ -79,6 +85,7 @@ pub unsafe fn initialize(magic: u32, address: u64) {
         );
         return;
     }
+    NATIVE_UEFI.store(false, Ordering::Release);
     assert_eq!(magic, 0x36d7_6289, "unknown firmware handoff");
     crate::slog!("EXPOS_BIOS_HANDOFF protocol=multiboot2\r\n");
 }
