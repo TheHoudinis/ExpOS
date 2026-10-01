@@ -227,6 +227,9 @@ display-check: $(ISO)
 	grep -q "EXPOS_DISPLAY_READY surfaces=12 commit=12" $(BUILD)/display-serial.log
 	grep -q "EXPOS_DESKTOP_EMPTY open_apps=0 pinned_apps=0" $(BUILD)/display-serial.log
 	grep -q "EXPOS_MOUSE_READY enabled=true" $(BUILD)/display-serial.log
+	grep -q "EXPOS_BROWSER_TAB action=new active=2 count=2" $(BUILD)/display-serial.log
+	grep -q "EXPOS_BROWSER_TAB action=close active=1 count=1" $(BUILD)/display-serial.log
+	grep -q "EXPOS_BROWSER_BOOKMARK action=add count=1" $(BUILD)/display-serial.log
 	grep -q "EXPOS_APP_OPENED SETTINGS" $(BUILD)/display-serial.log
 	grep -q "EXPOS_SETTING_CHANGED key=theme value=Graphite" $(BUILD)/display-serial.log
 	grep -q "EXPOS_SETTING_CHANGED key=resolution value=720p" $(BUILD)/display-serial.log

@@ -133,11 +133,20 @@ pub const SCROLL_SPEED_CHOICES: u8 = SCROLL_STEPS.len() as u8;
 pub const FOCUS_POLICY_CHOICES: u8 = FOCUS_POLICY_NAMES.len() as u8;
 pub const WINDOW_OPACITY_CHOICES: u8 = WINDOW_OPACITY_ALPHA.len() as u8;
 pub const CUSTOMIZATION_BOOLEAN_CONTROLS: usize = 12;
-pub const COLOR_AND_WALLPAPER_CHOICES: usize = 256 + 252;
+pub const THEME_PALETTE_CHOICES: usize = 256;
+pub const WALLPAPER_VARIANT_CHOICES: usize = 252;
+pub const ACCENT_COLOR_CHOICES: usize = 256;
+pub const BACKDROP_TONE_CHOICES: usize = 256;
+pub const COLOR_AND_WALLPAPER_CHOICES: usize = THEME_PALETTE_CHOICES
+    + WALLPAPER_VARIANT_CHOICES
+    + ACCENT_COLOR_CHOICES
+    + BACKDROP_TONE_CHOICES;
 
 /// Total number of distinct selectable values represented by the customization
 /// extension. This counts each value of a selector and both states of every
-/// boolean control; it deliberately excludes the older display/theme fields.
+/// boolean control. The original one-byte theme, wallpaper, accent, and
+/// backdrop fields now deliberately use their full safe ranges as procedural
+/// palette identifiers, so they are included as real selectable values.
 pub const CUSTOMIZATION_SELECTABLE_VALUES: usize = FONT_FACE_CHOICES as usize
     + FONT_WEIGHT_CHOICES as usize
     + WINDOW_CORNER_RADIUS_CHOICES as usize
@@ -929,24 +938,17 @@ fn sanitize_preferences(mut value: PersistentPreferences) -> PersistentPreferenc
         0..=2 => value.display_mode,
         _ => 0,
     };
-    value.theme = match value.theme {
-        0..=5 => value.theme,
-        _ => 0,
-    };
-    value.wallpaper = match value.wallpaper {
-        0..=6 => value.wallpaper,
-        _ => 0,
+    // Every theme, accent, and backdrop byte is a valid palette identifier.
+    // IDs 0..5 (theme), 0..3 (accent), and 0..2 (backdrop) retain their
+    // original named colors; the remaining IDs select bounded procedural
+    // colors. Wallpaper IDs 0..251 combine seven renderers with 36 tones.
+    value.wallpaper = if value.wallpaper < WALLPAPER_VARIANT_CHOICES as u8 {
+        value.wallpaper
+    } else {
+        0
     };
     value.cursor_theme = match value.cursor_theme {
         0..=3 => value.cursor_theme,
-        _ => 0,
-    };
-    value.accent = match value.accent {
-        0..=3 => value.accent,
-        _ => 0,
-    };
-    value.backdrop = match value.backdrop {
-        0..=2 => value.backdrop,
         _ => 0,
     };
     value.pointer_speed = match value.pointer_speed {
@@ -1155,9 +1157,9 @@ mod tests {
     }
 
     #[test]
-    fn customization_surface_exposes_more_than_five_hundred_real_values() {
-        assert_eq!(CUSTOMIZATION_SELECTABLE_VALUES, 628);
-        const { assert!(CUSTOMIZATION_SELECTABLE_VALUES >= 500) };
+    fn customization_surface_exposes_more_than_one_thousand_real_values() {
+        assert_eq!(CUSTOMIZATION_SELECTABLE_VALUES, 1_140);
+        const { assert!(CUSTOMIZATION_SELECTABLE_VALUES >= 1_000) };
     }
 
     #[test]
@@ -1188,6 +1190,10 @@ mod tests {
         preferences.tooltips = true;
         preferences.cursor_shadow = true;
         preferences.notification_animations = true;
+        preferences.theme = (THEME_PALETTE_CHOICES - 1) as u8;
+        preferences.wallpaper = (WALLPAPER_VARIANT_CHOICES - 1) as u8;
+        preferences.accent = (ACCENT_COLOR_CHOICES - 1) as u8;
+        preferences.backdrop = (BACKDROP_TONE_CHOICES - 1) as u8;
 
         let mut encoded = [0_u8; SLOT_LEN];
         encode_slot(&data, 15, &mut encoded);
@@ -1386,7 +1392,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_checksummed_preference_ids_fall_back_to_lowest_choices() {
+    fn full_palette_ids_survive_while_bounded_fields_fall_back_safely() {
         let data = PersistentData::new();
         let mut encoded = [0_u8; SLOT_LEN];
         encode_slot(&data, 13, &mut encoded);
@@ -1398,11 +1404,11 @@ mod tests {
         let decoded = decode_slot(&encoded, 0).unwrap();
         let preferences = decoded.data.preferences;
         assert_eq!(preferences.display_mode, 0);
-        assert_eq!(preferences.theme, 0);
+        assert_eq!(preferences.theme, 0xFF);
         assert_eq!(preferences.wallpaper, 0);
         assert_eq!(preferences.cursor_theme, 0);
-        assert_eq!(preferences.accent, 0);
-        assert_eq!(preferences.backdrop, 0);
+        assert_eq!(preferences.accent, 0xFF);
+        assert_eq!(preferences.backdrop, 0xFF);
         assert_eq!(preferences.pointer_speed, 1);
     }
 

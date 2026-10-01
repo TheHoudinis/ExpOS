@@ -236,12 +236,15 @@ retained for compatibility, recovery, and development.
   contained or move a selected distance beyond the work area while retaining a
   bounded recovery region; optional snapping and three focus policies alter the
   real geometry/input path. `windowreset` in the graphical Terminal restores
-  every application surface to its default geometry. Settings offers six
-  renderer-defined themes (including Aurora and Rose), 252 persisted wallpaper
+  every application surface to its default geometry. Settings offers 256
+  coordinated theme palettes: six named palettes (including Aurora and Rose)
+  plus 250 bounded procedural palettes. It also provides 252 persisted wallpaper
   variants across seven procedural patterns (including Aurora and Mesh), 256
-  accent colors, four cursor themes, five bitmap font
+  accent colors, 256 backdrop tones, four cursor themes, five bitmap font
   faces, three independently rasterized font weights and the three display
-  presets. Font selections apply globally without changing the fixed glyph
+  presets. Palette controls expose their stable numeric ID and a live swatch;
+  keyboard coarse stepping jumps sixteen IDs at a time. Font selections apply
+  globally without changing the fixed glyph
   advance. Window radius, border width and backdrop/titlebar opacity feed the
   actual compositor drawing, while titlebar height also changes drag/control hit-test
   geometry; cursor shadow is an independent low-cost rendering option. The
@@ -252,7 +255,7 @@ retained for compatibility, recovery, and development.
   Profiles, a dedicated Accessibility page, and a Menu page for list/grid
   layout, density, scale, content visibility, categories and motion, and computes compact category/row
   viewports so the selected item remains visible at 480p. Appearance, Windows
-  Taskbar, Menu and Profiles expose 638 directly working selectable values.
+  Taskbar, Menu and Profiles expose 1,141 directly working selectable values.
   Profiles atomically apply Balanced, Compact, Focus, Accessible, Showcase or
   Touch-friendly combinations through the same persisted preference path. Its
   Display page also selects a 60, 75, 120 or 144 Hz compositor presentation
@@ -313,12 +316,14 @@ retained for compatibility, recovery, and development.
   display mode, theme, wallpaper variant, cursor, accent,
   backdrop, pointer speed, presentation rate, VSync, shadows, wallpaper
   effects, presentation policy and desktop/connectivity flags. A tagged compact
-  extension in the preference record persists and sanitizes 628
+  extension in the preference record persists and sanitizes 1,140
   accepted states for font face/weight; window radius, border, titlebar,
   opacity, off-screen allowance, snap and focus; taskbar edge, size, alignment,
   auto-hide, translucency, labels and clock precision. This
   count represents accepted selector states and both states of booleans, not
-  628 independent rows. Older compatible records receive
+  1,140 independent rows. All 256 theme, accent and backdrop byte values are
+  valid stable palette IDs, while wallpaper values are bounded to 0..251.
+  Older compatible records receive
   conservative extension defaults; they default to 60 Hz with VSync enabled and
   use the low-cost renderer policy. Fresh state remains 480p/60 Hz with effects,
   translucency, animations, cursor shadow and off-screen travel disabled. Form
@@ -350,7 +355,10 @@ retained for compatibility, recovery, and development.
   unavailable instead of being reported as connected.
 - The Browser is an Interface Form above ExpDisplay. Its current document
   engine accepts local `expos://`, `data:text/html` and bounded `http://` or
-  `https://` resources. It receives a requester-bound Network Handle only for
+  `https://` resources. The chrome maintains six fixed tab sessions, each with
+  twelve history entries and a scroll position, plus eight in-session
+  bookmarks and a case-insensitive find overlay with match highlighting. It
+  receives a requester-bound Network Handle only for
   non-Guest sessions when PIMP networking is enabled. Text entered without a
   URL scheme is encoded for DuckDuckGo's canonical non-JavaScript HTML endpoint
   at `https://duckduckgo.com/html/?q=...`. Navigation follows at most three
@@ -361,12 +369,16 @@ retained for compatibility, recovery, and development.
   document core accepts at most 16 KiB, while the native HTTP client retains at
   most the first 14 KiB of a response body; a document contains at most 48
   nodes, 32 CSS rules, 16 scripts, 24 statements per script and 12 click
-  handlers. It computes a bounded CSS subset for tag, class, id and inline
-  rules, then runs a deterministic JavaScript subset for document title, node
+  handlers. It decodes common HTML text entities, projects additional semantic
+  text tags and unloaded image placeholders, and computes a bounded CSS subset
+  for tag, class, id and inline rules, including border radius, maximum width
+  and line height. It then runs a deterministic JavaScript subset for document title, node
   text, supported styles, visibility and local click handlers. It does not
   evaluate arbitrary ECMAScript or load external scripts, stylesheets, images
   or fonts, and it exposes no general Web APIs, cookies or storage. Media
-  containers/codecs, audio/video output and GPU rendering are absent. A
+  containers/codecs, audio/video output and GPU rendering are absent. The
+  browser chrome is Chromium-like; the engine is not Blink/V8 or Chromium
+  extension compatible. A
   verified fetch of `www.youtube.com` may return HTML, but YouTube playback is
   not supported.
 - Form ABI v1 freezes language-neutral 72-byte requests, 40-byte responses,
@@ -407,8 +419,9 @@ unwrapped storage key; unencrypted Architect/development state retains CRC.
 
 Alpha.12 includes the runtime-selectable 480p/720p/1080p empty-start desktop,
 normal case-sensitive text, Notes, a richer graphical Terminal with two-eye
-`neofetch` and window recovery, six themes, 252 wallpaper variants, four
-cursor themes, five font faces, three real weights, all-edge taskbar and bounded
+`neofetch` and window recovery, 256 theme palettes, 252 wallpaper variants, 256
+accent colors, 256 backdrop tones, four cursor themes, five font faces, three
+real weights, all-edge taskbar and bounded
 off-screen window controls, double-buffered presentation
   with ExpDisplay v2 atomic surface commits, multi-region damage,
   presentation-bound frame completion, bounded

@@ -13,7 +13,7 @@ Ports land only after their interfaces are expressed in Form-native terms.
 | `boot_policy`, `replay`, `kobserve`, `log` | recovery and observability | UEFI-first CFC selection/unlock, PIMP/DIESE diagnostics and authenticated checkpoint recovery | native UEFI default and BIOS compatibility/recovery/dev fallback, encrypted Genesis unlock, authenticated full-state checkpoint rotation/restore, protected-baseline restore, bounded Form-native typed tunables, 16-watch/16-ready signal/timer/resource events, resource accounting and denial diagnostics landed; graphical recovery selection, durable replay and interrupt integration remain queued |
 | `elf`, `syscall` | loading and ring transition experience | Form implementation loader and non-POSIX call ABI | language-neutral Form ABI v1 plus Rust/Go/C/Python SDK contracts landed; native call gate, loader and ring transition queued |
 | `vfs` | console/device plumbing | adapters only; no path-first public VFS | quarantined |
-| `expos.c` | shell, users, apps, games, commands | Interface Forms after kernel primitives mature | shell, persistent account registry, Form-native surface commit/damage/frame-completion semantics, bounded pointer-motion coalescing, customizable empty-start desktop with low-cost defaults, five font faces/three real weights, all-edge taskbar, bounded off-screen/snap/focus/window-decoration controls, 480p-safe Settings viewports, graphical/console two-eye `neofetch`, graphical `windowreset`, richer Terminal and bounded HTML/CSS/JavaScript HTTP/HTTPS Browser with canonical DuckDuckGo non-JavaScript HTML address-bar search landed; this is not Wayland client compatibility; search follows at most three redirects without allowing an HTTPS-to-HTTP downgrade and projects up to eight result titles and links from a 14 KiB fetched body prefix under a 16 KiB parser bound; arbitrary ECMAScript, external resources, Web APIs, cookies/storage, media playback and GPU rendering are not ported; the embedded trust store is not a general CA bundle; other app ports queued |
+| `expos.c` | shell, users, apps, games, commands | Interface Forms after kernel primitives mature | shell, persistent account registry, Form-native surface commit/damage/frame-completion semantics, bounded pointer-motion coalescing, customizable empty-start desktop with low-cost defaults, five font faces/three real weights, all-edge taskbar, bounded off-screen/snap/focus/window-decoration controls, 480p-safe Settings viewports, graphical/console two-eye `neofetch`, graphical `windowreset`, richer Terminal and bounded HTML/CSS/JavaScript HTTP/HTTPS Browser with six tabs, per-tab history/scroll, eight bookmarks, find-in-page, Chromium-like chrome and canonical DuckDuckGo non-JavaScript HTML address-bar search landed; this is neither Wayland client compatibility nor Chromium/Blink/V8 compatibility; search follows at most three redirects without allowing an HTTPS-to-HTTP downgrade and projects up to eight result titles and links from a 14 KiB fetched body prefix under a 16 KiB parser bound; arbitrary ECMAScript, external resources, Web APIs, cookies/storage, media playback and GPU rendering are not ported; the embedded trust store is not a general CA bundle; other app ports queued |
 | expodOS console | serial, VGA, locks, long-mode entry | v8 bootstrap platform layer | landed |
 
 ## Required sequence
@@ -46,7 +46,9 @@ choice, Argon2id parameters, key-envelope/nonce encoding, checkpoint rotation,
 and crash recovery remain design work within the approved invariants above.
 
 `legacy/alpha32/` remains an untouched migration reference in this feature
-pass. New customization stays in the v8 `EXPOST03` preference extension; fresh
-or older compatible records receive the lowest-cost defaults: 480p, 60 Hz,
-Efficient presentation, contained windows, bottom 28 px taskbar, and optional
-effects disabled.
+pass. New customization stays in the v8 `EXPOST03` preference extension; its
+existing theme, accent and backdrop bytes now expose their full 256-value
+procedural palette ranges without a disk-format change. Fresh or older
+compatible records receive the lowest-cost defaults: 480p, 60 Hz, Efficient
+presentation, contained windows, bottom 28 px taskbar, and optional effects
+disabled.

@@ -5,6 +5,7 @@ q
 displayinfo
 displaydiag
 browser
+nxb
 q
 desktop
 s2

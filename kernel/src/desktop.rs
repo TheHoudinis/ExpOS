@@ -34,12 +34,106 @@ const TERMINAL_SCROLLBACK: usize = 40;
 const TERMINAL_OUTPUT_CAPACITY: usize = 112;
 const NOTES_CAPACITY: usize = crate::expfs_store::FORM_CONTENT_CAPACITY;
 const BROWSER_HISTORY_CAPACITY: usize = 12;
+const BROWSER_TAB_CAPACITY: usize = 6;
+const BROWSER_BOOKMARK_CAPACITY: usize = 8;
+const BROWSER_TITLE_CAPACITY: usize = 64;
+const BROWSER_FIND_CAPACITY: usize = 64;
 const CURSOR_WIDTH: usize = 14;
 const CURSOR_HEIGHT: usize = 20;
 const LAUNCHER_WIDTH: u16 = 250;
 const LAUNCHER_GRID_WIDTH: u16 = 430;
 const LAUNCHER_HEIGHT: u16 = 410;
 const STABLE_FIN: Fin = Fin::from_u128(0x4449_4D00_0000_0000_0000_0000_0000_0001);
+
+#[derive(Clone, Copy)]
+struct BrowserTab {
+    history: [[u8; 512]; BROWSER_HISTORY_CAPACITY],
+    history_len: [u16; BROWSER_HISTORY_CAPACITY],
+    history_count: u8,
+    history_cursor: u8,
+    title: [u8; BROWSER_TITLE_CAPACITY],
+    title_len: u8,
+    scroll: i32,
+}
+
+impl BrowserTab {
+    const EMPTY: Self = Self {
+        history: [[0; 512]; BROWSER_HISTORY_CAPACITY],
+        history_len: [0; BROWSER_HISTORY_CAPACITY],
+        history_count: 0,
+        history_cursor: 0,
+        title: [0; BROWSER_TITLE_CAPACITY],
+        title_len: 0,
+        scroll: 0,
+    };
+
+    fn home() -> Self {
+        let mut tab = Self::EMPTY;
+        tab.history[0][..12].copy_from_slice(b"expos://home");
+        tab.history_len[0] = 12;
+        tab.history_count = 1;
+        tab.set_title("New tab");
+        tab
+    }
+
+    fn url(&self) -> &str {
+        let cursor =
+            (self.history_cursor as usize).min(self.history_count.saturating_sub(1) as usize);
+        let length = self.history_len[cursor] as usize;
+        core::str::from_utf8(&self.history[cursor][..length]).unwrap_or("expos://home")
+    }
+
+    fn title(&self) -> &str {
+        core::str::from_utf8(&self.title[..self.title_len as usize]).unwrap_or("New tab")
+    }
+
+    fn set_title(&mut self, value: &str) {
+        let length = value.len().min(self.title.len());
+        self.title.fill(0);
+        self.title[..length].copy_from_slice(&value.as_bytes()[..length]);
+        self.title_len = length as u8;
+    }
+
+    fn reset(&mut self) {
+        *self = Self::home();
+    }
+}
+
+#[derive(Clone, Copy)]
+struct BrowserBookmark {
+    url: [u8; 512],
+    url_len: u16,
+    title: [u8; BROWSER_TITLE_CAPACITY],
+    title_len: u8,
+}
+
+impl BrowserBookmark {
+    const EMPTY: Self = Self {
+        url: [0; 512],
+        url_len: 0,
+        title: [0; BROWSER_TITLE_CAPACITY],
+        title_len: 0,
+    };
+
+    fn new(url: &str, title: &str) -> Self {
+        let mut bookmark = Self::EMPTY;
+        let url_len = url.len().min(bookmark.url.len());
+        bookmark.url[..url_len].copy_from_slice(&url.as_bytes()[..url_len]);
+        bookmark.url_len = url_len as u16;
+        let title_len = title.len().min(bookmark.title.len());
+        bookmark.title[..title_len].copy_from_slice(&title.as_bytes()[..title_len]);
+        bookmark.title_len = title_len as u8;
+        bookmark
+    }
+
+    fn url(&self) -> &str {
+        core::str::from_utf8(&self.url[..self.url_len as usize]).unwrap_or("expos://home")
+    }
+
+    fn title(&self) -> &str {
+        core::str::from_utf8(&self.title[..self.title_len as usize]).unwrap_or("Bookmark")
+    }
+}
 
 fn taskbar_thickness(preferences: DesktopPreferences) -> i16 {
     state::TASKBAR_SIZES_PX[preferences.taskbar_size.min(8) as usize] as i16
@@ -355,8 +449,8 @@ const fn bypass_software_pacing(responsive: bool, damaged_commit: bool) -> bool 
     responsive && damaged_commit
 }
 
-const HOME: &str = "<style>h1{color:#74bcc7}.card{background:#151c20;border:1px solid #35433f;padding:8px}button{color:#f0f2f0;background:#365c62;padding:6px}</style><title>Home</title><h1>ExpOS Web</h1><p id='status' class='card'>Starting the bounded web engine</p><button id='demo'>Try JavaScript</button><a href='expos://about'>About</a><a href='expos://packages'>Packages</a><a href='expos://system'>System</a><script>document.title='ExpOS Home';document.getElementById('status').textContent='CSS and JavaScript are active';document.getElementById('demo').onclick=function(){document.getElementById('status').textContent='Button handled locally';}</script>";
-const ABOUT: &str = "<title>About</title><h1>Browser</h1><p>A bounded native HTML, CSS, and JavaScript document engine.</p><a href='expos://home'>Home</a>";
+const HOME: &str = "<style>h1{color:#74bcc7;max-width:720px}.card{background:#151c20;border:1px solid #35433f;border-radius:10px;padding:10px;max-width:720px;line-height:20px}button{color:#f0f2f0;background:#365c62;border-radius:8px;padding:7px;max-width:240px}a{padding:3px}</style><title>New tab</title><h1>ExpOS Browser</h1><p id='status' class='card'>Native tabs, independent history, bookmarks, find-in-page, verified TLS, HTML, CSS, and deterministic scripts are ready.</p><button id='demo'>Test page interaction</button><p class='card'>Press N for a new tab, Tab to switch, X to close, F to find, B to bookmark, or / to focus the omnibox.</p><a href='expos://about'>Browser capabilities</a><a href='expos://packages'>Packages</a><a href='expos://system'>System</a><script>document.title='New tab';document.getElementById('demo').onclick=function(){document.getElementById('status').textContent='Local JavaScript handled this click without granting a Web API';}</script>";
+const ABOUT: &str = "<style>.card{background:#151c20;border:1px solid #35433f;border-radius:9px;padding:9px;max-width:720px;line-height:20px}</style><title>About Browser</title><h1>ExpOS Browser</h1><p class='card'>A bounded Form-native browser with six tab sessions, per-tab history and scroll, eight bookmarks, find-in-page, DuckDuckGo search, verified HTTPS, and native HTML/CSS/script rendering.</p><p class='card'>It is Chromium-like in browser workflow, but it does not embed Blink, V8, extensions, arbitrary Web APIs, media codecs, cookies, or general site storage.</p><a href='expos://home'>New tab</a>";
 const BROWSER_PACKAGES: &str = "<title>Packages</title><h1>Packages</h1><li>Core tools</li><li>Display</li><li>Notes</li><li>Games</li><a href='expos://home'>Home</a>";
 const BROWSER_SYSTEM: &str = "<title>System</title><h1>System</h1><li>480p / 720p / 1080p display</li><li>60 / 75 / 120 / 144 Hz compositor pacing</li><li>Keyboard and mouse</li><li>RTL8139 network</li><a href='expos://home'>Home</a>";
 const NETWORK_BLOCKED: &str = "<title>Offline</title><h1>Offline</h1><p>The address could not be loaded.</p><a href='expos://home'>Home</a>";
@@ -543,12 +637,10 @@ fn launcher_capacity(preferences: DesktopPreferences) -> usize {
 }
 
 const SETTINGS_CATEGORY_COUNT: usize = 14;
-const ACCENT_COLOR_CHOICES: usize = 256;
-const WALLPAPER_VARIANT_CHOICES: usize = 252;
-const CUSTOMIZATION_VALUE_COUNT: usize = ThemeChoice::ALL.len()
-    + WALLPAPER_VARIANT_CHOICES
-    + ACCENT_COLOR_CHOICES
-    + 3 // backdrop tones
+const CUSTOMIZATION_VALUE_COUNT: usize = state::THEME_PALETTE_CHOICES
+    + state::WALLPAPER_VARIANT_CHOICES
+    + state::ACCENT_COLOR_CHOICES
+    + state::BACKDROP_TONE_CHOICES
     + 2 // pure-black apps
     + 2 // rounded controls
     + state::FONT_FACE_NAMES.len()
@@ -880,10 +972,11 @@ impl AccentChoice {
     }
 
     fn shifted(self, direction: i8) -> Self {
+        let step = direction.unsigned_abs().max(1);
         Self(if direction < 0 {
-            self.0.wrapping_sub(1)
+            self.0.wrapping_sub(step)
         } else {
-            self.0.wrapping_add(1)
+            self.0.wrapping_add(step)
         })
     }
 
@@ -914,12 +1007,24 @@ const fn spectrum_color(value: u8) -> u32 {
     ((red as u32) << 16) | ((green as u32) << 8) | blue as u32
 }
 
-#[repr(u8)]
+/// Mix two XRGB colors with an allocation-free, integer-only blend. Procedural
+/// themes use this to keep every palette dark enough for the existing white
+/// text and bounded bitmap renderer while still providing a broad hue range.
+const fn blend_color(background: u32, foreground: u32, foreground_alpha: u8) -> u32 {
+    let inverse = 255_u32 - foreground_alpha as u32;
+    let alpha = foreground_alpha as u32;
+    let red = (((background >> 16) & 0xFF) * inverse + ((foreground >> 16) & 0xFF) * alpha) / 255;
+    let green = (((background >> 8) & 0xFF) * inverse + ((foreground >> 8) & 0xFF) * alpha) / 255;
+    let blue = ((background & 0xFF) * inverse + (foreground & 0xFF) * alpha) / 255;
+    (red << 16) | (green << 8) | blue
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BackdropChoice {
     Graphite,
     Midnight,
     Black,
+    Custom(u8),
 }
 
 impl BackdropChoice {
@@ -928,6 +1033,7 @@ impl BackdropChoice {
             Self::Graphite => color::BACKGROUND,
             Self::Midnight => 0x0009_1019,
             Self::Black => 0x0000_0000,
+            Self::Custom(value) => blend_color(0x0002_0406, spectrum_color(value), 52),
         }
     }
 
@@ -936,27 +1042,44 @@ impl BackdropChoice {
             Self::Graphite => "Graphite",
             Self::Midnight => "Midnight",
             Self::Black => "Black",
+            Self::Custom(3..=44) => "Custom ember",
+            Self::Custom(45..=86) => "Custom amber",
+            Self::Custom(87..=128) => "Custom forest",
+            Self::Custom(129..=170) => "Custom ocean",
+            Self::Custom(171..=212) => "Custom blue",
+            Self::Custom(_) => "Custom violet",
         }
     }
 
     fn shifted(self, direction: i8) -> Self {
-        match (self, direction < 0) {
-            (Self::Graphite, false) | (Self::Black, true) => Self::Midnight,
-            (Self::Midnight, false) | (Self::Graphite, true) => Self::Black,
-            (Self::Black, false) | (Self::Midnight, true) => Self::Graphite,
-        }
+        let step = direction.unsigned_abs().max(1);
+        let next = if direction < 0 {
+            self.persisted().wrapping_sub(step)
+        } else {
+            self.persisted().wrapping_add(step)
+        };
+        Self::from_persisted(next)
     }
 
     const fn from_persisted(value: u8) -> Self {
         match value {
             1 => Self::Midnight,
             2 => Self::Black,
+            3..=u8::MAX => Self::Custom(value),
             _ => Self::Graphite,
+        }
+    }
+
+    const fn persisted(self) -> u8 {
+        match self {
+            Self::Graphite => 0,
+            Self::Midnight => 1,
+            Self::Black => 2,
+            Self::Custom(value) => value,
         }
     }
 }
 
-#[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ThemeChoice {
     Obsidian,
@@ -965,18 +1088,10 @@ enum ThemeChoice {
     Forest,
     Aurora,
     Rose,
+    Custom(u8),
 }
 
 impl ThemeChoice {
-    const ALL: [Self; 6] = [
-        Self::Obsidian,
-        Self::Graphite,
-        Self::Nord,
-        Self::Forest,
-        Self::Aurora,
-        Self::Rose,
-    ];
-
     const fn label(self) -> &'static str {
         match self {
             Self::Obsidian => "Obsidian",
@@ -985,6 +1100,12 @@ impl ThemeChoice {
             Self::Forest => "Forest",
             Self::Aurora => "Aurora",
             Self::Rose => "Rose",
+            Self::Custom(6..=47) => "Custom ember",
+            Self::Custom(48..=89) => "Custom amber",
+            Self::Custom(90..=131) => "Custom forest",
+            Self::Custom(132..=173) => "Custom ocean",
+            Self::Custom(174..=215) => "Custom blue",
+            Self::Custom(_) => "Custom violet",
         }
     }
 
@@ -996,6 +1117,7 @@ impl ThemeChoice {
             Self::Forest => 0x0014_211C,
             Self::Aurora => 0x0011_1D25,
             Self::Rose => 0x0025_171D,
+            Self::Custom(value) => blend_color(0x000C_1014, spectrum_color(value), 68),
         }
     }
 
@@ -1007,6 +1129,7 @@ impl ThemeChoice {
             Self::Forest => 0x000E_1915,
             Self::Aurora => 0x000B_1720,
             Self::Rose => 0x001D_1016,
+            Self::Custom(value) => blend_color(0x0005_080B, spectrum_color(value), 48),
         }
     }
 
@@ -1018,6 +1141,7 @@ impl ThemeChoice {
             Self::Forest => 0x000B_1612,
             Self::Aurora => 0x0008_141C,
             Self::Rose => 0x0018_0B11,
+            Self::Custom(value) => blend_color(0x0007_0A0D, spectrum_color(value), 38),
         }
     }
 
@@ -1029,6 +1153,7 @@ impl ThemeChoice {
             Self::Forest => 0x0017_2921,
             Self::Aurora => 0x0014_2930,
             Self::Rose => 0x0030_1A23,
+            Self::Custom(value) => blend_color(0x0012_171C, spectrum_color(value), 78),
         }
     }
 
@@ -1040,6 +1165,7 @@ impl ThemeChoice {
             Self::Forest => 0x0005_100C,
             Self::Aurora => 0x0004_0E14,
             Self::Rose => 0x0010_050A,
+            Self::Custom(value) => blend_color(0x0000_0102, spectrum_color(value), 30),
         }
     }
 
@@ -1050,18 +1176,31 @@ impl ThemeChoice {
             3 => Self::Forest,
             4 => Self::Aurora,
             5 => Self::Rose,
+            6..=u8::MAX => Self::Custom(value),
             _ => Self::Obsidian,
         }
     }
 
+    const fn persisted(self) -> u8 {
+        match self {
+            Self::Obsidian => 0,
+            Self::Graphite => 1,
+            Self::Nord => 2,
+            Self::Forest => 3,
+            Self::Aurora => 4,
+            Self::Rose => 5,
+            Self::Custom(value) => value,
+        }
+    }
+
     fn shifted(self, direction: i8) -> Self {
-        let index = self as usize;
+        let step = direction.unsigned_abs().max(1);
         let next = if direction < 0 {
-            (index + Self::ALL.len() - 1) % Self::ALL.len()
+            self.persisted().wrapping_sub(step)
         } else {
-            (index + 1) % Self::ALL.len()
+            self.persisted().wrapping_add(step)
         };
-        Self::ALL[next]
+        Self::from_persisted(next)
     }
 }
 
@@ -1284,7 +1423,9 @@ impl DesktopPreferences {
         Self {
             theme: ThemeChoice::from_persisted(value.theme),
             wallpaper: WallpaperChoice::from_persisted(value.wallpaper % 7),
-            wallpaper_variant: value.wallpaper.min((WALLPAPER_VARIANT_CHOICES - 1) as u8),
+            wallpaper_variant: value
+                .wallpaper
+                .min((state::WALLPAPER_VARIANT_CHOICES - 1) as u8),
             cursor: CursorChoice::from_persisted(value.cursor_theme),
             accent: AccentChoice::from_persisted(value.accent),
             backdrop: BackdropChoice::from_persisted(value.backdrop),
@@ -1457,11 +1598,11 @@ impl DesktopPreferences {
         mut value: state::PersistentPreferences,
     ) -> state::PersistentPreferences {
         value.display_mode = framebuffer::requested_mode().persisted();
-        value.theme = self.theme as u8;
+        value.theme = self.theme.persisted();
         value.wallpaper = self.wallpaper_variant;
         value.cursor_theme = self.cursor as u8;
         value.accent = self.accent.persisted();
-        value.backdrop = self.backdrop as u8;
+        value.backdrop = self.backdrop.persisted();
         value.pointer_speed = self.pointer_speed;
         value.scroll_speed = self.scroll_speed;
         value.refresh_rate = self.refresh_rate;
@@ -1585,13 +1726,16 @@ struct DesktopState {
     browser_len: usize,
     browser_editing: bool,
     browser_scroll: i32,
-    browser_history: [[u8; 512]; BROWSER_HISTORY_CAPACITY],
-    browser_history_len: [u16; BROWSER_HISTORY_CAPACITY],
-    browser_history_count: usize,
-    browser_history_cursor: usize,
+    browser_tabs: [BrowserTab; BROWSER_TAB_CAPACITY],
+    browser_tab_count: usize,
+    browser_active_tab: usize,
     browser_history_locked: bool,
-    browser_bookmark: [u8; 512],
-    browser_bookmark_len: usize,
+    browser_bookmarks: [BrowserBookmark; BROWSER_BOOKMARK_CAPACITY],
+    browser_bookmark_count: usize,
+    browser_find_line: [u8; BROWSER_FIND_CAPACITY],
+    browser_find_len: usize,
+    browser_find_editing: bool,
+    browser_find_match: Option<usize>,
     terminal_line: [u8; TERMINAL_CAPACITY],
     terminal_len: usize,
     terminal_output: [[u8; TERMINAL_OUTPUT_CAPACITY]; TERMINAL_SCROLLBACK],
@@ -1989,8 +2133,8 @@ impl DesktopState {
         if start_app.is_some() {
             let _ = server.focus(app_surfaces[active.index()]);
         }
-        let mut browser_history = [[0_u8; 512]; BROWSER_HISTORY_CAPACITY];
-        browser_history[0][..12].copy_from_slice(b"expos://home");
+        let mut browser_tabs = [BrowserTab::EMPTY; BROWSER_TAB_CAPACITY];
+        browser_tabs[0] = BrowserTab::home();
         let mut notes = [0_u8; NOTES_CAPACITY];
         let mut notes_len = 0;
         let mut notes_name = [0_u8; 32];
@@ -2034,13 +2178,16 @@ impl DesktopState {
             browser_len: 0,
             browser_editing: false,
             browser_scroll: 0,
-            browser_history,
-            browser_history_len: core::array::from_fn(|index| if index == 0 { 12 } else { 0 }),
-            browser_history_count: 1,
-            browser_history_cursor: 0,
+            browser_tabs,
+            browser_tab_count: 1,
+            browser_active_tab: 0,
             browser_history_locked: false,
-            browser_bookmark: [0; 512],
-            browser_bookmark_len: 0,
+            browser_bookmarks: [BrowserBookmark::EMPTY; BROWSER_BOOKMARK_CAPACITY],
+            browser_bookmark_count: 0,
+            browser_find_line: [0; BROWSER_FIND_CAPACITY],
+            browser_find_len: 0,
+            browser_find_editing: false,
+            browser_find_match: None,
             terminal_line: [0; TERMINAL_CAPACITY],
             terminal_len: 0,
             terminal_output: [[0; TERMINAL_OUTPUT_CAPACITY]; TERMINAL_SCROLLBACK],
@@ -2684,30 +2831,42 @@ impl DesktopState {
     }
 
     fn set_document(&mut self, document: Document) {
+        let active = self.browser_active_tab;
         if self.browser_history_locked {
             self.browser_history_locked = false;
         } else {
             let url = document.url().as_bytes();
-            if self.browser_history_cursor + 1 < self.browser_history_count {
-                self.browser_history_count = self.browser_history_cursor + 1;
+            let tab = &mut self.browser_tabs[active];
+            let cursor = tab.history_cursor as usize;
+            let count = tab.history_count as usize;
+            if cursor + 1 < count {
+                tab.history_count = (cursor + 1) as u8;
             }
-            if self.browser_history_count == BROWSER_HISTORY_CAPACITY {
+            if tab.history_count as usize == BROWSER_HISTORY_CAPACITY {
                 for index in 1..BROWSER_HISTORY_CAPACITY {
-                    self.browser_history[index - 1] = self.browser_history[index];
-                    self.browser_history_len[index - 1] = self.browser_history_len[index];
+                    tab.history[index - 1] = tab.history[index];
+                    tab.history_len[index - 1] = tab.history_len[index];
                 }
-                self.browser_history_count -= 1;
-                self.browser_history_cursor = self.browser_history_cursor.saturating_sub(1);
+                tab.history_count -= 1;
+                tab.history_cursor = tab.history_cursor.saturating_sub(1);
             }
-            let index = self.browser_history_count;
-            let length = url.len().min(self.browser_history[index].len());
-            self.browser_history[index][..length].copy_from_slice(&url[..length]);
-            self.browser_history_len[index] = length as u16;
-            self.browser_history_count += 1;
-            self.browser_history_cursor = self.browser_history_count - 1;
+            let index = tab.history_count as usize;
+            let length = url.len().min(tab.history[index].len());
+            tab.history[index][..length].copy_from_slice(&url[..length]);
+            tab.history_len[index] = length as u16;
+            tab.history_count += 1;
+            tab.history_cursor = tab.history_count - 1;
         }
+        let title = if document.title().is_empty() {
+            document.url()
+        } else {
+            document.title()
+        };
+        self.browser_tabs[active].set_title(title);
+        self.browser_tabs[active].scroll = 0;
         self.document = document;
         self.browser_scroll = 0;
+        self.browser_find_match = None;
         self.log_browser_engine();
         let surface = self.app_surfaces[AppKind::Browser.index()];
         let damage_rect = self
@@ -2730,20 +2889,207 @@ impl DesktopState {
     }
 
     fn browser_history_move(&mut self, direction: i8) {
+        let tab = &mut self.browser_tabs[self.browser_active_tab];
+        let cursor = tab.history_cursor as usize;
+        let count = tab.history_count as usize;
         let next = if direction < 0 {
-            self.browser_history_cursor.saturating_sub(1)
+            cursor.saturating_sub(1)
         } else {
-            (self.browser_history_cursor + 1).min(self.browser_history_count.saturating_sub(1))
+            (cursor + 1).min(count.saturating_sub(1))
         };
-        if next == self.browser_history_cursor {
+        if next == cursor {
             return;
         }
-        self.browser_history_cursor = next;
-        let length = self.browser_history_len[next] as usize;
+        tab.history_cursor = next as u8;
+        let length = tab.history_len[next] as usize;
         let mut address = [0_u8; 512];
-        address[..length].copy_from_slice(&self.browser_history[next][..length]);
+        address[..length].copy_from_slice(&tab.history[next][..length]);
         self.browser_history_locked = true;
         self.navigate_address(core::str::from_utf8(&address[..length]).unwrap_or("expos://home"));
+    }
+
+    fn browser_new_tab(&mut self) {
+        if self.browser_tab_count == BROWSER_TAB_CAPACITY {
+            return;
+        }
+        self.browser_tabs[self.browser_active_tab].scroll = self.browser_scroll;
+        let index = self.browser_tab_count;
+        self.browser_tabs[index] = BrowserTab::home();
+        self.browser_tab_count += 1;
+        self.browser_active_tab = index;
+        self.browser_history_locked = true;
+        self.browser_editing = false;
+        self.browser_find_editing = false;
+        self.browser_find_len = 0;
+        self.navigate_address("expos://home");
+        slog!(
+            "EXPOS_BROWSER_TAB action=new active={} count={}\r\n",
+            self.browser_active_tab + 1,
+            self.browser_tab_count
+        );
+    }
+
+    fn browser_switch_tab(&mut self, index: usize) {
+        if index >= self.browser_tab_count || index == self.browser_active_tab {
+            return;
+        }
+        self.browser_tabs[self.browser_active_tab].scroll = self.browser_scroll;
+        self.browser_active_tab = index;
+        let mut address = [0_u8; 512];
+        let url = self.browser_tabs[index].url().as_bytes();
+        let length = url.len().min(address.len());
+        address[..length].copy_from_slice(&url[..length]);
+        let scroll = self.browser_tabs[index].scroll;
+        self.browser_history_locked = true;
+        self.browser_editing = false;
+        self.browser_find_editing = false;
+        self.browser_find_len = 0;
+        self.navigate_address(core::str::from_utf8(&address[..length]).unwrap_or("expos://home"));
+        self.browser_scroll = scroll;
+        self.browser_tabs[index].scroll = scroll;
+        slog!(
+            "EXPOS_BROWSER_TAB action=switch active={} count={}\r\n",
+            self.browser_active_tab + 1,
+            self.browser_tab_count
+        );
+    }
+
+    fn browser_cycle_tab(&mut self) {
+        let next = (self.browser_active_tab + 1) % self.browser_tab_count.max(1);
+        self.browser_switch_tab(next);
+    }
+
+    fn browser_close_tab(&mut self, index: usize) {
+        if index >= self.browser_tab_count {
+            return;
+        }
+        if self.browser_tab_count == 1 {
+            self.browser_tabs[0].reset();
+            self.browser_history_locked = true;
+            self.navigate_address("expos://home");
+            return;
+        }
+        for tab in index + 1..self.browser_tab_count {
+            self.browser_tabs[tab - 1] = self.browser_tabs[tab];
+        }
+        self.browser_tab_count -= 1;
+        self.browser_tabs[self.browser_tab_count] = BrowserTab::EMPTY;
+        if self.browser_active_tab > index {
+            self.browser_active_tab -= 1;
+        } else if self.browser_active_tab >= self.browser_tab_count {
+            self.browser_active_tab = self.browser_tab_count - 1;
+        }
+        let active = self.browser_active_tab;
+        let mut address = [0_u8; 512];
+        let url = self.browser_tabs[active].url().as_bytes();
+        let length = url.len().min(address.len());
+        address[..length].copy_from_slice(&url[..length]);
+        let scroll = self.browser_tabs[active].scroll;
+        self.browser_history_locked = true;
+        self.navigate_address(core::str::from_utf8(&address[..length]).unwrap_or("expos://home"));
+        self.browser_scroll = scroll;
+        self.browser_tabs[active].scroll = scroll;
+        slog!(
+            "EXPOS_BROWSER_TAB action=close active={} count={}\r\n",
+            self.browser_active_tab + 1,
+            self.browser_tab_count
+        );
+    }
+
+    fn browser_bookmark_index(&self, url: &str) -> Option<usize> {
+        self.browser_bookmarks[..self.browser_bookmark_count]
+            .iter()
+            .position(|bookmark| bookmark.url() == url)
+    }
+
+    fn browser_toggle_bookmark(&mut self) {
+        let url = self.document.url();
+        if let Some(index) = self.browser_bookmark_index(url) {
+            for bookmark in index + 1..self.browser_bookmark_count {
+                self.browser_bookmarks[bookmark - 1] = self.browser_bookmarks[bookmark];
+            }
+            self.browser_bookmark_count -= 1;
+            self.browser_bookmarks[self.browser_bookmark_count] = BrowserBookmark::EMPTY;
+            slog!(
+                "EXPOS_BROWSER_BOOKMARK action=remove count={}\r\n",
+                self.browser_bookmark_count
+            );
+            return;
+        }
+        if self.browser_bookmark_count == BROWSER_BOOKMARK_CAPACITY {
+            for index in 1..BROWSER_BOOKMARK_CAPACITY {
+                self.browser_bookmarks[index - 1] = self.browser_bookmarks[index];
+            }
+            self.browser_bookmark_count -= 1;
+        }
+        let title = if self.document.title().is_empty() {
+            self.document.url()
+        } else {
+            self.document.title()
+        };
+        self.browser_bookmarks[self.browser_bookmark_count] = BrowserBookmark::new(url, title);
+        self.browser_bookmark_count += 1;
+        slog!(
+            "EXPOS_BROWSER_BOOKMARK action=add count={}\r\n",
+            self.browser_bookmark_count
+        );
+    }
+
+    fn browser_find_next(&mut self) {
+        if self.browser_find_len == 0 {
+            self.browser_find_match = None;
+            return;
+        }
+        let query =
+            core::str::from_utf8(&self.browser_find_line[..self.browser_find_len]).unwrap_or("");
+        let start = self.browser_find_match.map_or(0, |index| index + 1);
+        let mut found = self
+            .document
+            .styled_nodes()
+            .find(|styled| {
+                styled.index >= start
+                    && styled.style.is_rendered()
+                    && browser_text_contains(styled.node.text.as_str(), query)
+            })
+            .map(|styled| styled.index);
+        if found.is_none() && start != 0 {
+            found = self
+                .document
+                .styled_nodes()
+                .find(|styled| {
+                    styled.index < start
+                        && styled.style.is_rendered()
+                        && browser_text_contains(styled.node.text.as_str(), query)
+                })
+                .map(|styled| styled.index);
+        }
+        self.browser_find_match = found;
+        let Some(index) = found else {
+            return;
+        };
+        let surface = self.app_surfaces[AppKind::Browser.index()];
+        let rect = self
+            .server
+            .surface(surface)
+            .map(|surface| surface.current.rect)
+            .unwrap_or_else(|| {
+                let (width, height) = app_dimensions(self.preferences);
+                Rect::new(0, 0, width, height)
+            });
+        let mut content_y = 0;
+        for styled in self.document.styled_nodes() {
+            if styled.node.kind == NodeKind::Title || !styled.style.is_rendered() {
+                continue;
+            }
+            let layout =
+                browser_layout(Rect::new(0, 0, rect.width, rect.height), styled, content_y);
+            if styled.index == index {
+                self.browser_scroll = layout.y.clamp(0, 8_192);
+                self.browser_tabs[self.browser_active_tab].scroll = self.browser_scroll;
+                break;
+            }
+            content_y = layout.next_y;
+        }
     }
 
     fn browser_reload(&mut self) {
@@ -2961,7 +3307,26 @@ impl DesktopState {
     fn browser_click(&mut self, x: i16, y: i16, rect: Rect) -> bool {
         let local_x = x - rect.x;
         let local_y = y - rect.y;
-        if (50..86).contains(&local_y) {
+        if (42..72).contains(&local_y) {
+            let tab_width = browser_tab_width(rect, self.browser_tab_count) as i16;
+            for index in 0..self.browser_tab_count {
+                let left = 18 + index as i16 * tab_width;
+                if (left..left + tab_width - 2).contains(&local_x) {
+                    if local_x >= left + tab_width - 22 && self.browser_tab_count > 1 {
+                        self.browser_close_tab(index);
+                    } else {
+                        self.browser_switch_tab(index);
+                    }
+                    return true;
+                }
+            }
+            let new_left = 18 + self.browser_tab_count as i16 * tab_width;
+            if (new_left..new_left + 30).contains(&local_x) {
+                self.browser_new_tab();
+                return true;
+            }
+        }
+        if (78..114).contains(&local_y) {
             if (18..54).contains(&local_x) {
                 self.browser_history_move(-1);
                 self.browser_editing = false;
@@ -2982,30 +3347,63 @@ impl DesktopState {
                 self.browser_editing = false;
                 return true;
             }
-            if (176..rect.width as i16 - 58).contains(&local_x) {
+            if (176..rect.width as i16 - 100).contains(&local_x) {
                 let url = self.document.url().as_bytes();
                 self.browser_len = url.len().min(self.browser_line.len());
                 self.browser_line[..self.browser_len].copy_from_slice(&url[..self.browser_len]);
                 self.browser_editing = true;
+                self.browser_find_editing = false;
+                return true;
+            }
+            if (rect.width as i16 - 94..rect.width as i16 - 58).contains(&local_x) {
+                self.browser_find_editing = true;
+                self.browser_editing = false;
                 return true;
             }
             if (rect.width as i16 - 52..rect.width as i16 - 18).contains(&local_x) {
-                let url = self.document.url().as_bytes();
-                if self.browser_bookmark_len == url.len()
-                    && self.browser_bookmark[..self.browser_bookmark_len] == *url
-                {
-                    self.browser_bookmark_len = 0;
+                self.browser_toggle_bookmark();
+                return true;
+            }
+        }
+
+        if self.browser_bookmark_count != 0 {
+            let top = browser_bookmark_top();
+            if (top..top + 28).contains(&(local_y as i32)) {
+                let item_width = browser_bookmark_width(rect, self.browser_bookmark_count);
+                for index in 0..self.browser_bookmark_count {
+                    let left = 18 + index as i32 * item_width;
+                    if (left..left + item_width - 4).contains(&(local_x as i32)) {
+                        let mut address = [0_u8; 512];
+                        let url = self.browser_bookmarks[index].url().as_bytes();
+                        let length = url.len().min(address.len());
+                        address[..length].copy_from_slice(&url[..length]);
+                        self.navigate_address(
+                            core::str::from_utf8(&address[..length]).unwrap_or("expos://home"),
+                        );
+                        return true;
+                    }
+                }
+            }
+        }
+
+        if self.browser_find_len != 0 || self.browser_find_editing {
+            let top = browser_find_top(self);
+            if (top..top + 32).contains(&(local_y as i32)) {
+                if local_x as i32 >= rect.width as i32 - 54 {
+                    self.browser_find_line.fill(0);
+                    self.browser_find_len = 0;
+                    self.browser_find_match = None;
+                    self.browser_find_editing = false;
                 } else {
-                    self.browser_bookmark_len = url.len().min(self.browser_bookmark.len());
-                    self.browser_bookmark[..self.browser_bookmark_len]
-                        .copy_from_slice(&url[..self.browser_bookmark_len]);
+                    self.browser_find_editing = true;
+                    self.browser_editing = false;
                 }
                 return true;
             }
         }
 
-        let mut content_y = rect.y as i32 + 110 - self.browser_scroll;
-        let mut selected: Option<(usize, BrowserText, bool)> = None;
+        let mut content_y = rect.y as i32 + browser_content_top(self) - self.browser_scroll;
+        let mut selected: Option<(usize, BrowserText, bool, bool)> = None;
         for styled in self.document.styled_nodes() {
             if styled.node.kind == NodeKind::Title || !styled.style.is_rendered() {
                 continue;
@@ -3015,11 +3413,16 @@ impl DesktopState {
             if (layout.x..layout.x + layout.width).contains(&(x as i32))
                 && (layout.y..layout.y + layout.height).contains(&(y as i32))
             {
-                selected = Some((styled.index, styled.node.target, styled.clickable));
+                selected = Some((
+                    styled.index,
+                    styled.node.target,
+                    styled.clickable,
+                    styled.node.kind == NodeKind::Link,
+                ));
                 break;
             }
         }
-        let Some((index, target, scripted)) = selected else {
+        let Some((index, target, scripted, navigable)) = selected else {
             return false;
         };
         if scripted && self.document.dispatch_click_at_node(index) {
@@ -3032,7 +3435,7 @@ impl DesktopState {
             self.log_browser_engine();
             return true;
         }
-        if !target.as_str().is_empty() {
+        if navigable && !target.as_str().is_empty() {
             let mut address = [0_u8; 512];
             let Some(length) =
                 resolve_browser_link(self.document.url(), target.as_str(), &mut address)
@@ -3127,6 +3530,16 @@ impl DesktopState {
             }
             b'\n' | b' ' | b'+' | b'=' => self.activate_setting(1),
             b'-' => self.activate_setting(-1),
+            b',' if self.settings_category == SettingsCategory::Appearance
+                && self.settings_row < 4 =>
+            {
+                self.activate_setting(-16);
+            }
+            b'.' if self.settings_category == SettingsCategory::Appearance
+                && self.settings_row < 4 =>
+            {
+                self.activate_setting(16);
+            }
             _ => return false,
         }
         true
@@ -3268,17 +3681,13 @@ impl DesktopState {
             }
             (SettingsCategory::Appearance, 1) => {
                 self.full_redraw_requested = true;
+                let count = state::WALLPAPER_VARIANT_CHOICES;
+                let current = self.preferences.wallpaper_variant as usize;
+                let step = direction.unsigned_abs().max(1) as usize % count;
                 self.preferences.wallpaper_variant = if direction < 0 {
-                    self.preferences
-                        .wallpaper_variant
-                        .checked_sub(1)
-                        .unwrap_or((WALLPAPER_VARIANT_CHOICES - 1) as u8)
-                } else if self.preferences.wallpaper_variant as usize + 1
-                    >= WALLPAPER_VARIANT_CHOICES
-                {
-                    0
+                    (current + count - step) as u8
                 } else {
-                    self.preferences.wallpaper_variant + 1
+                    ((current + step) % count) as u8
                 };
                 self.preferences.wallpaper =
                     WallpaperChoice::from_persisted(self.preferences.wallpaper_variant % 7);
@@ -3863,6 +4272,17 @@ impl DesktopState {
                 self.browser_line.fill(0);
                 self.browser_len = 0;
                 self.browser_editing = false;
+                self.browser_find_line.fill(0);
+                self.browser_find_len = 0;
+                self.browser_find_editing = false;
+                self.browser_find_match = None;
+                self.browser_tabs = [BrowserTab::EMPTY; BROWSER_TAB_CAPACITY];
+                self.browser_tabs[0] = BrowserTab::home();
+                self.browser_tab_count = 1;
+                self.browser_active_tab = 0;
+                self.browser_bookmarks = [BrowserBookmark::EMPTY; BROWSER_BOOKMARK_CAPACITY];
+                self.browser_bookmark_count = 0;
+                self.browser_history_locked = true;
                 self.navigate("expos://home", HOME);
                 slog!("EXPOS_SETTING_CHANGED key=browser-data value=cleared\r\n");
                 self.settings_notice = "Browser session data cleared.";
@@ -3873,6 +4293,26 @@ impl DesktopState {
     }
 
     fn handle_browser_key(&mut self, key: u8) -> bool {
+        if self.browser_find_editing {
+            match key {
+                b'\n' => self.browser_find_next(),
+                0x08 => {
+                    self.browser_find_len = self.browser_find_len.saturating_sub(1);
+                    self.browser_find_match = None;
+                    self.browser_find_next();
+                }
+                byte if (byte.is_ascii_graphic() || byte == b' ')
+                    && self.browser_find_len < self.browser_find_line.len() =>
+                {
+                    self.browser_find_line[self.browser_find_len] = byte;
+                    self.browser_find_len += 1;
+                    self.browser_find_match = None;
+                    self.browser_find_next();
+                }
+                _ => return false,
+            }
+            return true;
+        }
         if !self.browser_editing {
             let step =
                 state::SCROLL_STEPS[self.preferences.scroll_speed.min(6) as usize] as i32 * 18;
@@ -3881,8 +4321,25 @@ impl DesktopState {
                 KEY_DOWN => self.browser_scroll = (self.browser_scroll + step).min(8_192),
                 b' ' => self.browser_scroll = (self.browser_scroll + 280).min(8_192),
                 b'h' => self.browser_scroll = 0,
+                b'[' => self.browser_history_move(-1),
+                b']' => self.browser_history_move(1),
+                b'r' => self.browser_reload(),
+                b'n' => self.browser_new_tab(),
+                b'x' => self.browser_close_tab(self.browser_active_tab),
+                b'\t' => self.browser_cycle_tab(),
+                b'b' => self.browser_toggle_bookmark(),
+                b'f' => {
+                    self.browser_find_editing = true;
+                    self.browser_find_match = None;
+                }
+                b'/' | b'l' => {
+                    self.browser_len = 0;
+                    self.browser_editing = true;
+                    self.browser_find_editing = false;
+                }
                 _ => return false,
             }
+            self.browser_tabs[self.browser_active_tab].scroll = self.browser_scroll;
             return true;
         }
         match key {
@@ -4686,8 +5143,9 @@ fn run_session(
         desktop.route_key(key);
 
         if key == 0x1B {
-            if desktop.browser_editing {
+            if desktop.browser_editing || desktop.browser_find_editing {
                 desktop.browser_editing = false;
+                desktop.browser_find_editing = false;
                 render_active_window(&mut desktop);
                 continue;
             }
@@ -5031,6 +5489,10 @@ fn draw_wallpaper(preferences: DesktopPreferences) {
                 BackdropChoice::Graphite => (0x0019_1D20, 0x0007_090B),
                 BackdropChoice::Midnight => (0x0009_1828, 0x0002_060B),
                 BackdropChoice::Black => (0x0008_0A0D, 0x0000_0000),
+                BackdropChoice::Custom(value) => (
+                    blend_color(0x0007_0A0D, spectrum_color(value), 64),
+                    blend_color(0x0000_0102, spectrum_color(value), 24),
+                ),
             };
             framebuffer::vertical_gradient(0, 0, width, height, top, bottom);
             framebuffer::alpha_rect(0, 0, width, height, preferences.wallpaper_color(), 24);
@@ -5561,6 +6023,8 @@ fn browser_layout(rect: Rect, styled: expos_core::StyledNode<'_>, content_y: i32
     let button = styled.tag.eq_ignore_ascii_case("button");
     let prefix = if button {
         0
+    } else if styled.node.kind == NodeKind::Image {
+        34
     } else if matches!(styled.node.kind, NodeKind::Link | NodeKind::ListItem) {
         18
     } else {
@@ -5568,14 +6032,28 @@ fn browser_layout(rect: Rect, styled: expos_core::StyledNode<'_>, content_y: i32
     };
     let x = rect.x as i32 + 34 + margin_left;
     let available_width = (rect.width as i32 - 68 - margin_left - margin_right).max(48);
-    let width = if button {
+    let mut width = if button {
         available_width.min(280)
     } else {
         available_width
     };
+    if style.max_width != 0 {
+        width = width.min(style.max_width as i32);
+    }
     let text_width = (width - border * 2 - padding_left - padding_right - prefix).max(24);
-    let text_height = browser_wrapped_height(styled.node.text.as_str(), text_width, scale);
-    let minimum_height = if button { 30 } else { 0 };
+    let text_height = browser_wrapped_height(
+        styled.node.text.as_str(),
+        text_width,
+        scale,
+        style.line_height as i32,
+    );
+    let minimum_height = if button {
+        30
+    } else if styled.node.kind == NodeKind::Image {
+        42
+    } else {
+        0
+    };
     let height = (border * 2 + padding_top + text_height + padding_bottom).max(minimum_height);
     let y = content_y + margin_top;
     let mut text_x = x + border + padding_left + prefix;
@@ -5604,9 +6082,17 @@ fn browser_layout(rect: Rect, styled: expos_core::StyledNode<'_>, content_y: i32
     }
 }
 
-fn browser_wrapped_height(value: &str, width: i32, scale: i32) -> i32 {
+fn browser_wrapped_height(value: &str, width: i32, scale: i32, requested_line_height: i32) -> i32 {
     let advance = framebuffer::text_advance(scale);
-    let line_height = if scale <= 1 { 10 } else { 18 };
+    let line_height = if requested_line_height == 0 {
+        if scale <= 1 {
+            10
+        } else {
+            18
+        }
+    } else {
+        requested_line_height.max(if scale <= 1 { 8 } else { 16 })
+    };
     let mut used = 0;
     let mut lines = 1;
     for word in value.split_ascii_whitespace() {
@@ -5630,24 +6116,137 @@ const fn browser_color(value: expos_core::CssColor) -> u32 {
     ((value.red as u32) << 16) | ((value.green as u32) << 8) | value.blue as u32
 }
 
+fn browser_tab_width(rect: Rect, count: usize) -> i32 {
+    ((rect.width as i32 - 72) / count.max(1) as i32).clamp(72, 180)
+}
+
+fn browser_bookmark_width(rect: Rect, count: usize) -> i32 {
+    ((rect.width as i32 - 36) / count.max(1) as i32).clamp(58, 140)
+}
+
+const fn browser_bookmark_top() -> i32 {
+    120
+}
+
+fn browser_find_top(desktop: &DesktopState) -> i32 {
+    browser_bookmark_top()
+        + if desktop.browser_bookmark_count == 0 {
+            0
+        } else {
+            34
+        }
+}
+
+fn browser_content_top(desktop: &DesktopState) -> i32 {
+    browser_find_top(desktop)
+        + if desktop.browser_find_len != 0 || desktop.browser_find_editing {
+            40
+        } else {
+            8
+        }
+}
+
+fn browser_text_contains(value: &str, query: &str) -> bool {
+    let value = value.as_bytes();
+    let query = query.as_bytes();
+    if query.is_empty() || query.len() > value.len() {
+        return false;
+    }
+    value.windows(query.len()).any(|candidate| {
+        candidate
+            .iter()
+            .zip(query)
+            .all(|(left, right)| left.eq_ignore_ascii_case(right))
+    })
+}
+
+fn browser_text_prefix(value: &str, capacity: usize) -> &str {
+    &value[..value.len().min(capacity)]
+}
+
+fn browser_find_stats(desktop: &DesktopState) -> (usize, usize) {
+    if desktop.browser_find_len == 0 {
+        return (0, 0);
+    }
+    let query =
+        core::str::from_utf8(&desktop.browser_find_line[..desktop.browser_find_len]).unwrap_or("");
+    let mut count = 0;
+    let mut ordinal = 0;
+    for styled in desktop.document.styled_nodes() {
+        if styled.style.is_rendered() && browser_text_contains(styled.node.text.as_str(), query) {
+            count += 1;
+            if desktop.browser_find_match == Some(styled.index) {
+                ordinal = count;
+            }
+        }
+    }
+    (ordinal, count)
+}
+
 fn draw_browser(rect: Rect, desktop: &DesktopState) {
     let x = rect.x as i32;
     let y = rect.y as i32;
     let width = rect.width as i32;
     let bottom = y + rect.height as i32;
+    let tab_width = browser_tab_width(rect, desktop.browser_tab_count);
+    for index in 0..desktop.browser_tab_count {
+        let left = x + 18 + index as i32 * tab_width;
+        let active = index == desktop.browser_active_tab;
+        framebuffer::rounded_rect(
+            left,
+            y + 42,
+            tab_width - 2,
+            30,
+            7,
+            if active {
+                desktop.preferences.panel_color()
+            } else {
+                0x000E_141B
+            },
+        );
+        framebuffer::rounded_outline(
+            left,
+            y + 42,
+            tab_width - 2,
+            30,
+            7,
+            if active {
+                desktop.preferences.accent.color()
+            } else {
+                desktop.preferences.border_color(false)
+            },
+        );
+        let capacity = ((tab_width - 38) / framebuffer::text_advance(1)).max(1) as usize;
+        framebuffer::text(
+            left + 10,
+            y + 53,
+            browser_text_prefix(desktop.browser_tabs[index].title(), capacity),
+            if active { color::INK } else { color::MUTED },
+            1,
+        );
+        if desktop.browser_tab_count > 1 {
+            framebuffer::text(left + tab_width - 20, y + 53, "x", color::MUTED, 1);
+        }
+    }
+    let new_tab_left = x + 18 + desktop.browser_tab_count as i32 * tab_width;
+    if desktop.browser_tab_count < BROWSER_TAB_CAPACITY && new_tab_left + 30 < x + width - 10 {
+        framebuffer::rounded_rect(new_tab_left, y + 42, 30, 30, 7, 0x0019_2028);
+        framebuffer::text(new_tab_left + 11, y + 53, "+", color::INK, 1);
+    }
+    let active_tab = &desktop.browser_tabs[desktop.browser_active_tab];
     for (offset, label, enabled) in [
-        (18, "<", desktop.browser_history_cursor > 0),
+        (18, "<", active_tab.history_cursor > 0),
         (
             56,
             ">",
-            desktop.browser_history_cursor + 1 < desktop.browser_history_count,
+            active_tab.history_cursor + 1 < active_tab.history_count,
         ),
         (94, "R", true),
         (132, "H", true),
     ] {
         framebuffer::rounded_rect(
             x + offset,
-            y + 50,
+            y + 78,
             36,
             36,
             6,
@@ -5655,14 +6254,14 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
         );
         framebuffer::outline(
             x + offset,
-            y + 50,
+            y + 78,
             36,
             36,
             desktop.preferences.border_color(false),
         );
         framebuffer::text(
             x + offset + 14,
-            y + 64,
+            y + 92,
             label,
             if enabled { color::INK } else { color::BORDER },
             1,
@@ -5670,16 +6269,16 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
     }
     framebuffer::rounded_rect(
         x + 176,
-        y + 50,
-        width - 234,
+        y + 78,
+        width - 276,
         36,
         7,
         desktop.preferences.panel_color(),
     );
     framebuffer::outline(
         x + 176,
-        y + 50,
-        width - 234,
+        y + 78,
+        width - 276,
         36,
         if desktop.browser_editing {
             color::CYAN
@@ -5689,7 +6288,7 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
     );
     framebuffer::rect(
         x + 188,
-        y + 65,
+        y + 93,
         5,
         5,
         if desktop.network_active() {
@@ -5703,7 +6302,15 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
     } else {
         desktop.document.url()
     };
-    let address_capacity = ((width - 276) / framebuffer::text_advance(1)).max(1) as usize;
+    let scheme = if address.starts_with("https://") {
+        "TLS"
+    } else if address.starts_with("http://") {
+        "WEB"
+    } else {
+        "FORM"
+    };
+    framebuffer::text(x + 200, y + 92, scheme, color::MUTED, 1);
+    let address_capacity = ((width - 336) / framebuffer::text_advance(1)).max(1) as usize;
     let (address_text, address_color) = if desktop.browser_editing && address.is_empty() {
         ("Search DuckDuckGo or enter an address", color::MUTED)
     } else if desktop.browser_editing && address.len() > address_capacity {
@@ -5713,19 +6320,31 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
     } else {
         (address, color::INK)
     };
-    framebuffer::text(x + 204, y + 64, address_text, address_color, 1);
+    framebuffer::text(x + 236, y + 92, address_text, address_color, 1);
     if desktop.browser_editing {
         let caret_x =
-            (x + 204 + address.len().min(address_capacity) as i32 * framebuffer::text_advance(1))
-                .min(x + width - 64);
-        framebuffer::rect(caret_x, y + 61, 2, 14, color::GREEN);
+            (x + 236 + address.len().min(address_capacity) as i32 * framebuffer::text_advance(1))
+                .min(x + width - 106);
+        framebuffer::rect(caret_x, y + 89, 2, 14, color::GREEN);
     }
-    let bookmarked = desktop.browser_bookmark_len == desktop.document.url().len()
-        && desktop.browser_bookmark[..desktop.browser_bookmark_len]
-            == desktop.document.url().as_bytes()[..];
+    framebuffer::rounded_rect(x + width - 94, y + 78, 36, 36, 6, 0x0019_2028);
+    framebuffer::text(
+        x + width - 81,
+        y + 92,
+        "F",
+        if desktop.browser_find_editing {
+            color::CYAN
+        } else {
+            color::MUTED
+        },
+        1,
+    );
+    let bookmarked = desktop
+        .browser_bookmark_index(desktop.document.url())
+        .is_some();
     framebuffer::rounded_rect(
         x + width - 52,
-        y + 50,
+        y + 78,
         34,
         36,
         6,
@@ -5733,7 +6352,7 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
     );
     framebuffer::text(
         x + width - 41,
-        y + 64,
+        y + 92,
         if bookmarked { "*" } else { "+" },
         if bookmarked {
             0x00F0_C46B
@@ -5742,7 +6361,61 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
         },
         1,
     );
-    let mut content_y = y + 110 - desktop.browser_scroll;
+    if desktop.browser_bookmark_count != 0 {
+        let top = y + browser_bookmark_top();
+        let item_width = browser_bookmark_width(rect, desktop.browser_bookmark_count);
+        for index in 0..desktop.browser_bookmark_count {
+            let left = x + 18 + index as i32 * item_width;
+            framebuffer::rounded_rect(left, top, item_width - 4, 28, 5, 0x0012_1920);
+            let capacity = ((item_width - 20) / framebuffer::text_advance(1)).max(1) as usize;
+            framebuffer::text(
+                left + 8,
+                top + 10,
+                browser_text_prefix(desktop.browser_bookmarks[index].title(), capacity),
+                color::MUTED,
+                1,
+            );
+        }
+    }
+    if desktop.browser_find_len != 0 || desktop.browser_find_editing {
+        let top = y + browser_find_top(desktop);
+        framebuffer::rounded_rect(x + width - 310, top, 292, 32, 6, 0x0019_2028);
+        framebuffer::rounded_outline(
+            x + width - 310,
+            top,
+            292,
+            32,
+            6,
+            if desktop.browser_find_editing {
+                color::CYAN
+            } else {
+                color::BORDER
+            },
+        );
+        let query = core::str::from_utf8(&desktop.browser_find_line[..desktop.browser_find_len])
+            .unwrap_or("");
+        framebuffer::text(
+            x + width - 296,
+            top + 11,
+            if query.is_empty() {
+                "Find in page"
+            } else {
+                query
+            },
+            if query.is_empty() {
+                color::MUTED
+            } else {
+                color::INK
+            },
+            1,
+        );
+        let (ordinal, count) = browser_find_stats(desktop);
+        draw_number(x + width - 100, top + 11, ordinal as u64, color::MUTED);
+        framebuffer::text(x + width - 84, top + 11, "/", color::MUTED, 1);
+        draw_number(x + width - 72, top + 11, count as u64, color::MUTED);
+        framebuffer::text(x + width - 38, top + 11, "x", color::MUTED, 1);
+    }
+    let mut content_y = y + browser_content_top(desktop) - desktop.browser_scroll;
     for styled in desktop.document.styled_nodes() {
         if content_y > bottom - 46 {
             break;
@@ -5755,20 +6428,35 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
             break;
         }
         let button = styled.tag.eq_ignore_ascii_case("button");
+        let radius = if styled.style.border_radius == 0 && button {
+            5
+        } else {
+            styled.style.border_radius.min(32) as i32
+        };
         if styled.style.background.alpha != 0 || button {
             let background = if styled.style.background.alpha == 0 {
                 desktop.preferences.accent.color()
             } else {
                 browser_color(styled.style.background)
             };
-            if button {
+            if radius != 0 && styled.style.background.alpha == u8::MAX {
                 framebuffer::rounded_rect(
                     layout.x,
                     layout.y,
                     layout.width,
                     layout.height,
-                    5,
+                    radius,
                     background,
+                );
+            } else if radius != 0 {
+                framebuffer::alpha_rounded_rect(
+                    layout.x,
+                    layout.y,
+                    layout.width,
+                    layout.height,
+                    radius,
+                    background,
+                    styled.style.background.alpha,
                 );
             } else if styled.style.background.alpha == u8::MAX {
                 framebuffer::rect(layout.x, layout.y, layout.width, layout.height, background);
@@ -5783,15 +6471,37 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
                 );
             }
         }
+        if desktop.browser_find_match == Some(styled.index) {
+            framebuffer::alpha_rounded_rect(
+                layout.x,
+                layout.y,
+                layout.width,
+                layout.height,
+                5,
+                0x00F0_C46B,
+                88,
+            );
+        }
         let border_width = styled.style.border.width.min(4) as i32;
         for inset in 0..border_width {
-            framebuffer::outline(
-                layout.x + inset,
-                layout.y + inset,
-                layout.width - inset * 2,
-                layout.height - inset * 2,
-                browser_color(styled.style.border.color),
-            );
+            if radius != 0 {
+                framebuffer::rounded_outline(
+                    layout.x + inset,
+                    layout.y + inset,
+                    layout.width - inset * 2,
+                    layout.height - inset * 2,
+                    (radius - inset).max(1),
+                    browser_color(styled.style.border.color),
+                );
+            } else {
+                framebuffer::outline(
+                    layout.x + inset,
+                    layout.y + inset,
+                    layout.width - inset * 2,
+                    layout.height - inset * 2,
+                    browser_color(styled.style.border.color),
+                );
+            }
         }
         match styled.node.kind {
             NodeKind::Title => {}
@@ -5800,6 +6510,23 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
             }
             NodeKind::Link if !button => {
                 framebuffer::text(layout.x + 3, layout.text_y, ">", color::GREEN, 1);
+            }
+            NodeKind::Image => {
+                framebuffer::outline(layout.x + 7, layout.y + 7, 22, 18, color::MUTED);
+                framebuffer::line(
+                    layout.x + 9,
+                    layout.y + 22,
+                    layout.x + 17,
+                    layout.y + 14,
+                    color::MUTED,
+                );
+                framebuffer::line(
+                    layout.x + 17,
+                    layout.y + 14,
+                    layout.x + 27,
+                    layout.y + 22,
+                    color::MUTED,
+                );
             }
             NodeKind::Heading | NodeKind::Paragraph | NodeKind::Link => {}
         }
@@ -5832,16 +6559,25 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
         bottom - 28,
         color::BORDER,
     );
-    framebuffer::text(x + 18, bottom - 18, desktop.document.title(), color::INK, 1);
+    let status_capacity = ((width - 360) / framebuffer::text_advance(1)).max(1) as usize;
+    framebuffer::text(
+        x + 18,
+        bottom - 18,
+        browser_text_prefix(desktop.document.title(), status_capacity),
+        color::INK,
+        1,
+    );
     framebuffer::text(
         x + width - 190,
         bottom - 18,
-        if desktop.network_active() {
-            "CAPABILITY SECURE"
+        if desktop.document.url().starts_with("https://") {
+            "TLS VERIFIED"
+        } else if desktop.document.url().starts_with("http://") {
+            "HTTP DOCUMENT"
         } else {
-            "LOCAL DOCUMENT"
+            "LOCAL FORM"
         },
-        if desktop.network_active() {
+        if desktop.document.url().starts_with("https://") {
             color::GREEN
         } else {
             color::MUTED
@@ -6047,6 +6783,7 @@ fn draw_forms(rect: Rect) {
 enum SettingControl {
     Toggle { on: bool, available: bool },
     Choice,
+    Palette { id: u8, color: u32 },
     Status { ready: bool },
     Action { available: bool },
     Plain,
@@ -6207,10 +6944,13 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 y,
                 content_width,
                 0,
-                "Theme",
-                "Window chrome and panel palette",
+                "Theme palette",
+                "Six named plus 250 procedural palettes; ,/. jumps 16",
                 desktop.preferences.theme.label(),
-                SettingControl::Choice,
+                SettingControl::Palette {
+                    id: desktop.preferences.theme.persisted(),
+                    color: desktop.preferences.theme.panel(),
+                },
             );
             settings_row(
                 desktop,
@@ -6219,9 +6959,12 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 content_width,
                 1,
                 "Wallpaper variant",
-                "252 persisted pattern and spectrum combinations",
+                "252 persisted pattern and spectrum combinations; ,/. jumps 16",
                 desktop.preferences.wallpaper.label(),
-                SettingControl::Choice,
+                SettingControl::Palette {
+                    id: desktop.preferences.wallpaper_variant,
+                    color: desktop.preferences.wallpaper_color(),
+                },
             );
             settings_row(
                 desktop,
@@ -6230,9 +6973,12 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 content_width,
                 2,
                 "Accent color",
-                "256 persisted colors for focus, selection, and controls",
+                "256 persisted focus and control colors; ,/. jumps 16",
                 desktop.preferences.accent.label(),
-                SettingControl::Choice,
+                SettingControl::Palette {
+                    id: desktop.preferences.accent.persisted(),
+                    color: desktop.preferences.accent.color(),
+                },
             );
             settings_row(
                 desktop,
@@ -6241,9 +6987,12 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 content_width,
                 3,
                 "Wallpaper tone",
-                "Base color behind the wallpaper",
+                "Three named plus 253 procedural base tones; ,/. jumps 16",
                 desktop.preferences.backdrop.label(),
-                SettingControl::Choice,
+                SettingControl::Palette {
+                    id: desktop.preferences.backdrop.persisted(),
+                    color: desktop.preferences.backdrop.color(),
+                },
             );
             settings_row(
                 desktop,
@@ -7111,7 +7860,7 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 content_width,
                 0,
                 "Clear browser data",
-                "Reset the address field and current document",
+                "Reset tabs, histories, bookmarks, find text, and the current document",
                 "Clear",
                 SettingControl::Action { available: true },
             );
@@ -7312,6 +8061,33 @@ fn settings_row(
             framebuffer::outline(control_x, control_y, control_width, 30, color::BORDER);
             framebuffer::text(control_x + 10, control_y + 10, "<", color::MUTED, 1);
             framebuffer::text(control_x + 30, control_y + 10, value, color::INK, 1);
+            framebuffer::text(
+                control_x + control_width - 18,
+                control_y + 10,
+                ">",
+                color::MUTED,
+                1,
+            );
+        }
+        SettingControl::Palette { id, color } => {
+            let control_width = 154;
+            let control_x = x + width - control_width - 20;
+            let control_y = y + if compact { 6 } else { 12 };
+            settings_rect(
+                desktop.preferences,
+                control_x,
+                control_y,
+                control_width,
+                30,
+                5,
+                0x0018_1D21,
+            );
+            framebuffer::outline(control_x, control_y, control_width, 30, color::BORDER);
+            framebuffer::text(control_x + 10, control_y + 10, "<", color::MUTED, 1);
+            framebuffer::rect(control_x + 30, control_y + 7, 16, 16, color);
+            framebuffer::outline(control_x + 30, control_y + 7, 16, 16, color::WHITE);
+            framebuffer::text(control_x + 56, control_y + 10, "#", color::MUTED, 1);
+            draw_number(control_x + 68, control_y + 10, id as u64, color::INK);
             framebuffer::text(
                 control_x + control_width - 18,
                 control_y + 10,
@@ -8136,6 +8912,23 @@ mod tests {
     }
 
     #[test]
+    fn browser_session_limits_and_case_insensitive_find_are_deterministic() {
+        let home = BrowserTab::home();
+        assert_eq!(home.url(), "expos://home");
+        assert_eq!(home.title(), "New tab");
+        assert_eq!(home.history_count, 1);
+        assert_eq!(BROWSER_TAB_CAPACITY, 6);
+        assert_eq!(BROWSER_HISTORY_CAPACITY, 12);
+        assert_eq!(BROWSER_BOOKMARK_CAPACITY, 8);
+        assert!(browser_text_contains("Chromium-like workflow", "CHROMIUM"));
+        assert!(!browser_text_contains("ExpOS Browser", "Firefox"));
+
+        let bookmark = BrowserBookmark::new("https://example.com/", "Example Domain");
+        assert_eq!(bookmark.url(), "https://example.com/");
+        assert_eq!(bookmark.title(), "Example Domain");
+    }
+
+    #[test]
     fn performance_settings_are_conservative_and_have_a_dedicated_category() {
         let preferences = DesktopPreferences::from_persistent(state::PersistentPreferences::new());
         assert!(!preferences.window_shadows);
@@ -8148,16 +8941,38 @@ mod tests {
     }
 
     #[test]
-    fn customization_pages_expose_more_than_six_hundred_real_values() {
-        assert_eq!(CUSTOMIZATION_VALUE_COUNT, 638);
-        const { assert!(CUSTOMIZATION_VALUE_COUNT >= 600) };
-        const { assert!(state::CUSTOMIZATION_SELECTABLE_VALUES >= 500) };
+    fn customization_pages_expose_more_than_one_thousand_real_values() {
+        assert_eq!(CUSTOMIZATION_VALUE_COUNT, 1_141);
+        const { assert!(CUSTOMIZATION_VALUE_COUNT >= 1_000) };
+        const { assert!(state::CUSTOMIZATION_SELECTABLE_VALUES >= 1_000) };
         assert_eq!(SettingsCategory::Profiles.row_count(), 6);
         assert_eq!(SettingsCategory::Appearance.row_count(), 8);
         assert_eq!(SettingsCategory::Accessibility.row_count(), 9);
         assert_eq!(SettingsCategory::Windows.row_count(), 8);
         assert_eq!(SettingsCategory::Taskbar.row_count(), 7);
         assert_eq!(SettingsCategory::Menu.row_count(), 9);
+    }
+
+    #[test]
+    fn highest_palette_ids_round_trip_and_produce_bounded_dark_surfaces() {
+        let theme = ThemeChoice::from_persisted(255);
+        let backdrop = BackdropChoice::from_persisted(255);
+        assert_eq!(theme.persisted(), 255);
+        assert_eq!(backdrop.persisted(), 255);
+        assert_ne!(theme.panel(), ThemeChoice::Obsidian.panel());
+        assert_ne!(theme.chrome(), theme.window());
+        assert!(theme.panel() <= 0x00FF_FFFF);
+        assert!(theme.chrome() <= 0x00FF_FFFF);
+        assert!(theme.window() <= 0x00FF_FFFF);
+        assert!(theme.card() <= 0x00FF_FFFF);
+        assert!(theme.terminal() <= 0x00FF_FFFF);
+        assert!(backdrop.color() <= 0x00FF_FFFF);
+        assert_eq!(ThemeChoice::Obsidian.shifted(16).persisted(), 16);
+        assert_eq!(ThemeChoice::from_persisted(250).shifted(16).persisted(), 10);
+        assert_eq!(
+            AccentChoice::from_persisted(4).shifted(-16).persisted(),
+            244
+        );
     }
 
     #[test]

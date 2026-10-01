@@ -35,8 +35,9 @@ ExpOS is the Form-native operating system described by
 - an interactive Settings control center for profiles, accessibility,
   appearance, windows, taskbar, display, performance, input, network, Wi-Fi,
   Bluetooth, privacy, system and menu behavior, including six coordinated
-  desktop profiles, six themes, seven procedural wallpapers, four cursor
-  themes, five font faces and three real font weights;
+  desktop profiles, 256 coordinated theme palettes, 252 wallpaper variants,
+  256 accent colors, 256 backdrop tones, four cursor themes, five font faces
+  and three real font weights;
 - readable case-sensitive 8x8 framebuffer text with runtime face/weight
   rasterization and an expanded 8x16 VGA console font;
 - Ayo v3 package installation, verification, ownership, rollback and recovery,
@@ -47,10 +48,12 @@ ExpOS is the Form-native operating system described by
   ICMP, UDP, DNS A lookup, one bounded TCP client and HTTP/1.0 GET over plain
   TCP or authenticated TLS 1.3;
 - a graphical Browser that fetches and renders bounded `http://` and
-  `https://` documents, applies a small native CSS subset, runs a deterministic
-  DOM-mutation/click-handler JavaScript subset, and searches DuckDuckGo's
-  non-JavaScript HTML endpoint from the address bar; direct Wikipedia article
-  links use its live HTTPS summary endpoint and render as a scrollable reader;
+  `https://` documents, provides six tab sessions with independent history and
+  scroll, eight bookmarks and find-in-page, applies a native CSS subset, runs a
+  deterministic DOM-mutation/click-handler JavaScript subset, and searches
+  DuckDuckGo's non-JavaScript HTML endpoint from the address bar; direct
+  Wikipedia article links use its live HTTPS summary endpoint and render as a
+  scrollable reader;
 - graphical and console login for Operator, Power and Guest authority;
 - a bright white-on-black native command deck with cyan/green identity
   accents, a structured startup banner, grouped help, and aligned system
@@ -252,7 +255,11 @@ returns every application window to its default recoverable position. In
 Browser, click the address field or press `/`, type an `http://` or `https://`
 URL, and press Enter. Text without a scheme is treated as a search query and
 sent to DuckDuckGo's non-JavaScript HTML search; prefix a query with `?` for the
-same behavior.
+same behavior. Browser shortcuts are `N` for a new tab, `Tab` to switch tabs,
+`X` to close a tab, `[`/`]` for back/forward, `R` to reload, `B` to toggle a
+bookmark and `F` to open find-in-page. The clickable tab strip, bookmark bar,
+find result counter and `TLS`/`WEB`/`FORM` omnibox indicators expose the same
+actions without the keyboard.
 
 Settings controls are clickable and keyboard-accessible. Its category and row
 viewports follow the selection, so all fourteen pages and long
@@ -277,12 +284,15 @@ list. The Profiles page applies Balanced, Compact, Focus, Accessible, Showcase
 or Touch-friendly settings as one persistent transaction while preserving the
 chosen display timing and system visibility. Accessibility gathers contrast,
 font, drag-target, taskbar-target, pointer, motion and hint controls in one
-place. Across the customization pages, 638
-selectable values are directly wired to rendering, geometry or interaction.
-That includes 256 persisted accent colors and 252 wallpaper variants across
-seven procedural patterns. The compact persistent-state schema validates 628
-selectable states in total; the schema and desktop counts overlap and are not
-additive.
+place. Across the customization pages, 1,141 selectable values are directly
+wired to rendering, geometry or interaction. That includes six named plus 250
+procedural theme palettes, 256 persisted accent colors, 252 wallpaper variants
+across seven procedural patterns, and three named plus 253 procedural backdrop
+tones. The compact persistent-state schema validates 1,140 selectable states in
+total; the schema and desktop counts overlap and are not additive. All palette
+bytes now survive sanitization and reboot instead of collapsing to the legacy
+named subset. Appearance shows an exact palette ID and live color swatch;
+`+`/`-` steps one value and `.`/`,` jumps sixteen for fast exploration.
 
 Resolution can be selected as 480p (640x480), 720p (1280x720) or 1080p
 (1920x1080); it is saved immediately and applied when the desktop is reopened.
@@ -331,8 +341,11 @@ The native stack supports:
 - authenticated TLS 1.3 and `https://` GET with hardware RDRAND entropy, SNI
   and hostname checks, RTC certificate-validity checks, and certificate-chain
   and signature verification;
-- a fixed-capacity HTML document model, CSS tag/class/id and inline rules, and
-  deterministic title/text/style/click-handler JavaScript operations;
+- a fixed-capacity HTML document model with semantic text elements, decoded
+  common entities and unloaded image placeholders; CSS tag/class/id and inline
+  rules; and deterministic title/text/style/click-handler JavaScript operations;
+- six bounded tab sessions with twelve history entries and preserved scroll per
+  tab, eight in-session bookmarks, and case-insensitive find-in-page;
 - address-bar search through the canonical
   `https://duckduckgo.com/html/?q=...` endpoint, with at most three redirects,
   rejection of HTTPS-to-HTTP downgrades, and projection of up to eight result
@@ -355,14 +368,16 @@ The browser engine is deliberately bounded: the parser accepts at most 16 KiB
 per document, while native HTTP/HTTPS fetches retain at most the first 14 KiB of
 the response body. A document contains at most 48 parsed nodes, 32 CSS rules,
 16 scripts and 12 click handlers. Its CSS subset covers colors, background,
-border, font size/weight, display, visibility, margin, padding and text
-alignment with tag/class/id specificity and inline styles. JavaScript is not
+border and radius, font size/weight, line height, display, visibility, margin,
+padding, maximum width and text alignment with tag/class/id specificity and
+inline styles. JavaScript is not
 arbitrary ECMAScript; only deterministic document title, node text, supported
 style, visibility and click-handler mutations run. External
 stylesheet/script/image loading, general Web APIs, `fetch`, cookies,
 local/session storage, media containers/codecs, audio/video output and GPU
-acceleration are absent. Consequently, fetching YouTube HTML does **not** make
-YouTube playback work.
+acceleration are absent. The workflow is intentionally Chromium-like, but the
+engine is not Chromium/Blink/V8 compatible. Consequently, fetching YouTube
+HTML does **not** make YouTube playback work.
 
 IPv6, physical Wi-Fi drivers, a USB host/Bluetooth data path, concurrent
 sockets, TCP servers and downloads are also absent. HTTP, TLS record and

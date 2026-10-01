@@ -15,7 +15,7 @@ pub const BROWSER_TEXT_CAPACITY: usize = 512;
 pub const MAX_BROWSER_DOCUMENT_BYTES: usize = 16 * 1024;
 
 const MAX_HANDLER_BYTES: usize = 384;
-const STYLE_PROPERTY_COUNT: usize = 10;
+const STYLE_PROPERTY_COUNT: usize = 13;
 const INLINE_SPECIFICITY: u16 = 1_000;
 const SCRIPT_SPECIFICITY: u16 = 2_000;
 
@@ -26,6 +26,7 @@ pub enum NodeKind {
     Paragraph,
     Link,
     ListItem,
+    Image,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -71,6 +72,52 @@ impl BrowserText {
             return Err(ScriptRejection::ValueTooLong);
         }
         Ok(Self::truncated(value))
+    }
+
+    fn html_text(value: &str) -> Result<Self, BrowserError> {
+        let value = value.trim();
+        if value.is_empty() || !value.is_ascii() {
+            return Err(BrowserError::InvalidDocument);
+        }
+        let mut output = [0_u8; BROWSER_TEXT_CAPACITY];
+        let mut input = 0;
+        let mut length = 0;
+        let bytes = value.as_bytes();
+        while input < bytes.len() && length < output.len() {
+            let (byte, consumed) = if bytes[input..].starts_with(b"&amp;") {
+                (b'&', 5)
+            } else if bytes[input..].starts_with(b"&quot;") {
+                (b'"', 6)
+            } else if bytes[input..].starts_with(b"&apos;") {
+                (b'\'', 6)
+            } else if bytes[input..].starts_with(b"&#39;") {
+                (b'\'', 5)
+            } else if bytes[input..].starts_with(b"&lt;") {
+                (b'<', 4)
+            } else if bytes[input..].starts_with(b"&gt;") {
+                (b'>', 4)
+            } else if bytes[input..].starts_with(b"&nbsp;") {
+                (b' ', 6)
+            } else {
+                (bytes[input], 1)
+            };
+            input += consumed;
+            if byte.is_ascii_whitespace() {
+                if length != 0 && output[length - 1] != b' ' {
+                    output[length] = b' ';
+                    length += 1;
+                }
+            } else if byte.is_ascii_graphic() {
+                output[length] = byte;
+                length += 1;
+            }
+        }
+        if length == 0 {
+            return Err(BrowserError::InvalidDocument);
+        }
+        let decoded =
+            core::str::from_utf8(&output[..length]).map_err(|_| BrowserError::InvalidDocument)?;
+        Ok(Self::truncated(decoded.trim_end()))
     }
 }
 
@@ -187,6 +234,9 @@ pub struct ComputedStyle {
     pub margin: BoxEdges,
     pub padding: BoxEdges,
     pub text_align: TextAlign,
+    pub border_radius: u16,
+    pub max_width: u16,
+    pub line_height: u16,
 }
 
 impl ComputedStyle {
@@ -203,6 +253,9 @@ impl ComputedStyle {
         margin: BoxEdges::ZERO,
         padding: BoxEdges::ZERO,
         text_align: TextAlign::Left,
+        border_radius: 0,
+        max_width: 0,
+        line_height: 0,
     };
 
     pub const fn is_rendered(&self) -> bool {
@@ -408,6 +461,9 @@ enum StyleValue {
     Margin(BoxEdges),
     Padding(BoxEdges),
     TextAlign(TextAlign),
+    BorderRadius(u16),
+    MaxWidth(u16),
+    LineHeight(u16),
 }
 
 impl StyleValue {
@@ -423,6 +479,9 @@ impl StyleValue {
             Self::Margin(_) => 7,
             Self::Padding(_) => 8,
             Self::TextAlign(_) => 9,
+            Self::BorderRadius(_) => 10,
+            Self::MaxWidth(_) => 11,
+            Self::LineHeight(_) => 12,
         }
     }
 }
@@ -787,23 +846,35 @@ impl Document {
                 .unwrap_or(source.len());
             let content = source[cursor..content_end].trim();
             let id = attribute(tag, "id").unwrap_or("");
+            let image_alt = if kind == NodeKind::Image {
+                attribute(tag, "alt").unwrap_or("Image")
+            } else {
+                ""
+            };
             let has_behavior = !id.is_empty()
                 || attribute(tag, "onclick").is_some()
-                || attribute(tag, "style").is_some();
-            if content.is_empty() && !has_behavior {
+                || attribute(tag, "style").is_some()
+                || kind == NodeKind::Image;
+            if content.is_empty() && image_alt.is_empty() && !has_behavior {
                 continue;
             }
             let target = if kind == NodeKind::Link {
                 attribute(tag, "href")
                     .and_then(|value| BrowserText::new(value).ok())
                     .unwrap_or(BrowserText::empty())
+            } else if kind == NodeKind::Image {
+                attribute(tag, "src")
+                    .and_then(|value| BrowserText::new(value).ok())
+                    .unwrap_or(BrowserText::empty())
             } else {
                 BrowserText::empty()
             };
-            let text = if content.is_empty() {
+            let text = if kind == NodeKind::Image {
+                BrowserText::html_text(image_alt)?
+            } else if content.is_empty() {
                 BrowserText::empty()
             } else {
-                BrowserText::new(content)?
+                BrowserText::html_text(content)?
             };
             let index = self.push(DocumentNode { kind, text, target })?;
             offsets[index] = tag_start;
@@ -992,6 +1063,9 @@ impl Document {
             StyleValue::Margin(value) => style.margin = value,
             StyleValue::Padding(value) => style.padding = value,
             StyleValue::TextAlign(value) => style.text_align = value,
+            StyleValue::BorderRadius(value) => style.border_radius = value,
+            StyleValue::MaxWidth(value) => style.max_width = value,
+            StyleValue::LineHeight(value) => style.line_height = value,
         }
     }
 
@@ -1384,13 +1458,30 @@ fn default_style(kind: NodeKind, tag: &str) -> ComputedStyle {
             style.font_weight = 700;
         }
         NodeKind::Link => style.color = CssColor::BLUE,
+        NodeKind::Image => {
+            style.color = CssColor::rgb(154, 174, 184);
+            style.background = CssColor::rgb(20, 27, 33);
+            style.border = BorderStyle {
+                width: 1,
+                color: CssColor::rgb(53, 67, 63),
+            };
+            style.padding = BoxEdges::all(8);
+            style.border_radius = 6;
+        }
         NodeKind::Paragraph | NodeKind::ListItem => {}
     }
     style
 }
 
 fn default_display(tag: &str) -> DisplayMode {
-    if eq_ascii(tag, "a") || eq_ascii(tag, "span") || eq_ascii(tag, "button") {
+    if eq_ascii(tag, "a")
+        || eq_ascii(tag, "span")
+        || eq_ascii(tag, "button")
+        || eq_ascii(tag, "code")
+        || eq_ascii(tag, "strong")
+        || eq_ascii(tag, "em")
+        || eq_ascii(tag, "small")
+    {
         DisplayMode::Inline
     } else if eq_ascii(tag, "title") {
         DisplayMode::None
@@ -1411,12 +1502,29 @@ fn node_kind(name: &str) -> Option<NodeKind> {
         || eq_ascii(name, "div")
         || eq_ascii(name, "span")
         || eq_ascii(name, "label")
+        || eq_ascii(name, "main")
+        || eq_ascii(name, "article")
+        || eq_ascii(name, "section")
+        || eq_ascii(name, "header")
+        || eq_ascii(name, "footer")
+        || eq_ascii(name, "nav")
+        || eq_ascii(name, "blockquote")
+        || eq_ascii(name, "pre")
+        || eq_ascii(name, "code")
+        || eq_ascii(name, "strong")
+        || eq_ascii(name, "em")
+        || eq_ascii(name, "small")
+        || eq_ascii(name, "caption")
+        || eq_ascii(name, "th")
+        || eq_ascii(name, "td")
     {
         Some(NodeKind::Paragraph)
     } else if eq_ascii(name, "a") || eq_ascii(name, "button") {
         Some(NodeKind::Link)
     } else if eq_ascii(name, "li") {
         Some(NodeKind::ListItem)
+    } else if eq_ascii(name, "img") {
+        Some(NodeKind::Image)
     } else {
         None
     }
@@ -1675,6 +1783,12 @@ fn parse_style_value(property: &str, value: &str) -> Option<StyleValue> {
         } else {
             None
         }
+    } else if eq_ascii(property, "border-radius") || eq_ascii(property, "borderRadius") {
+        parse_positive_px(value, 0, 64).map(StyleValue::BorderRadius)
+    } else if eq_ascii(property, "max-width") || eq_ascii(property, "maxWidth") {
+        parse_positive_px(value, 32, 2_048).map(StyleValue::MaxWidth)
+    } else if eq_ascii(property, "line-height") || eq_ascii(property, "lineHeight") {
+        parse_positive_px(value, 8, 96).map(StyleValue::LineHeight)
     } else {
         None
     }
@@ -2443,6 +2557,26 @@ mod tests {
             Document::parse_duckduckgo_results("https://example.com/html/?q=x", source),
             Err(BrowserError::InvalidUrl)
         ));
+    }
+
+    #[test]
+    fn richer_html_projection_decodes_text_images_and_layout_properties() {
+        let document = Document::parse(
+            "https://example.com/article",
+            "<title>Docs &amp; images</title><article id='card' style='border-radius: 12px; max-width: 420px; line-height: 24px'>Readable &lt;article&gt;</article><img src='/hero.png' alt='Hero &amp; logo'>",
+        )
+        .unwrap();
+        assert_eq!(document.title(), "Docs & images");
+        let card = document.element_by_id("card").unwrap();
+        assert_eq!(card.node.text.as_str(), "Readable <article>");
+        assert_eq!(card.style.border_radius, 12);
+        assert_eq!(card.style.max_width, 420);
+        assert_eq!(card.style.line_height, 24);
+        let image = document.styled_node(2).unwrap();
+        assert_eq!(image.node.kind, NodeKind::Image);
+        assert_eq!(image.node.text.as_str(), "Hero & logo");
+        assert_eq!(image.node.target.as_str(), "/hero.png");
+        assert_eq!(image.style.border_radius, 6);
     }
 
     #[test]
