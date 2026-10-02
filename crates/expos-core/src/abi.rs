@@ -17,6 +17,8 @@ pub enum AbiCall {
     TimeNow = 4,
     IpcSend = 5,
     IpcReceive = 6,
+    ExecutionYield = 7,
+    ExecutionExit = 8,
     SurfaceCreate = 16,
     BufferAttach = 17,
     SurfaceDamage = 18,
@@ -39,6 +41,8 @@ impl AbiCall {
             4 => Self::TimeNow,
             5 => Self::IpcSend,
             6 => Self::IpcReceive,
+            7 => Self::ExecutionYield,
+            8 => Self::ExecutionExit,
             16 => Self::SurfaceCreate,
             17 => Self::BufferAttach,
             18 => Self::SurfaceDamage,
@@ -109,9 +113,11 @@ impl AbiRequest {
         let operation = match call {
             AbiCall::Log | AbiCall::FormResolve | AbiCall::TimeNow => Operations::READ,
             AbiCall::EventPoll => Operations::INPUT,
-            AbiCall::HandleAuthorize | AbiCall::IpcSend | AbiCall::IpcReceive => {
-                Operations::EXECUTE
-            }
+            AbiCall::HandleAuthorize
+            | AbiCall::IpcSend
+            | AbiCall::IpcReceive
+            | AbiCall::ExecutionYield
+            | AbiCall::ExecutionExit => Operations::EXECUTE,
             AbiCall::SurfaceCreate
             | AbiCall::BufferAttach
             | AbiCall::SurfaceDamage
@@ -273,6 +279,8 @@ mod tests {
         assert_eq!(AbiCall::NetworkReceive as u16, 36);
         assert_eq!(AbiCall::PackageTransaction as u16, 48);
         assert_eq!(operation(AbiCall::IpcSend), Ok(Operations::EXECUTE));
+        assert_eq!(operation(AbiCall::ExecutionYield), Ok(Operations::EXECUTE));
+        assert_eq!(operation(AbiCall::ExecutionExit), Ok(Operations::EXECUTE));
         assert_eq!(operation(AbiCall::StorageWrite), Ok(Operations::CONFIGURE));
         assert_eq!(operation(AbiCall::NetworkSend), Ok(Operations::NETWORK));
         assert_eq!(

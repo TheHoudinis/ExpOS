@@ -17,6 +17,7 @@ mod crypto;
 mod desktop;
 pub mod display_timing;
 mod expfs_store;
+mod form_runtime;
 mod framebuffer;
 mod games;
 mod genesis;
@@ -136,6 +137,7 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
     println!("============================================");
 
     unsafe { boot::initialize(magic, mbi_phys) };
+    form_runtime::initialize();
     println!("[ok] boot handoff @ {:#x}", mbi_phys);
 
     let mut writer = vga::WRITER.lock();

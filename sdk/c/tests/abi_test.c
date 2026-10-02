@@ -14,5 +14,7 @@ int main(void) {
     assert(request.handle == 9);
     assert(request.arguments[2] == 640);
     assert(EXPOS_CALL_NETWORK_RECEIVE == 36);
+    assert(EXPOS_CALL_EXECUTION_YIELD == 7);
+    assert(EXPOS_CALL_EXECUTION_EXIT == 8);
     return 0;
 }

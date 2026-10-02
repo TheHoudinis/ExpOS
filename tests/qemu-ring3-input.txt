@@ -1,0 +1,17 @@
+2222
+operator
+expos
+mkform NativeHello executable
+write NativeHello native:log hello from isolated Ring 3
+grant NativeHello execute
+execute NativeHello
+mkform EscapeProbe executable
+write EscapeProbe native:escape
+grant EscapeProbe execute
+execute EscapeProbe
+mkform BudgetLoop executable
+write BudgetLoop native:spin
+grant BudgetLoop execute
+execute BudgetLoop
+ps
+shutdown

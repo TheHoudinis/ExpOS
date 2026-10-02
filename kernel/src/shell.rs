@@ -9,10 +9,10 @@ use crate::{
     slog, vga,
 };
 use expos_core::{
-    AddressSpace, Authority, BootReport, CapabilityBroker, Dimension, ExecutionContext,
+    AddressSpace, Authority, BootReport, CapabilityBroker, CpuState, Dimension, ExecutionContext,
     ExecutionIdentity, ExecutionRuntime, ExecutionState, Fin, Form, FormHandle, FormKind,
     Lifecycle, NetworkPolicy, Operations, PimpScope, PimpSpec, PimpValue, Relationship,
-    RelationshipGraph, RelationshipKind, Scheduler, SpecKey, Text, FORM_ABI_VERSION,
+    RelationshipGraph, RelationshipKind, ResourceKind, Scheduler, SpecKey, Text, FORM_ABI_VERSION,
 };
 
 const MAX_LINE: usize = 128;
@@ -273,7 +273,7 @@ impl Shell {
         );
         seed_content(
             &mut content[4],
-            b"Form ABI v1: frozen capability-gated identity, IPC, display, input, time, storage, network, browser, and package calls",
+            b"Form ABI v1: Ring 3 gate for capability-gated execution, IPC, display, input, time, storage, network, browser, and package calls",
         );
         seed_content(
             &mut content[5],
@@ -543,17 +543,19 @@ impl Shell {
                 true
             }
             "ps" => {
-                println!("CTX  FORM FIN                              DIMENSION FIN                         RUNTIME  STATE          DISPATCHES RESULT");
+                println!("CTX  FORM FIN                              DIMENSION FIN                         RUNTIME  STATE          SLICES PREEMPT TICKS RESULT");
                 self.scheduler.visit(|context| {
                     let identity = context.identity();
                     println!(
-                        "{:<4} {}  {}  {:<8} {:<14} {:<10} {}",
+                        "{:<4} {}  {}  {:<8} {:<14} {:<6} {:<7} {:<5} {}",
                         context.id(),
                         identity.form,
                         identity.dimension,
                         execution_runtime_name(context.runtime()),
                         execution_state_name(context.state()),
                         context.dispatches(),
+                        context.preemptions(),
+                        context.cpu_ticks(),
                         context.cpu_state().accumulator
                     );
                 });
@@ -1958,77 +1960,262 @@ impl Shell {
             println!("DIESE denied: the Execute Handle is no longer valid.");
             return;
         }
-        let mut context = match ExecutionContext::new(
-            ExecutionIdentity::new(self.report.cfc_fin, self.report.stable_fin, form.fin),
-            AddressSpace::kernel_bootstrap(),
-            256,
+        let execution_identity =
+            ExecutionIdentity::new(self.report.cfc_fin, self.report.stable_fin, form.fin);
+        if form.kind != FormKind::Executable {
+            let mut context = match ExecutionContext::new(
+                execution_identity,
+                AddressSpace::kernel_bootstrap(),
+                256,
+            ) {
+                Ok(context) => context,
+                Err(error) => {
+                    println!("Scheduler rejected the execution context: {:?}.", error);
+                    return;
+                }
+            };
+            if let Err(error) = context.attach_handle(handle) {
+                println!("Scheduler rejected the Form Handle set: {:?}.", error);
+                return;
+            }
+            let context_id = match self.scheduler.admit(context) {
+                Ok(id) => id,
+                Err(error) => {
+                    println!("Scheduler admission failed: {:?}.", error);
+                    return;
+                }
+            };
+            let _ = self.scheduler.resume(context_id);
+            let _ = self.scheduler.finish(context_id, 0);
+            println!(
+                "Scheduled '{}' as context #{} (trusted kernel runtime).",
+                identity, context_id
+            );
+            slog!(
+                "EXPOS_FORM_SCHEDULED context={} fin={} dimension={} runtime=kernel\r\n",
+                context_id,
+                form.fin,
+                self.report.stable_fin
+            );
+            let _ = self.scheduler.dispatch_next();
+            return;
+        }
+
+        let now = crate::hardware::timestamp();
+        let execute_handle = if let Some(child) = self.broker.find_authorized(
+            form.fin,
+            form.fin,
+            self.report.stable_fin,
+            Operations::EXECUTE,
+            now,
         ) {
+            child
+        } else {
+            let valid_until = handle.valid_until_tick.saturating_sub(1);
+            match self
+                .broker
+                .delegate(handle.id, form.fin, Operations::EXECUTE, valid_until, now)
+            {
+                Ok(child) => child,
+                Err(error) => {
+                    println!(
+                        "DIESE could not derive the Form-owned Execute Handle: {:?}.",
+                        error
+                    );
+                    return;
+                }
+            }
+        };
+        let log_handle = if let Some(existing) = self.broker.find_authorized(
+            form.fin,
+            FORM_ABI_FIN,
+            self.report.stable_fin,
+            Operations::READ,
+            now,
+        ) {
+            existing
+        } else {
+            match self.broker.issue_for(
+                form.fin,
+                self.session.authority(),
+                FORM_ABI_FIN,
+                self.report.stable_fin,
+                Operations::READ,
+                u64::MAX,
+            ) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    println!(
+                        "DIESE could not issue the bounded Form ABI Log Handle: {:?}.",
+                        error
+                    );
+                    return;
+                }
+            }
+        };
+        if self.broker.seal(form.fin, self.report.stable_fin).is_none()
+            && self
+                .broker
+                .seal_context(form.fin, self.report.stable_fin)
+                .is_err()
+        {
+            println!(
+                "ExpSeal could not close ambient authority for '{}'.",
+                identity
+            );
+            return;
+        }
+
+        let index = self
+            .forms
+            .iter()
+            .position(|candidate| candidate.is_some_and(|candidate| candidate.fin == form.fin))
+            .expect("scheduled Form remains registered");
+        let content = self.content[index];
+        let Some(mut prepared) = crate::form_runtime::prepare(
+            form.fin,
+            execute_handle,
+            log_handle,
+            &content.bytes[..content.length as usize],
+        ) else {
+            println!("No isolated native address-space slot is available.");
+            return;
+        };
+        let address_space = prepared.address_space();
+        let mut context = match ExecutionContext::new(execution_identity, address_space, 256) {
             Ok(context) => context,
             Err(error) => {
-                println!("Scheduler rejected the execution context: {:?}.", error);
+                crate::form_runtime::finish(prepared);
+                println!("Scheduler rejected the native address space: {:?}.", error);
                 return;
             }
         };
-        if form.kind == FormKind::Executable {
-            context.set_runtime(ExecutionRuntime::ExpPython);
-        }
-        if let Err(error) = context.attach_handle(handle) {
-            println!("Scheduler rejected the Form Handle set: {:?}.", error);
-            return;
+        context.set_runtime(ExecutionRuntime::NativeForm);
+        for launch_handle in [execute_handle, log_handle] {
+            if let Err(error) = context.attach_handle(launch_handle) {
+                crate::form_runtime::finish(prepared);
+                println!("Scheduler rejected the Form Handle set: {:?}.", error);
+                return;
+            }
         }
         let context_id = match self.scheduler.admit(context) {
             Ok(id) => id,
             Err(error) => {
+                crate::form_runtime::finish(prepared);
                 println!("Scheduler admission failed: {:?}.", error);
                 return;
             }
         };
-        let dispatched = self.scheduler.dispatch_next().unwrap_or(context_id);
+        self.scheduler
+            .resume(context_id)
+            .expect("the admitted native Form is ready");
         println!(
-            "Scheduled '{}' as context #{}; current context #{}.",
-            identity, context_id, dispatched
+            "Scheduled '{}' as native Ring 3 context #{} (CR3={:#x}).",
+            identity, context_id, address_space.root
         );
         println!(
-            "FIN={} Dimension={} CFC={} Handles=1 ExpBudget=256.",
+            "FIN={} Dimension={} CFC={} Handles=2 ExpBudget.CpuTicks=256.",
             form.fin, self.report.stable_fin, self.report.cfc_fin
         );
         slog!(
-            "EXPOS_FORM_SCHEDULED context={} fin={} dimension={}\r\n",
+            "EXPOS_RING3_ENTER context={} fin={} cr3={:#x} lower={:#x} upper={:#x}\r\n",
             context_id,
             form.fin,
-            self.report.stable_fin
+            address_space.root,
+            address_space.lower_bound,
+            address_space.upper_bound
         );
-        if form.kind == FormKind::Executable {
-            if dispatched != context_id {
-                println!(
-                    "Executable Form is ready; another context owns the current cooperative slice."
-                );
-                return;
+
+        loop {
+            let remaining = self
+                .scheduler
+                .context(context_id)
+                .expect("native context remains admitted")
+                .budget()
+                .account(ResourceKind::CpuTicks)
+                .remaining_before_soft();
+            let slice = crate::form_runtime::run_slice(
+                &mut prepared,
+                crate::form_runtime::RunAuthorization::new(
+                    &self.broker,
+                    self.report.cfc_fin,
+                    self.report.stable_fin,
+                    form.fin,
+                    execute_handle,
+                    log_handle,
+                ),
+                remaining,
+            );
+            let cpu = CpuState {
+                instruction_pointer: slice.frame.rip,
+                stack_pointer: slice.frame.rsp,
+                flags: slice.frame.rflags,
+                accumulator: slice.frame.rax,
+            };
+            match slice.reason {
+                crate::form_runtime::SliceReason::Preempted => {
+                    let charged_ticks = slice.timer_ticks.max(1);
+                    self.scheduler
+                        .preempt(context_id, cpu, charged_ticks, false)
+                        .expect("timer preemption targets the running Form");
+                    slog!(
+                        "EXPOS_FORM_PREEMPT context={} ticks={} rip={:#x}\r\n",
+                        context_id,
+                        charged_ticks,
+                        cpu.instruction_pointer
+                    );
+                    self.scheduler
+                        .resume(context_id)
+                        .expect("preempted Form remains ready");
+                }
+                crate::form_runtime::SliceReason::BudgetExhausted => {
+                    self.scheduler
+                        .preempt(context_id, cpu, slice.timer_ticks, true)
+                        .expect("budget expiry targets the running Form");
+                    let ticks = self.scheduler.context(context_id).unwrap().cpu_ticks();
+                    println!(
+                        "ExpBudget stopped '{}' after {} hardware timer ticks.",
+                        identity, ticks
+                    );
+                    slog!(
+                        "EXPOS_FORM_BUDGET_EXHAUSTED context={} fin={} ticks={}\r\n",
+                        context_id,
+                        form.fin,
+                        ticks
+                    );
+                    break;
+                }
+                crate::form_runtime::SliceReason::Exited => {
+                    self.scheduler
+                        .finish_slice(context_id, cpu, slice.timer_ticks.max(1), slice.result)
+                        .expect("ABI exit targets the running Form");
+                    println!(
+                        "Executable Form '{}' exited with result {} in Ring 3.",
+                        identity, slice.result
+                    );
+                    slog!(
+                        "EXPOS_FORM_EXITED context={} fin={} result={} ring=3\r\n",
+                        context_id,
+                        form.fin,
+                        slice.result
+                    );
+                    break;
+                }
+                crate::form_runtime::SliceReason::Fault(vector) => {
+                    let result = 128_u64.saturating_add(vector as u64);
+                    self.scheduler
+                        .finish_slice(context_id, cpu, slice.timer_ticks.max(1), result)
+                        .expect("fault exit targets the running Form");
+                    println!(
+                        "Executable Form '{}' faulted at vector {}.",
+                        identity, vector
+                    );
+                    break;
+                }
             }
-            let index = self
-                .forms
-                .iter()
-                .position(|candidate| candidate.is_some_and(|candidate| candidate.fin == form.fin))
-                .expect("scheduled Form remains registered");
-            let content = self.content[index];
-            let succeeded = core::str::from_utf8(&content.bytes[..content.length as usize])
-                .is_ok_and(crate::python::execute);
-            let result = u64::from(!succeeded);
-            self.scheduler
-                .finish(context_id, result)
-                .expect("the dispatched Form context remains admitted");
-            println!(
-                "Executable Form '{}' exited with result {}.",
-                identity, result
-            );
-            slog!(
-                "EXPOS_FORM_EXITED context={} fin={} result={}\r\n",
-                context_id,
-                form.fin,
-                result
-            );
-            let _ = self.scheduler.dispatch_next();
         }
+        crate::form_runtime::finish(prepared);
+        let _ = self.scheduler.dispatch_next();
     }
 
     fn inspect(&self, identity: Option<&str>) {
@@ -3133,6 +3320,7 @@ const fn execution_runtime_name(runtime: ExecutionRuntime) -> &'static str {
     match runtime {
         ExecutionRuntime::KernelNative => "native",
         ExecutionRuntime::ExpPython => "python",
+        ExecutionRuntime::NativeForm => "ring3",
     }
 }
 

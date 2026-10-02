@@ -6,8 +6,9 @@ drift from the kernel's call numbers or 72-byte request / 40-byte response
 layout.
 
 The caller supplies a `Transport`. Host tests can provide a deterministic
-transport now; the native transport remains intentionally unavailable until
-the user-mode call gate exists.
+transport. The kernel's bounded x86_64 capsule has a real shared-page/interrupt
+transport; connecting arbitrary Rust SDK artifacts to the native loader is the
+remaining integration step.
 
 ```rust
 use expos_sdk::{Client, Fin};

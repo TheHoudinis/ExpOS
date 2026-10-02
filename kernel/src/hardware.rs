@@ -183,7 +183,7 @@ pub fn print_kernel_features() {
         yes_no(efer & (1 << 11) != 0)
     );
     println!(
-        "kernel: 64-bit paging, PCI scan, RTC/TSC clock, COM1, PS/2 input, VBE, RTL8139, ATA PIO"
+        "kernel: 64-bit paging, TSS/IDT, PIC/PIT, CPL3 Forms, PCI, RTC/TSC, COM1, PS/2, VBE, RTL8139, ATA PIO"
     );
     println!("services: Forms, FIN resolution, persistent state journal, PIMP/DIESE, Handles");
     println!(
@@ -192,7 +192,7 @@ pub fn print_kernel_features() {
     println!("network: Ethernet, ARP, DHCP/IPv4, ICMP, UDP, DNS, TCP, HTTP and verified TLS 1.3");
     println!("radio: capability policy plus PCI Wi-Fi/Bluetooth class discovery");
     println!(
-        "pending: interrupts, general filesystem/audio, IPv6, Wi-Fi drivers and USB/Bluetooth"
+        "pending: interrupt-driven devices, dynamic page allocation, general filesystem/audio, IPv6, Wi-Fi and USB/Bluetooth"
     );
 }
 
@@ -245,8 +245,9 @@ pub fn print_memory_architecture() {
         core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
     }
     println!("paging={} long-mode=yes", yes_no(cr0 & (1 << 31) != 0));
-    println!("bootstrap map=1 GiB huge-pages  CR3={:#018X}", cr3);
-    println!("kernel stack=1 MiB  QEMU RAM default=256 MiB");
+    println!("bootstrap map=4 GiB huge-pages  CR3={:#018X}", cr3);
+    println!("Form VM=8 roots, 3 user pages/context, supervisor kernel map");
+    println!("kernel stack=1 MiB  Form interrupt stack=64 KiB  QEMU RAM default=256 MiB");
 }
 
 pub fn random_u32() -> u32 {

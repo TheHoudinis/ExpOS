@@ -27,7 +27,7 @@ CfcFin -> CFC ownership/catalog (semantic core)
           +-> checkpoint record/view semantics
           |
           v
- Form Execution Context -> cooperative scheduler admission
+ Form Execution Context -> PIT-preempted CPL3 / per-Form CR3
 ```
 
 ## Approved target architecture (not yet complete)
@@ -58,9 +58,10 @@ aware confinement, `ExpSeal` for monotonic capability reduction, and
 `ExpBudget` for per-context resource enforcement. The semantic core now has a
 deny-by-default fixed reachability scope, a broker-lifetime root-handle
 issuance cutoff with strict attenuation, and fixed-capacity checked budgets.
-Complete address-space confinement, enforcement at every driver/storage
-boundary, durable execution-context seals, and hardware context switching have
-not landed. Scheduler admission and per-context accounting have landed. The
+The x86_64 execution path now applies address-space confinement and hardware
+context switching to executable Form capsules. Enforcement at every
+driver/storage boundary, durable execution-context seals, general executable
+image loading and concurrent background dispatch have not landed. The
 official configurable-installer label is **Architect**; “expert” is only a
 legacy explanation. Native UEFI is the default boot path, while BIOS is
 retained for compatibility, recovery, and development.
@@ -76,16 +77,19 @@ retained for compatibility, recovery, and development.
   revocation cascades. The current network right is the coarse `NETWORK` bit;
   `Connect`, `DNS`, and `RawPacket` have not yet been split into distinct bits.
 - Core `ExpBudget` charges context-owned resource accounts before work and
-  rejects overflow or a soft-limit breach atomically. Scheduler dispatches
-  charge execution checkpoints. Kernel controls separately enforce live Form
+  rejects overflow or a soft-limit breach atomically. Native scheduler slices
+  charge `CpuTicks` delivered by PIT IRQ0; code that never yields is stopped at
+  the soft limit. Kernel controls separately enforce live Form
   bytes/operations, event watches, IPC reservations, and scratch pages. PIMP
   does not yet compile budget keys directly into every context's limits.
 - `execute` requires an active target-scoped Execute Handle and admits a
-  CFC/Dimension/FIN context. Kernel-native Forms retain trusted entrypoints;
-  persisted `executable` Forms run their content through bounded ExpPython
-  while their context owns the cooperative slice, then transition to `Exited`
-  with the result retained in modeled CPU state. Hardware page-table/register
-  switching and preemption remain later stages.
+  CFC/Dimension/FIN context. Kernel-native Forms retain trusted entrypoints.
+  Persisted `executable` Forms receive a unique CR3 root with supervisor-only
+  kernel mappings plus bounded user code/data/stack pages, enter CPL3 through
+  `iretq`, and communicate through requester-bound Form ABI Handles at vector
+  `0x80`. The initial capsule loader supports bounded log/exit programs and a
+  non-yielding negative-control payload; general ELF/SDK image loading remains
+  a later stage.
 - The Network Driver Form uses bounded DHCP Discover/Offer/Request/ACK over
   the existing Ethernet/IPv4/UDP path. The accepted lease supplies address,
   netmask, gateway, DNS server, server identity and duration; `dhcp` performs a
@@ -108,8 +112,9 @@ retained for compatibility, recovery, and development.
 7. ExpFS preflights and atomically publishes typed system-database records.
 8. The kernel starts a graphical Session Manager and maps the selected identity
    to Operator, Power or Guest authority before opening the command environment.
-   Polling COM1, PS/2 keyboard and PS/2 mouse input work before the interrupt
-   subsystem is ported. Commands can
+   COM1, PS/2 keyboard and PS/2 mouse remain polling devices; the native Form
+   platform separately installs a TSS/IDT, remaps the PIC and programs PIT IRQ0
+   for CPL3 preemption. Commands can
    create and inspect Forms, change lifecycle state, grant or revoke Handles,
    validate PIMP specifications, inspect system state, reboot, and shut down.
 9. A bounded primary-master ATA PIO driver loads a dedicated ExpOS state image.
@@ -129,11 +134,11 @@ retained for compatibility, recovery, and development.
     identity. ExpScope, ExpSeal, and ExpBudget provide bounded, allocation-free
     policy primitives; kernel integration remains partial.
 13. Form-native execution contexts carry CFC, Dimension, FIN, address-space
-    identity, a bounded Handle set, event queue, CPU state, and ExpBudget.
-    Cooperative scheduler admission/dispatch is live through `execute`;
-    persisted `executable` Forms now run bounded ExpPython payloads in their
-    admitted context and retain their exit result. Actual page-table/register
-    switching, interrupts, and user mode remain pending.
+    identity, a bounded Handle set, event queue, complete interrupt-frame CPU
+    state, and ExpBudget. Executable Forms switch to per-Form page tables and
+    CPL3, are sliced by PIT interrupts, resume from saved registers, and retain
+    ABI exit/fault results. `make ring3-check` proves distinct roots and stops
+    an infinite loop at its hardware-tick quota.
 14. CFC-bound recovery metadata stores an installation-baseline descriptor
     outside an up-to-eight-entry rotating checkpoint ring. The native ExpFS
     adapter now persists eight complete CFC database checkpoints, rotates the
@@ -386,8 +391,9 @@ retained for compatibility, recovery, and development.
   IPC, display, input/events, time, storage, networking, browser navigation,
   and package transactions. Rust, Go, C, and Python contracts are tested. The
   native gate validates CFC, requester, target, Dimension and operation before
-  dispatch, and Ayo installs use it; isolated implementation loading and
-  user-mode buffer grants remain pending.
+  dispatch. Ayo installs use it, and executable capsules cross it from CPL3
+  through a fixed shared page. General image loading and buffer-grant formats
+  beyond the bounded `LOG` grant remain pending.
 - PIMP accepts only known keys and typed values. DIESE never silently resolves
   an equal-precedence conflict.
 - ExpFS transaction commit validates all staged records and capacity before

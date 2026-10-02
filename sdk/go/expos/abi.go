@@ -28,6 +28,8 @@ const (
 	CallTimeNow            Call = 4
 	CallIPCSend            Call = 5
 	CallIPCReceive         Call = 6
+	CallExecutionYield     Call = 7
+	CallExecutionExit      Call = 8
 	CallSurfaceCreate      Call = 16
 	CallBufferAttach       Call = 17
 	CallSurfaceDamage      Call = 18
@@ -109,6 +111,16 @@ func (client Client) TimeNow(ctx context.Context, clock uint64) (uint64, error) 
 	return response.Values[0], err
 }
 
+func (client Client) Yield(ctx context.Context) error {
+	_, err := client.invoke(ctx, CallExecutionYield, [6]uint64{})
+	return err
+}
+
+func (client Client) Exit(ctx context.Context, result uint64) error {
+	_, err := client.invoke(ctx, CallExecutionExit, [6]uint64{result})
+	return err
+}
+
 func (client Client) invoke(ctx context.Context, call Call, arguments [6]uint64) (Response, error) {
 	if client.Transport == nil || client.Caller.IsZero() {
 		return Response{}, errors.New("expos: invalid client identity or transport")
@@ -183,7 +195,8 @@ func (emulator *Emulator) Call(_ context.Context, request Request) (Response, er
 		return Response{Status: StatusOK, Values: [4]uint64{emulator.CommitSequence}}, nil
 	case CallBrowserNavigate, CallLog, CallFormResolve, CallHandleAuthorize, CallTimeNow,
 		CallIPCSend, CallIPCReceive, CallEventPoll, CallStorageRead, CallStorageWrite,
-		CallNetworkSend, CallNetworkReceive, CallPackageTransaction:
+		CallNetworkSend, CallNetworkReceive, CallPackageTransaction, CallExecutionYield,
+		CallExecutionExit:
 		return Response{Status: StatusOK}, nil
 	default:
 		return Response{Status: StatusUnsupported}, nil

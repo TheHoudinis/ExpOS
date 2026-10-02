@@ -21,9 +21,9 @@ GENESIS_ISO := $(BUILD)/ExpOS-0.9-x86_64.iso
 OVMF_CODE  ?= /usr/share/edk2/x64/OVMF_CODE.4m.fd
 OVMF_VARS  ?= /usr/share/edk2/x64/OVMF_VARS.4m.fd
 
-.PHONY: all iso genesis-iso genesis-check genesis-display-check run-genesis test check display-check session-check network-check internet-check https-check search-check wikipedia-check persistence-check run debug clean legacy-alpha-check run-alpha ayo sdk rust-sdk go-sdk c-sdk python-sdk sdk-cli-check kernel-build genesis-kernel-build
+.PHONY: all iso genesis-iso genesis-check genesis-display-check run-genesis test check display-check session-check network-check internet-check https-check search-check wikipedia-check persistence-check ring3-check run debug clean legacy-alpha-check run-alpha ayo sdk rust-sdk go-sdk c-sdk python-sdk sdk-cli-check kernel-build genesis-kernel-build
 
-all: test check display-check session-check network-check persistence-check ayo sdk python-runtime-check python-check budget-check uefi-check bootmode-check startup-check
+all: test check display-check session-check network-check persistence-check ayo sdk python-runtime-check python-check budget-check ring3-check uefi-check bootmode-check startup-check
 
 test:
 	cargo test --workspace
@@ -127,6 +127,9 @@ uefi-check: $(UEFI_BOOT_IMG)
 	grep -q 'EXPOS_UEFI_HANDOFF version=1 boot_services=exited' $(BUILD)/uefi-serial.log
 	grep -q 'EXPOS_BOOT_OK' $(BUILD)/uefi-serial.log
 	grep -q 'EXPOS_LOGIN_OK user=operator' $(BUILD)/uefi-serial.log
+	grep -q 'hello from UEFI Ring 3' $(BUILD)/uefi-serial.log
+	grep -q 'EXPOS_RING3_ENTER context=.*fin=.*cr3=' $(BUILD)/uefi-serial.log
+	grep -q 'EXPOS_FORM_EXITED context=.*result=0 ring=3' $(BUILD)/uefi-serial.log
 	grep -q 'EXPOS_COMMAND_OK shutdown' $(BUILD)/uefi-serial.log
 	@echo ">>> EXPOS NATIVE UEFI TEST PASSED <<<"
 
@@ -456,6 +459,9 @@ python-runtime-check:
 
 budget-check: $(ISO)
 	python3 tests/check-budget.py
+
+ring3-check: $(ISO)
+	python3 tests/check-ring3.py
 
 python-check: $(ISO)
 	set +e; timeout 30 $(QEMU) -device isa-debug-exit,iobase=0xf4,iosize=0x04 -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-python-input.txt > $(BUILD)/python-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33

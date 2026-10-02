@@ -112,6 +112,25 @@ impl CapabilityBroker {
         self.cfc
     }
 
+    /// Find an already-issued live Handle for a loader or execution context.
+    /// The full authorization path is still applied; this does not create
+    /// ambient authority and is primarily used to reuse sealed launch Handles.
+    pub fn find_authorized(
+        &self,
+        requester: Fin,
+        target: Fin,
+        dimension: Fin,
+        operations: Operations,
+        tick: u64,
+    ) -> Option<FormHandle> {
+        self.handles.iter().flatten().copied().find(|handle| {
+            handle.requester == requester
+                && self
+                    .authorize_requester(handle.id, requester, target, dimension, operations, tick)
+                    .is_ok()
+        })
+    }
+
     /// Restore a Handle from an authenticated/persisted capability record.
     /// Runtime authority is not consulted because this is not ambient
     /// issuance; structural validity and the complete parent chain are still

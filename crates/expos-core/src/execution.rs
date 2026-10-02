@@ -1,4 +1,4 @@
-//! Form-native execution contexts and cooperative scheduling semantics.
+//! Form-native execution contexts and preemptive scheduling semantics.
 //!
 //! This module intentionally models what the scheduler owns without importing
 //! PID/UID/file-descriptor concepts. Platform code remains responsible for
@@ -90,6 +90,9 @@ pub enum ExecutionRuntime {
     KernelNative,
     /// Content is executed by the bounded in-kernel ExpPython runtime.
     ExpPython,
+    /// Machine code executes at CPL3 in a Form-owned address space and enters
+    /// the kernel only through the Form ABI gate.
+    NativeForm,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,6 +124,8 @@ pub struct ExecutionContext {
     runtime: ExecutionRuntime,
     state: ExecutionState,
     dispatches: u64,
+    preemptions: u64,
+    cpu_ticks: u64,
 }
 
 impl ExecutionContext {
@@ -148,6 +153,8 @@ impl ExecutionContext {
             runtime: ExecutionRuntime::KernelNative,
             state: ExecutionState::Ready,
             dispatches: 0,
+            preemptions: 0,
+            cpu_ticks: 0,
         })
     }
 
@@ -185,6 +192,14 @@ impl ExecutionContext {
 
     pub const fn dispatches(&self) -> u64 {
         self.dispatches
+    }
+
+    pub const fn preemptions(&self) -> u64 {
+        self.preemptions
+    }
+
+    pub const fn cpu_ticks(&self) -> u64 {
+        self.cpu_ticks
     }
 
     pub const fn budget(&self) -> &ExpBudget<ExecutionIdentity> {
@@ -316,9 +331,8 @@ impl Scheduler {
         }
     }
 
-    /// Select the next ready Form context and account one dispatch checkpoint.
-    /// A context that exhausts its budget is moved to `BudgetBlocked` and the
-    /// search continues without making it current.
+    /// Select the next ready Form context. CPU budget is charged only from
+    /// platform timer interrupts, never from a cooperative dispatch count.
     pub fn dispatch_next(&mut self) -> Result<u32, ExecutionError> {
         if let Some(slot) = self.current_slot.take() {
             if let Some(current) = self.contexts[slot].as_mut() {
@@ -336,14 +350,6 @@ impl Scheduler {
             if context.state != ExecutionState::Ready {
                 continue;
             }
-            if context
-                .budget
-                .charge(ResourceKind::ExecutionCheckpoints, 1)
-                .is_err()
-            {
-                context.state = ExecutionState::BudgetBlocked;
-                continue;
-            }
             context.state = ExecutionState::Running;
             context.dispatches = context.dispatches.saturating_add(1);
             self.current_slot = Some(slot);
@@ -351,6 +357,98 @@ impl Scheduler {
             return Ok(context.id);
         }
         Err(ExecutionError::NotRunnable)
+    }
+
+    /// Resume one selected ready context after an interrupt-driven slice.
+    pub fn resume(&mut self, id: u32) -> Result<(), ExecutionError> {
+        let slot = self
+            .contexts
+            .iter()
+            .position(|entry| entry.as_ref().is_some_and(|context| context.id == id))
+            .ok_or(ExecutionError::UnknownContext)?;
+        if self.contexts[slot]
+            .as_ref()
+            .is_none_or(|context| context.state != ExecutionState::Ready)
+        {
+            return Err(ExecutionError::NotRunnable);
+        }
+        if let Some(current_slot) = self.current_slot.take() {
+            if let Some(current) = self.contexts[current_slot].as_mut() {
+                if current.state == ExecutionState::Running {
+                    current.state = ExecutionState::Ready;
+                }
+            }
+        }
+        let context = self.contexts[slot].as_mut().unwrap();
+        context.state = ExecutionState::Running;
+        context.dispatches = context.dispatches.saturating_add(1);
+        self.current_slot = Some(slot);
+        Ok(())
+    }
+
+    /// Account a slice measured by the hardware timer and retain the complete
+    /// user CPU boundary state needed for diagnostics/resumption.
+    pub fn preempt(
+        &mut self,
+        id: u32,
+        cpu: CpuState,
+        ticks: u64,
+        budget_exhausted: bool,
+    ) -> Result<(), ExecutionError> {
+        let is_current = self.current().is_some_and(|current| current.id == id);
+        let context = self.context_mut(id).ok_or(ExecutionError::UnknownContext)?;
+        if context.state != ExecutionState::Running {
+            return Err(ExecutionError::NotRunnable);
+        }
+        if context
+            .budget
+            .charge(ResourceKind::CpuTicks, ticks)
+            .is_err()
+        {
+            context.state = ExecutionState::BudgetBlocked;
+        } else {
+            context.cpu_ticks = context.cpu_ticks.saturating_add(ticks);
+            context.preemptions = context.preemptions.saturating_add(1);
+            context.cpu = cpu;
+            context.state = if budget_exhausted {
+                ExecutionState::BudgetBlocked
+            } else {
+                ExecutionState::Ready
+            };
+        }
+        if is_current {
+            self.current_slot = None;
+        }
+        Ok(())
+    }
+
+    /// Charge the final timer-measured slice before publishing an exit result.
+    pub fn finish_slice(
+        &mut self,
+        id: u32,
+        cpu: CpuState,
+        ticks: u64,
+        result: u64,
+    ) -> Result<(), ExecutionError> {
+        let is_current = self.current().is_some_and(|current| current.id == id);
+        let context = self.context_mut(id).ok_or(ExecutionError::UnknownContext)?;
+        if ticks != 0
+            && context
+                .budget
+                .charge(ResourceKind::CpuTicks, ticks)
+                .is_err()
+        {
+            context.state = ExecutionState::BudgetBlocked;
+        } else {
+            context.cpu_ticks = context.cpu_ticks.saturating_add(ticks);
+            context.cpu = cpu;
+            context.cpu.accumulator = result;
+            context.state = ExecutionState::Exited;
+        }
+        if is_current {
+            self.current_slot = None;
+        }
+        Ok(())
     }
 
     pub fn wait(&mut self, id: u32) -> Result<(), ExecutionError> {
@@ -422,8 +520,14 @@ mod tests {
             .unwrap();
         assert_eq!(scheduler.dispatch_next(), Ok(first));
         assert_eq!(scheduler.dispatch_next(), Ok(second));
-        assert_eq!(scheduler.dispatch_next(), Ok(first));
-        assert_eq!(scheduler.dispatch_next(), Ok(second));
+        scheduler.resume(first).unwrap();
+        scheduler
+            .preempt(first, CpuState::default(), 2, true)
+            .unwrap();
+        scheduler.resume(second).unwrap();
+        scheduler
+            .preempt(second, CpuState::default(), 2, true)
+            .unwrap();
         assert_eq!(scheduler.dispatch_next(), Err(ExecutionError::NotRunnable));
         assert_eq!(
             scheduler.context(first).unwrap().state(),
@@ -433,6 +537,8 @@ mod tests {
             scheduler.context(second).unwrap().state(),
             ExecutionState::BudgetBlocked
         );
+        assert_eq!(scheduler.context(first).unwrap().cpu_ticks(), 2);
+        assert_eq!(scheduler.context(first).unwrap().preemptions(), 1);
     }
 
     #[test]

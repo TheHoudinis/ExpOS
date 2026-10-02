@@ -2,4 +2,8 @@
 operator
 expos
 status
+mkform UefiRing executable
+write UefiRing native:log hello from UEFI Ring 3
+grant UefiRing execute
+execute UefiRing
 shutdown

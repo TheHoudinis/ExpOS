@@ -16,11 +16,12 @@ ExpOS is the Form-native operating system described by
 - core ExpScope deny-by-default reachability, broker-lifetime ExpSeal
   root-handle cutoff with strictly attenuated delegation, and fixed-capacity
   ExpBudget accounting;
-- Form-native execution contexts and cooperative scheduler admission keyed by
-  CFC/Dimension/FIN, carrying an address-space descriptor, Handle set,
-  ExpBudget, event queue, memory/CPU state, runtime and dispatch accounting;
-  persisted `executable` Forms run bounded ExpPython payloads while their FIN
-  context owns the cooperative scheduler slice and retain an exit result;
+- Form-native execution contexts and interrupt-driven scheduler slices keyed by
+  CFC/Dimension/FIN: persisted `executable` Forms receive distinct CR3 roots,
+  supervisor-isolated kernel mappings, user code/data/stack pages, complete
+  register state, requester-bound Handles and a hardware-tick ExpBudget; the
+  x86_64 loader enters CPL3 with `iretq`, accepts only Form ABI traffic through
+  a DPL3 interrupt gate, and forcibly stops non-yielding code at quota;
 - bounded Form-native kernel controls: typed tunables, signal/timer/resource
   readiness watches, and shell-runtime-local resource accounting with DIESE-gated
   mutation;
@@ -130,11 +131,12 @@ so a newly created Form and its content survive a reboot without a Form-specific
 persistence path. Accounts and settings now load from and commit through the
 same ExpFS current-state transaction; EXPOST03 is only a boot-time migration
 fallback. Typed execution contexts now reach scheduler admission and
-per-context budget accounting. Native checkpoint capture/restore and the
+per-context hardware-tick budget accounting. Native checkpoint capture/restore and the
 Architect Genesis construction path, Basic key wrapping, AEAD ExpFS and the
-protected installation-baseline restore path are live; real page-table
-switching, interrupts/preemption, and user-mode CPU context switching remain
-implementation work.
+protected installation-baseline restore path are live. General executable
+image/ELF loading, concurrent background Form dispatch, a dynamic physical-page
+allocator and complete interrupt-driven device delivery remain implementation
+work.
 
 The 32-bit Diamond II source remains isolated under `legacy/alpha32/` as a
 buildable migration reference.
@@ -156,6 +158,7 @@ make run-uefi       # boot the native firmware path with OVMF
 make bootmode-check # verify single-user account/service restrictions
 make startup-check  # verify visible UEFI/BIOS screens and real keyboard login
 make python-check   # verify Python scripts and limits inside the kernel
+make ring3-check    # verify CPL3, per-Form CR3, ABI calls and timer quotas
 make iso            # build the fallback build/expos.iso
 make check          # boot and exercise the command environment
 make display-check  # verify desktop and window lifecycle
@@ -423,8 +426,10 @@ Ayo. Kernel-private Rust layouts are explicitly outside the ABI.
 The project driver supports fixed Rust, Go, and C recipes and emits a
 deterministic Ayo tar artifact plus SHA-256 receipt. `run` is a host-development
 run. The kernel now dispatches `PACKAGE_TRANSACTION` through the frozen native
-call gate and a requester-owned Package Handle; a general isolated third-party
-binary loader and user-mode buffer-grant transport remain unfinished.
+call gate and a requester-owned Package Handle. Its bounded executable capsule
+crosses the same gate from CPL3 through a context-owned shared page; general
+third-party image loading and grants for other buffer-bearing calls remain
+unfinished.
 
 ## Console
 

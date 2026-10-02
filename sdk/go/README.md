@@ -16,7 +16,7 @@ go test ./...
 ```
 
 The SDK is real and versioned, but the current v8 kernel does not yet load a
-standard Go executable. Native execution requires the planned Form
-implementation loader, scheduler, memory isolation and syscall entry path.
-Until those land, the emulator verifies ABI behavior and the kernel's native
-Rust Browser demonstrates the same surface protocol directly.
+standard Go executable. The native scheduler, memory isolation and Form ABI
+entry path now exist for bounded x86_64 capsules; a Go image/runtime loader is
+the missing integration. Until it lands, the emulator verifies ABI behavior
+and the kernel's native Rust Browser demonstrates the same surface protocol.

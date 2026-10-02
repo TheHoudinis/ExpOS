@@ -46,6 +46,8 @@ possible.
 | 4 | `TIME_NOW` | Read | read an approved monotonic or civil clock |
 | 5 | `IPC_SEND` | Execute | send a bounded message through an IPC Form Handle |
 | 6 | `IPC_RECEIVE` | Execute | receive a bounded message or `WOULD_BLOCK` |
+| 7 | `EXECUTION_YIELD` | Execute | end the current hardware-timed slice voluntarily |
+| 8 | `EXECUTION_EXIT` | Execute | terminate the calling Form with `arguments[0]` as its result |
 | 16 | `SURFACE_CREATE` | Display | create an ExpDisplay surface |
 | 17 | `BUFFER_ATTACH` | Display | attach a validated Buffer Handle |
 | 18 | `SURFACE_DAMAGE` | Display | mark a bounded damaged rectangle |
@@ -58,16 +60,18 @@ possible.
 | 36 | `NETWORK_RECEIVE` | Network | receive bytes or `WOULD_BLOCK` |
 | 48 | `PACKAGE_TRANSACTION` | Package | submit or inspect an Ayo transaction |
 
-Numbers 7–15, 21–31, 37–47, and 49–255 are reserved. Implementations must not
+Numbers 9–15, 21–31, 37–47, and 49–255 are reserved. Implementations must not
 assign private meanings in those ranges.
 
 The native call gate consumes this frozen request directly and validates CFC,
 requester, target, Dimension, expiry, revocation and the operation derived from
 the call number before dispatch. Ayo's `PACKAGE_TRANSACTION` is the first live
-consumer. Calls that exchange bytes use execution-context buffer grants, not
-raw kernel pointers; that grant format and isolated user-mode transport remain
-unfrozen, so buffer-bearing calls without a validated grant return
-`UNSUPPORTED`.
+consumer. Native x86_64 executable Forms use a fixed shared ABI page at a
+loader-owned user virtual address and enter an interrupt gate at vector `0x80`.
+The kernel accepts only that exact request/response location. `LOG` receives a
+bounded `(offset, length)` grant into the same context-owned page; arbitrary
+user pointers are never accepted. Buffer-bearing calls whose grant format is
+not yet defined return `UNSUPPORTED`.
 
 ## Compatibility promise
 
@@ -83,5 +87,6 @@ unfrozen, so buffer-bearing calls without a validated grant return
   ABI and must never appear in an SDK.
 
 The Rust, Go, C, and Python contract tests assert the shared call numbers and
-record sizes. Native user-mode transport is still pending and is reported as
-such; host emulators do not prove a working ring transition or sandbox.
+record sizes. `make ring3-check` is the native proof: it observes CPL3 ABI
+traffic, distinct CR3 roots, timer preemption, and forced ExpBudget exhaustion
+for a Form that never yields. Host emulators remain contract tests only.

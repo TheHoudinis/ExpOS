@@ -35,7 +35,8 @@ and prints the exact `ayo slap` command with the artifact SHA-256. The tool has
 fixed Rust, Go, and C build recipes and does not execute arbitrary package
 hooks from the manifest.
 
-`run` is explicitly a host-development run today. It does not claim native
-ExpOS execution: the kernel still needs its user-mode call gate, address-space
-switching, and implementation loader before SDK binaries can run as isolated
-native Forms.
+`run` is explicitly a host-development run today. The kernel now has a native
+CPL3 call gate, per-Form address spaces and a bounded capsule loader, but the
+project driver does not yet package Rust/Go/C output into that native image
+format. Host execution therefore does not claim that an SDK binary ran inside
+ExpOS.

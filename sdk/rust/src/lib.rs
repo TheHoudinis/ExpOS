@@ -3,8 +3,9 @@
 //! Rust client surface for the frozen ExpOS Form ABI v1.
 //!
 //! A transport is deliberately supplied by the execution environment. Host
-//! tests can use an emulator; native Forms will receive a kernel transport
-//! only after the user-mode loader and call gate land.
+//! tests can use an emulator. The kernel's bounded x86_64 capsule uses a
+//! validated shared-page/interrupt transport; general Rust artifact loading is
+//! a separate integration layer.
 
 pub use expos_core::{
     AbiCall as Call, AbiRequest as Request, AbiResponse as Response, AbiStatus as Status, Fin,
@@ -71,6 +72,15 @@ impl<T: Transport> Client<T> {
 
     pub fn time_now(&mut self, clock: u64) -> Result<u64, Error<T::Error>> {
         Ok(self.invoke(Call::TimeNow, [clock, 0, 0, 0, 0, 0])?.values[0])
+    }
+
+    pub fn yield_execution(&mut self) -> Result<(), Error<T::Error>> {
+        self.invoke(Call::ExecutionYield, [0; 6]).map(|_| ())
+    }
+
+    pub fn exit_execution(&mut self, result: u64) -> Result<(), Error<T::Error>> {
+        self.invoke(Call::ExecutionExit, [result, 0, 0, 0, 0, 0])
+            .map(|_| ())
     }
 
     pub fn create_surface(

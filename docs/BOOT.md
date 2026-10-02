@@ -13,7 +13,8 @@ does not define the primary boot architecture.
 
 ```sh
 make run-uefi      # boot with OVMF and the existing runtime state image
-make uefi-check    # firmware handoff, login and shutdown
+make uefi-check    # firmware handoff, login, CPL3 Form launch and shutdown
+make ring3-check   # CR3 isolation, supervisor fault and PIT quota proof
 make bootmode-check # reject Guest in single-user, test service restrictions
 make startup-check # capture visible UEFI/BIOS screens and exercise PS/2 login
 make genesis-iso   # native UEFI installer at build/ExpOS-0.9-x86_64.iso
@@ -68,8 +69,11 @@ consume arbitrary conventional memory from the firmware map. GOP information
 is recorded, but the desktop still needs the existing Bochs/QEMU framebuffer
 driver. The driver discovers its PCI BAR and checks the mapped address and
 reported video memory before drawing; it does not assume the BIOS BAR address.
-Hardware drivers, interrupts and memory isolation retain their current
-limitations. This build is unsigned and does not implement Secure Boot.
+Executable Forms have static per-context page-table arenas, supervisor-only
+kernel mappings, a TSS/IDT, PIT preemption and a bounded DPL3 ABI gate. General
+physical-page allocation, complete exception coverage and interrupt-driven
+device drivers retain their current limitations. This build is unsigned and
+does not implement Secure Boot.
 
 Genesis now has a separate native-UEFI installation build. It offers encrypted
 Basic and explicitly unencrypted Architect whole-disk choices. It writes

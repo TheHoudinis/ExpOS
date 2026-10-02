@@ -9,7 +9,7 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ResourceKind {
-    ExecutionCheckpoints = 0,
+    CpuTicks = 0,
     HeapPages = 1,
     IpcMessages = 2,
     IpcBytes = 3,
@@ -23,7 +23,7 @@ pub const RESOURCE_KIND_COUNT: usize = 8;
 
 impl ResourceKind {
     pub const ALL: [Self; RESOURCE_KIND_COUNT] = [
-        Self::ExecutionCheckpoints,
+        Self::CpuTicks,
         Self::HeapPages,
         Self::IpcMessages,
         Self::IpcBytes,
@@ -244,10 +244,7 @@ mod tests {
     fn budget_is_keyed_by_its_execution_context() {
         let budget = ExpBudget::new((11_u32, 7_u32), ceilings());
         assert_eq!(budget.context(), &(11, 7));
-        assert_eq!(
-            budget.account(ResourceKind::ExecutionCheckpoints).ceiling(),
-            100
-        );
+        assert_eq!(budget.account(ResourceKind::CpuTicks).ceiling(), 100);
         assert_eq!(budget.account(ResourceKind::FormBytes).ceiling(), 800);
     }
 

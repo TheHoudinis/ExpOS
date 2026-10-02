@@ -16,6 +16,9 @@ EFER_LME    equ 1 << 8
 
 CODE_SEG    equ 0x08
 DATA_SEG    equ 0x10
+USER_DATA_SEG equ 0x18
+USER_CODE_SEG equ 0x20
+TSS_SEG       equ 0x28
 
 ; ---------------------------------------------------------------------------
 ; Multiboot2 header (must live in the first 32 KiB of the image, 8-aligned)
@@ -55,6 +58,42 @@ stack_bottom:
         resb 1048576
 stack_top:
 
+; Ring-3 interrupts always enter on this kernel-owned stack through the TSS.
+; A Form can corrupt its own user stack without controlling an interrupt frame.
+align 16
+form_interrupt_stack_bottom:
+        resb 65536
+form_interrupt_stack_top:
+
+align 16
+tss64:
+        resd 1                         ; reserved
+        resq 1                         ; RSP0 (installed below)
+        resq 2                         ; RSP1/RSP2
+        resq 8                         ; reserved + IST1..IST7
+        resq 1                         ; reserved
+        resw 1                         ; reserved
+        resw 1                         ; I/O bitmap offset
+tss64_end:
+
+align 8
+form_kernel_rsp:
+        resq 1
+form_kernel_cr3:
+        resq 1
+form_kernel_rbx:
+        resq 1
+form_kernel_rbp:
+        resq 1
+form_kernel_r12:
+        resq 1
+form_kernel_r13:
+        resq 1
+form_kernel_r14:
+        resq 1
+form_kernel_r15:
+        resq 1
+
 ; ---------------------------------------------------------------------------
 ; Minimal 64-bit GDT
 ; ---------------------------------------------------------------------------
@@ -64,6 +103,11 @@ gdt64:
         dq 0                            ; null descriptor
         dq 0x00209A0000000000           ; 0x08: kernel code (L=1, D=0)
         dq 0x0000920000000000           ; 0x10: kernel data
+        dq 0x0000F20000000000           ; 0x18: user data (DPL=3)
+        dq 0x0020FA0000000000           ; 0x20: user code (DPL=3, L=1)
+gdt64_tss:
+        dq 0                            ; 0x28: 64-bit available TSS (low)
+        dq 0                            ;       base bits 32..63 (high)
 gdt64_end:
 
 gdt64_desc:
@@ -209,7 +253,7 @@ _uefi_start:
         mov gs, ax
         mov rax, pdpt_table
         or rax, 3
-        mov [pml4_table], rax
+        mov [rel pml4_table], rax
         xor ecx, ecx
 .native_pdpt:
         mov rax, rcx
@@ -236,5 +280,192 @@ _uefi_start:
 .native_halt:
         hlt
         jmp .native_halt
+
+; ---------------------------------------------------------------------------
+; x86_64 Form execution boundary
+; ---------------------------------------------------------------------------
+
+; Install the long-mode TSS descriptor and load TR. The IDT itself is owned by
+; Rust because its entries are easier to audit there.
+global expos_arch_install_form_tss
+expos_arch_install_form_tss:
+        cli
+        lea rax, [rel form_interrupt_stack_top]
+        mov [rel tss64 + 4], rax
+        mov word [rel tss64 + 102], tss64_end - tss64
+
+        lea rax, [rel tss64]
+        mov rcx, rax
+        and rax, 0xFFFFFF
+        shl rax, 16
+        or rax, (tss64_end - tss64 - 1)
+        mov rdx, 0x89
+        shl rdx, 40
+        or rax, rdx
+        lea rcx, [rel tss64]
+        mov rdx, rcx
+        shr rdx, 24
+        and rdx, 0xFF
+        shl rdx, 56
+        or rax, rdx
+        mov [rel gdt64_tss], rax
+        shr rcx, 32
+        mov [rel gdt64_tss + 8], ecx
+        lgdt [rel gdt64_desc]
+        mov ax, TSS_SEG
+        ltr ax
+        ret
+
+; void expos_arch_enter_form(u64 cr3, const TrapFrame *state)
+; The eventual interrupt exit jumps back to the return address on this saved
+; kernel stack, so this ordinary-looking call encloses the complete CPL3 slice.
+global expos_arch_enter_form
+expos_arch_enter_form:
+        cli
+        mov [rel form_kernel_rsp], rsp
+        mov [rel form_kernel_rbx], rbx
+        mov [rel form_kernel_rbp], rbp
+        mov [rel form_kernel_r12], r12
+        mov [rel form_kernel_r13], r13
+        mov [rel form_kernel_r14], r14
+        mov [rel form_kernel_r15], r15
+        mov rax, cr3
+        mov [rel form_kernel_cr3], rax
+        mov cr3, rdi
+
+        ; Hardware iret frame: SS, RSP, RFLAGS, CS, RIP.
+        push qword (USER_DATA_SEG | 3)
+        push qword [rsi + 144]
+        mov rax, [rsi + 136]
+        or rax, 0x202                   ; reserved bit plus IF
+        push rax
+        push qword (USER_CODE_SEG | 3)
+        push qword [rsi + 120]
+
+        ; Restore the user register image. RSP is supplied by the iret frame.
+        mov r15, [rsi + 0]
+        mov r14, [rsi + 8]
+        mov r13, [rsi + 16]
+        mov r12, [rsi + 24]
+        mov r11, [rsi + 32]
+        mov r10, [rsi + 40]
+        mov r9,  [rsi + 48]
+        mov r8,  [rsi + 56]
+        mov rdi, [rsi + 72]
+        mov rbp, [rsi + 80]
+        mov rdx, [rsi + 88]
+        mov rcx, [rsi + 96]
+        mov rbx, [rsi + 104]
+        mov rax, [rsi + 112]
+        mov rsi, [rsi + 64]
+        iretq
+
+; TrapFrame layout shared with kernel/src/form_runtime.rs. Push every general
+; register so a timer slice can resume without cooperative save points.
+%macro FORM_PUSH_REGS 0
+        push rax
+        push rbx
+        push rcx
+        push rdx
+        push rbp
+        push rdi
+        push rsi
+        push r8
+        push r9
+        push r10
+        push r11
+        push r12
+        push r13
+        push r14
+        push r15
+%endmacro
+
+%macro FORM_POP_REGS 0
+        pop r15
+        pop r14
+        pop r13
+        pop r12
+        pop r11
+        pop r10
+        pop r9
+        pop r8
+        pop rsi
+        pop rdi
+        pop rbp
+        pop rdx
+        pop rcx
+        pop rbx
+        pop rax
+%endmacro
+
+extern expos_form_timer_interrupt
+extern expos_form_abi_interrupt
+extern expos_form_fault_interrupt
+
+global expos_form_timer_stub
+expos_form_timer_stub:
+        cld
+        FORM_PUSH_REGS
+        mov rdi, rsp
+        call expos_form_timer_interrupt
+        mov rdi, rax
+        mov al, 0x20
+        out 0x20, al                    ; master PIC EOI
+        test rdi, rdi
+        jnz .leave
+        FORM_POP_REGS
+        iretq
+.leave:
+        mov rax, rdi
+        jmp expos_arch_leave_form
+
+global expos_form_abi_stub
+expos_form_abi_stub:
+        cld
+        FORM_PUSH_REGS
+        mov rdi, rsp
+        call expos_form_abi_interrupt
+        test rax, rax
+        jnz expos_arch_leave_form
+        FORM_POP_REGS
+        iretq
+
+; User faults terminate only the active Form. Kernel faults are rejected by
+; the Rust side and halt rather than being mistaken for a Form exit.
+global expos_form_ud_stub
+expos_form_ud_stub:
+        mov edi, 6
+        sub rsp, 8
+        call expos_form_fault_interrupt
+        add rsp, 8
+        mov eax, 4
+        jmp expos_arch_leave_form
+
+global expos_form_gp_stub
+expos_form_gp_stub:
+        mov edi, 13
+        call expos_form_fault_interrupt
+        mov eax, 4
+        jmp expos_arch_leave_form
+
+global expos_form_pf_stub
+expos_form_pf_stub:
+        mov edi, 14
+        call expos_form_fault_interrupt
+        mov eax, 4
+        jmp expos_arch_leave_form
+
+expos_arch_leave_form:
+        cli
+        mov rdx, [rel form_kernel_cr3]
+        mov cr3, rdx
+        mov rsp, [rel form_kernel_rsp]
+        mov rbx, [rel form_kernel_rbx]
+        mov rbp, [rel form_kernel_rbp]
+        mov r12, [rel form_kernel_r12]
+        mov r13, [rel form_kernel_r13]
+        mov r14, [rel form_kernel_r14]
+        mov r15, [rel form_kernel_r15]
+        ret
 
 section .note.GNU-stack noalloc noexec nowrite progbits

@@ -17,6 +17,8 @@ class ABIContract(unittest.TestCase):
         self.assertEqual(len(response.pack()), 40)
         self.assertEqual(Response.unpack(response.pack()), response)
         self.assertEqual(Call.TIME_NOW, 4)
+        self.assertEqual(Call.EXECUTION_YIELD, 7)
+        self.assertEqual(Call.EXECUTION_EXIT, 8)
         self.assertEqual(Call.STORAGE_READ, 33)
         self.assertEqual(Call.NETWORK_RECEIVE, 36)
         self.assertEqual(Call.PACKAGE_TRANSACTION, 48)

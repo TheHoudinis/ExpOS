@@ -13,5 +13,7 @@ request.arguments[2] = 640;
 request.arguments[3] = 480;
 ```
 
-The native transport is not available until the user-mode call gate lands.
-Run `make c-sdk` from the repository root to compile the contract test.
+The x86_64 kernel has a native shared-page/interrupt transport for its bounded
+executable capsule. Loading a general C artifact into that capsule format is
+not implemented yet. Run `make c-sdk` from the repository root to compile the
+contract test.

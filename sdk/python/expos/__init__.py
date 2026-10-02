@@ -16,6 +16,8 @@ class Call(IntEnum):
     TIME_NOW = 4
     IPC_SEND = 5
     IPC_RECEIVE = 6
+    EXECUTION_YIELD = 7
+    EXECUTION_EXIT = 8
     SURFACE_CREATE = 16
     BUFFER_ATTACH = 17
     SURFACE_DAMAGE = 18
@@ -143,6 +145,12 @@ class Client:
 
     def time_now(self, clock: int = 0) -> int:
         return self.invoke(Call.TIME_NOW, clock).values[0]
+
+    def yield_execution(self):
+        return self.invoke(Call.EXECUTION_YIELD)
+
+    def exit_execution(self, result: int = 0):
+        return self.invoke(Call.EXECUTION_EXIT, result)
 
     def ipc_send(self, channel: int, buffer: int, length: int):
         return self.invoke(Call.IPC_SEND, channel, buffer, length)
