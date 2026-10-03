@@ -15,9 +15,10 @@ does not define the primary boot architecture.
 make run-uefi      # boot with OVMF and the existing runtime state image
 make uefi-check    # firmware handoff, login, CPL3 Form launch and shutdown
 make ring3-check   # CR3 isolation, supervisor fault and PIT quota proof
+make modern-hardware-check # NVMe/AHCI persistence and USB-only HID reports
 make bootmode-check # reject Guest in single-user, test service restrictions
 make startup-check # capture visible UEFI/BIOS screens and exercise PS/2 login
-make genesis-iso   # native UEFI installer at build/ExpOS-0.9-x86_64.iso
+make genesis-iso   # native UEFI installer at build/ExpOS-v9-x86_64.iso
 make genesis-check # install to a blank disk, boot it, log in, shut down
 make genesis-display-check # prove the Genesis prompt is visible and interactive
 make run-genesis   # visible installer with safe virtual-media ejection/reboot
@@ -65,10 +66,10 @@ and service policy, not concurrent processes or multiple simultaneous sessions.
 The handoff ABI v1 includes the map descriptor size/version and GOP metadata.
 It is an implementation interface, not a finalized CFC disk or encryption
 format. The allocator currently uses its reserved kernel heap; it does not yet
-consume arbitrary conventional memory from the firmware map. GOP information
-is recorded, but the desktop still needs the existing Bochs/QEMU framebuffer
-driver. The driver discovers its PCI BAR and checks the mapped address and
-reported video memory before drawing; it does not assume the BIOS BAR address.
+consume arbitrary conventional memory from the firmware map. GOP address,
+size, geometry, stride and RGB/BGR order are validated and used directly by the
+desktop, login and graphical console. BIOS fallback discovers the Bochs/QEMU
+framebuffer PCI BAR and checks mapped bounds before drawing.
 Executable Forms have static per-context page-table arenas, supervisor-only
 kernel mappings, a TSS/IDT, PIT preemption and a bounded DPL3 ABI gate. General
 physical-page allocation, complete exception coverage and interrupt-driven
@@ -89,8 +90,8 @@ installation baseline. `make genesis-check` proves ISO install, redundant
 metadata, baseline creation, ISO-free disk boot, Operator login, and shutdown.
 Boot recovers from a valid backup manifest, but conflicting or wholly damaged
 installed manifests fail closed instead of selecting the development identity.
-The installer switches from OVMF GOP output to ExpOS's validated Bochs
-framebuffer and mirrors its bounded text UI there. The display check rejects a
+The installer keeps OVMF GOP output and mirrors its bounded text UI directly
+into that firmware framebuffer. The display check rejects a
 stale firmware frame, captures both mode-selection screens, and injects input
 through QEMU's PS/2 keyboard rather than through serial.
 Installed UEFI boot activates the same bounded console before CFC key unwrap,
@@ -105,6 +106,7 @@ database is authenticated-encrypted and boot performs password-driven key
 unwrap before decoding ExpFS. Its protected immutable baseline is encrypted in
 an independent disk/nonce domain and cannot be replaced by normal checkpoint
 rotation or restore.
-The installer currently sees only the ATA primary master and does not enumerate model
-or serial identities, so it is not yet approved for physical-disk use. The
-automated check modifies only its generated blank image.
+The installer can use NVMe, AHCI SATA or the ATA primary master, but selects by
+probe order and does not enumerate model, serial or stable identities. It is
+therefore not approved for physical-disk use. The automated Genesis check
+modifies only its generated blank image.

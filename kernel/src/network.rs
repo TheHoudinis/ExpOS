@@ -455,6 +455,13 @@ impl NetworkStack {
         compiler_fence(Ordering::SeqCst);
 
         self.initialized = true;
+        if let Some(function) = crate::pci::function(crate::pci::Location {
+            bus: device.bus,
+            slot: device.slot,
+            function: 0,
+        }) {
+            let _ = crate::asl::claim(function, crate::asl::Owner::ExpNetwork);
+        }
         true
     }
 

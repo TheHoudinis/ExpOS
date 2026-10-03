@@ -15,7 +15,7 @@ lets ordinary Go tooling test Form clients now:
 go test ./...
 ```
 
-The SDK is real and versioned, but the current v8 kernel does not yet load a
+The SDK is real and versioned, but the current v9 kernel does not yet load a
 standard Go executable. The native scheduler, memory isolation and Form ABI
 entry path now exist for bounded x86_64 capsules; a Go image/runtime loader is
 the missing integration. Until it lands, the emulator verifies ABI behavior

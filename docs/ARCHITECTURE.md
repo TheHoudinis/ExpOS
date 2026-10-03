@@ -10,6 +10,9 @@ native UEFI / BIOS compatibility fallback
   x86_64 bootstrap kernel
           |
           v
+  ASL v1 inventory -> exclusive driver claim
+          |
+          v
 CfcFin -> CFC ownership/catalog (semantic core)
           |
           v
@@ -66,6 +69,22 @@ official configurable-installer label is **Architect**; “expert” is only a
 legacy explanation. Native UEFI is the default boot path, while BIOS is
 retained for compatibility, recovery, and development.
 
+### ASL v1 and driver ownership
+
+After the Form interrupt platform is established, the kernel inventories the
+validated firmware framebuffer and PCI functions into 32 bounded ASL records.
+Display, AHCI, NVMe, xHCI and Ethernet functions are classified without vendor
+coupling. ExpDisplay, ExpStorage, ExpUSB and ExpNetwork can each claim a
+matching PCI location once; a different owner cannot replace that claim. The
+`asl` command reports boot-local IDs, locations, owners and MSI/MSI-X support
+without disclosing BAR addresses. See `ASL_V1.md` for the exact first contract.
+
+PCI MSI/MSI-X discovery, vectors `0x40..0x7f`, message construction and the
+programming path have landed. Drivers currently reserve but do not arm those
+messages because device-specific IDT completion handlers have not landed; NVMe,
+AHCI, xHCI and RTL8139 therefore retain bounded polling. SMP is deliberately
+outside this milestone.
+
 ### Current enforcement and execution flow
 
 - `ExpScope` snapshots the owning CFC's Form set when a context is constructed.
@@ -112,12 +131,12 @@ retained for compatibility, recovery, and development.
 7. ExpFS preflights and atomically publishes typed system-database records.
 8. The kernel starts a graphical Session Manager and maps the selected identity
    to Operator, Power or Guest authority before opening the command environment.
-   COM1, PS/2 keyboard and PS/2 mouse remain polling devices; the native Form
+   COM1, PS/2 and xHCI boot-HID input remain polling devices; the native Form
    platform separately installs a TSS/IDT, remaps the PIC and programs PIT IRQ0
    for CPL3 preemption. Commands can
    create and inspect Forms, change lifecycle state, grant or revoke Handles,
    validate PIMP specifications, inspect system state, reboot, and shut down.
-9. A bounded primary-master ATA PIO driver loads a dedicated ExpOS state image.
+9. Bounded NVMe, AHCI SATA or ATA-PIO drivers load a dedicated ExpOS state image.
    The native ExpFS adapter recovers the newest valid of two CRC-protected CFC
    database snapshots and commits the inactive payload before its header. A
    snapshot contains arbitrary Form identity/content, revisions, Dimensions,
@@ -209,12 +228,12 @@ retained for compatibility, recovery, and development.
   `FrameDone` is emitted only after the compositor crosses the framebuffer
   presentation boundary; queue pressure defers rather than drops it. Focus,
   configure, frame-complete, key and pointer events are routed back to the
-  owning FIN. The software renderer can program 640x480, 1280x720 or 1920x1080 XRGB
-  scanout in QEMU standard VGA's 16 MiB linear framebuffer BAR. The bootstrap
-  maps RAM and PCI windows below 4 GiB. ExpDisplay discovers the firmware-assigned
-  VGA BAR and checks its mapped bounds and the selected geometry, stride and
-  double-buffer byte count against the reported video memory before the
-  first framebuffer write. When the adapter accepts a virtual height of twice
+  owning FIN. Native UEFI scanout consumes the validated GOP address, size,
+  geometry, stride and RGB/BGR order without reprogramming a Bochs device.
+  BIOS fallback can program 640x480, 1280x720 or 1920x1080 XRGB scanout in
+  QEMU standard VGA's 16 MiB linear framebuffer BAR. The bootstrap maps RAM
+  and PCI windows below 4 GiB. ExpDisplay checks mapped bounds and geometry
+  before the first framebuffer write. On the Bochs path, when the adapter accepts a virtual height of twice
   the visible height, rendering targets the hidden page and presentation flips
   the VBE Y offset. Every flip is read back from hardware; if the adapter
   rejects it, the completed damage is copied to the prior visible page and
@@ -338,6 +357,17 @@ retained for compatibility, recovery, and development.
   snapshots; unencrypted Architect/development records retain CRC. The
   protected installation baseline is stored outside checkpoint rotation and
   uses its own disk/nonce domain.
+- ExpStorage probes NVMe, AHCI SATA and legacy ATA-PIO in that order behind one
+  512-byte sector API. The NVMe path constructs admin and I/O submission and
+  completion queues; AHCI constructs command-list/FIS/table DMA state and uses
+  DMA EXT plus cache flush. Both have fixed below-4-GiB DMA buffers and bounded
+  completion polls. Hotplug, multiple-namespace selection, non-512-byte NVMe
+  LBAs, IOMMU remapping and device identity UI are outside this first driver.
+- ExpUSB owns one xHCI controller, fixed command/event/control/interrupt rings
+  and up to four boot-protocol keyboard or mouse devices. It performs slot,
+  address, descriptor, configuration and endpoint commands, then translates
+  interrupt-IN reports into the same Form-native input events as PS/2. Hubs,
+  mass storage, Bluetooth and arbitrary HID report descriptors are not claimed.
 - Network is a Driver Form protected by requester-bound Network Handles and
   PIMP policy. Its current polling RTL8139 path implements Ethernet, ARP,
   DHCP-configured IPv4 with a conservative fallback, ICMP echo,
@@ -423,7 +453,7 @@ transactionally with a journal generation; the recovery catalog retains eight
 complete checkpoints. Encrypted CFCs protect these snapshots with the CFC's
 unwrapped storage key; unencrypted Architect/development state retains CRC.
 
-Alpha.12 includes the runtime-selectable 480p/720p/1080p empty-start desktop,
+ExpOS v9 includes the runtime-selectable 480p/720p/1080p empty-start desktop,
 normal case-sensitive text, Notes, a richer graphical Terminal with two-eye
 `neofetch` and window recovery, 256 theme palettes, 252 wallpaper variants, 256
 accent colors, 256 backdrop tones, four cursor themes, five font faces, three
@@ -442,4 +472,4 @@ plus bounded Form-native tunable/event/resource controls inspired by—but not
 compatible with—FreeBSD interfaces. The Diamond II build is
 also exposed through `make run-alpha`, providing a runnable migration fallback
 for networking, scheduling, ATA persistence and the games not yet redesigned
-around v8 semantics.
+around v9 semantics.

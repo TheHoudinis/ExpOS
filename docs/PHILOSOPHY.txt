@@ -1,5 +1,5 @@
 EXPOS — CORE PHILOSOPHY AND ARCHITECTURE
-Version: 7.2 Diamond II
+Version: 9.0
 Status: Living architecture specification
 
 This file defines the normative target model. It does not by itself claim that
@@ -460,7 +460,7 @@ ayo (pronounced "ey-yo") is the native package management subsystem
 of ExpOS.
 
 ayo v2.0 was originally designed for an earlier ExpOS architecture.
-For ExpOS v8, ayo v2.0 is redesigned internally to fully integrate
+For ExpOS v9, ayo v2.0 is redesigned internally to fully integrate
 with the Form-based architecture, while preserving its original
 command philosophy and user interaction model.
 
@@ -650,7 +650,7 @@ ExpOS architecture.
 
 12. ASL
 
-ASL means Abstracted Silicon Layer: a kernel-level architecture abstraction and capability layer. It identifies hardware capabilities and supports architecture-independent Forms. The Genesis/CFC design context in docs/GENESIS_DESIGN.txt supplies this definition; exact cross-architecture interfaces and implementation remain to be specified.
+ASL means Abstracted Silicon Layer: a kernel-level architecture abstraction and capability layer. It identifies hardware capabilities and supports architecture-independent Forms. ASL v1 now defines a bounded firmware/PCI inventory, exclusive kernel-driver claims and MSI/MSI-X preparation in docs/ASL_V1.md. Handle-backed driver Forms and non-x86 backends remain to be specified.
 
 13. KERNEL DIRECTION
 

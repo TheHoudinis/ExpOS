@@ -108,7 +108,7 @@ def main() -> int:
         )
 
     boot_installer = not installed(disk)
-    iso = ROOT / "build/ExpOS-0.9-x86_64.iso"
+    iso = ROOT / "build/ExpOS-v9-x86_64.iso"
     if boot_installer and not iso.is_file():
         raise SystemExit(f"missing installer ISO: {iso}")
     ovmf_code = Path(os.environ.get("OVMF_CODE", "/usr/share/edk2/x64/OVMF_CODE.4m.fd"))

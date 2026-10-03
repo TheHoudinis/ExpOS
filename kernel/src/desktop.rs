@@ -4595,19 +4595,16 @@ impl DesktopState {
     }
 
     fn terminal_print_neofetch(&mut self) {
-        self.terminal_push("        .--------.   .--------.");
-        self.terminal_push("      .'          '.'          '.");
-        self.terminal_push("     /     OOO           OOO     \\");
-        self.terminal_push("    |     O   O         O   O     |");
-        self.terminal_push("    |     O   O         O   O     |");
-        self.terminal_push("     \\     OOO    .-.    OOO     /");
-        self.terminal_push("      '._         '---'        _.'");
-        self.terminal_push("         '---------------'");
+        self.terminal_push("        ______      ____    _____");
+        self.terminal_push("       |  ____|    / __ \\  / ____|");
+        self.terminal_push("       | |__ __  _| |  | || (___");
+        self.terminal_push("       |  __|\\ \\/ /| |  | | \\___ \\");
+        self.terminal_push("       | |____>  < | |__| | ____) |");
+        self.terminal_push("       |______/_/\\_\\ \\____/ |_____/");
         self.terminal_push_parts(&["OS: ExpOS ", env!("CARGO_PKG_VERSION")]);
         self.terminal_push("Kernel: x86_64 Rust no_std");
         self.terminal_push("Model: Form-native / Dimension-oriented");
-        let current = framebuffer::current_mode();
-        self.terminal_push_parts(&["Display: ", current.label(), " XRGB8888"]);
+        self.terminal_push_parts(&["Display: ", framebuffer::active_output_label(), " XRGB8888"]);
         self.terminal_push_parts(&["Authority: ", self.session.authority_name()]);
     }
 
@@ -4619,8 +4616,7 @@ impl DesktopState {
         let user = core::str::from_utf8(&user[..user_length]).unwrap_or("unknown");
         let authority = self.session.authority_name();
         self.terminal_push_parts(&["user: ", user, " (", authority, ")"]);
-        let mode = framebuffer::current_mode();
-        self.terminal_push_parts(&["display: ", mode.label()]);
+        self.terminal_push_parts(&["display: ", framebuffer::active_output_label()]);
         let connectivity = radio::snapshot();
         self.terminal_push_parts(&[
             "network: ",
@@ -7342,7 +7338,7 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 3,
                 "Active output",
                 "Double-buffered XRGB8888 ExpDisplay composition",
-                framebuffer::current_mode().label(),
+                framebuffer::active_output_label(),
                 SettingControl::Status {
                     ready: framebuffer::presentation_stats().page_flip_available,
                 },
@@ -8181,7 +8177,7 @@ fn draw_system(rect: Rect, desktop: &DesktopState) {
         y + 98,
         metric_width,
         "Framebuffer",
-        framebuffer::current_mode().label(),
+        framebuffer::active_output_label(),
         color::CYAN,
     );
     metric(

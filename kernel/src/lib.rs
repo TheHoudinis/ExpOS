@@ -11,6 +11,7 @@ extern crate alloc;
 
 mod allocator;
 mod apps;
+mod asl;
 pub(crate) mod boot;
 mod compat;
 mod crypto;
@@ -24,8 +25,10 @@ mod genesis;
 mod graphics_console;
 mod hardware;
 mod input;
+mod interrupts;
 mod kernel_controls;
 mod network;
+mod pci;
 mod port;
 mod python;
 mod radio;
@@ -36,6 +39,7 @@ pub(crate) mod state;
 mod storage;
 mod sync;
 mod tls;
+mod usb;
 mod vga;
 mod volatile;
 
@@ -138,6 +142,9 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
 
     unsafe { boot::initialize(magic, mbi_phys) };
     form_runtime::initialize();
+    let _ = interrupts::initialize();
+    asl::initialize();
+    let _ = usb::initialize();
     println!("[ok] boot handoff @ {:#x}", mbi_phys);
 
     let mut writer = vga::WRITER.lock();
@@ -162,7 +169,7 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
             "EXPOS_EARLY_DISPLAY visible={} backend={}\r\n",
             early_graphics,
             if early_graphics {
-                "bochs-vbe"
+                "uefi-gop"
             } else {
                 "vga-serial"
             }
@@ -239,6 +246,9 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
         let login = session::login(&mut input, requested_mode);
         if login.mode == session::BootMode::Graphical {
             desktop::run(&mut input, false, login.session, report.cfc_fin);
+        }
+        if boot::native_uefi() {
+            let _ = graphics_console::enable_console();
         }
         shell::run(report, input, login.session)
     }

@@ -9,8 +9,8 @@ pub struct SpinMutex<T> {
     value: UnsafeCell<T>,
 }
 
-// SAFETY: access to `value` is serialised by the spinlock; T only needs
-// Send so that ownership may move across CPUs once SMP arrives.
+// SAFETY: access to `value` is serialised by the spinlock, and T must be Send
+// so ownership can cross execution contexts without weakening its contract.
 unsafe impl<T: Send> Send for SpinMutex<T> {}
 unsafe impl<T: Send> Sync for SpinMutex<T> {}
 

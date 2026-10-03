@@ -23,6 +23,11 @@ const _: () = assert!(SCANOUT_BYTES <= LFB_APERTURE_BYTES);
 
 static LFB_ADDRESS: AtomicUsize = AtomicUsize::new(0);
 static LFB_DEVICE_BYTES: AtomicUsize = AtomicUsize::new(0);
+static GOP_ACTIVE: AtomicBool = AtomicBool::new(false);
+static GOP_RGB_ORDER: AtomicBool = AtomicBool::new(false);
+static ACTIVE_WIDTH: AtomicUsize = AtomicUsize::new(0);
+static ACTIVE_HEIGHT: AtomicUsize = AtomicUsize::new(0);
+static ACTIVE_STRIDE_BYTES: AtomicUsize = AtomicUsize::new(0);
 const VBE_INDEX: u16 = 0x01CE;
 const VBE_DATA: u16 = 0x01CF;
 
@@ -689,20 +694,45 @@ pub fn current_mode() -> DisplayMode {
     active_display_mode().unwrap_or_else(requested_mode)
 }
 
+/// Human-readable active output. Firmware GOP geometry may not match one of
+/// the three user-selectable Bochs presets.
+pub fn active_output_label() -> &'static str {
+    if GOP_ACTIVE.load(Ordering::Acquire) {
+        "firmware"
+    } else {
+        current_mode().label()
+    }
+}
+
 pub fn width() -> usize {
-    current_mode().width()
+    let active = ACTIVE_WIDTH.load(Ordering::Acquire);
+    if active == 0 {
+        current_mode().width()
+    } else {
+        active
+    }
 }
 
 pub fn height() -> usize {
-    current_mode().height()
+    let active = ACTIVE_HEIGHT.load(Ordering::Acquire);
+    if active == 0 {
+        current_mode().height()
+    } else {
+        active
+    }
 }
 
 pub fn stride_bytes() -> usize {
-    current_mode().stride_bytes()
+    let active = ACTIVE_STRIDE_BYTES.load(Ordering::Acquire);
+    if active == 0 {
+        current_mode().stride_bytes()
+    } else {
+        active
+    }
 }
 
 pub fn scanout_bytes() -> usize {
-    current_mode().scanout_bytes()
+    stride_bytes() * height()
 }
 
 /// Return the font style used by subsequent [`text`] and [`glyph`] calls.
@@ -746,6 +776,9 @@ pub fn active_mode() -> Option<Mode> {
 pub fn enter() -> bool {
     let requested = requested_mode();
     crate::slog!("EXPOS_DISPLAY_ENTER requested={}\r\n", requested.label());
+    if program_firmware_framebuffer() {
+        return true;
+    }
     if program_mode(requested) {
         return true;
     }
@@ -769,7 +802,12 @@ pub fn print_diagnostics() {
     let active = active_display_mode();
     let presentation = presentation_stats();
     crate::println!("DISPLAY DIAGNOSTICS");
-    crate::println!("adapter: id={:#06X} bochs-vbe={}", adapter_id, available());
+    crate::println!(
+        "adapter: id={:#06X} bochs-vbe={} uefi-gop={}",
+        adapter_id,
+        available(),
+        GOP_ACTIVE.load(Ordering::Acquire)
+    );
     crate::println!(
         "requested: {} {}x{}x{} required={} bytes double-buffer={} bytes",
         requested.label(),
@@ -817,6 +855,7 @@ pub fn print_diagnostics() {
 }
 
 fn program_mode(requested: DisplayMode) -> bool {
+    GOP_ACTIVE.store(false, Ordering::Release);
     ACTIVE_DISPLAY_MODE.store(NO_ACTIVE_MODE, Ordering::Release);
     PAGE_FLIP_AVAILABLE.store(false, Ordering::Release);
     DRAW_Y.store(0, Ordering::Release);
@@ -885,6 +924,9 @@ fn program_mode(requested: DisplayMode) -> bool {
     let page_flip = mode.virtual_height as usize >= requested.height() * 2
         && requested.double_buffer_bytes() <= aperture_bytes.min(LFB_APERTURE_BYTES);
     ACTIVE_DISPLAY_MODE.store(requested.persisted(), Ordering::Release);
+    ACTIVE_WIDTH.store(mode.width as usize, Ordering::Release);
+    ACTIVE_HEIGHT.store(mode.height as usize, Ordering::Release);
+    ACTIVE_STRIDE_BYTES.store(mode.stride_bytes(), Ordering::Release);
     PAGE_FLIP_AVAILABLE.store(page_flip, Ordering::Release);
     DRAW_Y.store(if page_flip { mode.height } else { 0 }, Ordering::Release);
     FRONT_Y.store(0, Ordering::Release);
@@ -905,6 +947,84 @@ fn program_mode(requested: DisplayMode) -> bool {
     true
 }
 
+fn program_firmware_framebuffer() -> bool {
+    let Some(info) = crate::boot::firmware_framebuffer() else {
+        return false;
+    };
+    let width = info.width as usize;
+    let height = info.height as usize;
+    let stride_bytes = info.stride as usize * BYTES_PER_PIXEL;
+    let required = match stride_bytes.checked_mul(height) {
+        Some(value) => value,
+        None => return false,
+    };
+    if width > MAX_WIDTH
+        || height > MAX_HEIGHT
+        || required > info.bytes as usize
+        || info.address > usize::MAX as u64
+    {
+        crate::slog!(
+            "EXPOS_GOP_REJECTED width={} height={} stride={} bytes={}\r\n",
+            info.width,
+            info.height,
+            info.stride,
+            info.bytes
+        );
+        return false;
+    }
+    reset_presentation_state();
+    let mode = DisplayMode::from_dimensions(width, height).unwrap_or(DisplayMode::P480);
+    LFB_ADDRESS.store(info.address as usize, Ordering::Relaxed);
+    LFB_DEVICE_BYTES.store(info.bytes as usize, Ordering::Relaxed);
+    GOP_RGB_ORDER.store(info.format == 0, Ordering::Relaxed);
+    GOP_ACTIVE.store(true, Ordering::Release);
+    crate::asl::claim_firmware_framebuffer();
+    ACTIVE_DISPLAY_MODE.store(mode.persisted(), Ordering::Release);
+    ACTIVE_WIDTH.store(width, Ordering::Release);
+    ACTIVE_HEIGHT.store(height, Ordering::Release);
+    ACTIVE_STRIDE_BYTES.store(stride_bytes, Ordering::Release);
+    FRONT_CONTENT_VISIBLE.store(true, Ordering::Release);
+    crate::slog!(
+        "EXPOS_FRAMEBUFFER_READY source=uefi-gop address={:#x} bytes={} width={} height={} stride={} format={}\r\n",
+        info.address,
+        info.bytes,
+        width,
+        height,
+        stride_bytes,
+        if info.format == 0 { "rgbx" } else { "bgrx" }
+    );
+    crate::slog!(
+        "EXPOS_DISPLAY_MODE width={} height={} bpp=32 stride={} bytes={} preset=firmware pageflip=false virtual_height={}\r\n",
+        width,
+        height,
+        stride_bytes,
+        required,
+        height
+    );
+    clear(color::BACKGROUND);
+    true
+}
+
+fn reset_presentation_state() {
+    ACTIVE_DISPLAY_MODE.store(NO_ACTIVE_MODE, Ordering::Release);
+    ACTIVE_WIDTH.store(0, Ordering::Release);
+    ACTIVE_HEIGHT.store(0, Ordering::Release);
+    ACTIVE_STRIDE_BYTES.store(0, Ordering::Release);
+    PAGE_FLIP_AVAILABLE.store(false, Ordering::Release);
+    DRAW_Y.store(0, Ordering::Release);
+    FRONT_Y.store(0, Ordering::Release);
+    HARDWARE_Y_OFFSET.store(0, Ordering::Release);
+    FRONT_CONTENT_VISIBLE.store(false, Ordering::Release);
+    PRESENTED_FRAMES.store(0, Ordering::Release);
+    VBLANK_TIMEOUTS.store(0, Ordering::Release);
+    PAGE_FLIP_FAILURES.store(0, Ordering::Release);
+    SUBMITTED_DAMAGE_REGIONS.store(0, Ordering::Release);
+    SUBMITTED_DAMAGE_PIXELS.store(0, Ordering::Release);
+    COPIED_DAMAGE_REGIONS.store(0, Ordering::Release);
+    COPIED_DAMAGE_PIXELS.store(0, Ordering::Release);
+    DAMAGE_COLLAPSES.store(0, Ordering::Release);
+}
+
 fn mode_fits_aperture(requested: DisplayMode, mode: Mode, aperture_bytes: usize) -> bool {
     let desired = requested.hardware_mode();
     mode.width == desired.width
@@ -920,6 +1040,14 @@ fn mode_fits_aperture(requested: DisplayMode, mode: Mode, aperture_bytes: usize)
 
 pub fn exit() {
     ACTIVE_DISPLAY_MODE.store(NO_ACTIVE_MODE, Ordering::Release);
+    ACTIVE_WIDTH.store(0, Ordering::Release);
+    ACTIVE_HEIGHT.store(0, Ordering::Release);
+    ACTIVE_STRIDE_BYTES.store(0, Ordering::Release);
+    if GOP_ACTIVE.swap(false, Ordering::AcqRel) {
+        FRONT_CONTENT_VISIBLE.store(false, Ordering::Release);
+        PAGE_FLIP_AVAILABLE.store(false, Ordering::Release);
+        return;
+    }
     write(INDEX_Y_OFFSET, 0);
     HARDWARE_Y_OFFSET.store(read(INDEX_Y_OFFSET), Ordering::Release);
     FRONT_CONTENT_VISIBLE.store(false, Ordering::Release);
@@ -959,11 +1087,7 @@ pub fn present_damage(vsync: bool, damage: &[DamageRegion]) -> bool {
     if active_display_mode().is_none() {
         return false;
     }
-    let normalized = normalize_damage(
-        damage,
-        current_mode().width() as i32,
-        current_mode().height() as i32,
-    );
+    let normalized = normalize_damage(damage, width() as i32, height() as i32);
     SUBMITTED_DAMAGE_REGIONS.fetch_add(normalized.submitted_regions, Ordering::AcqRel);
     SUBMITTED_DAMAGE_PIXELS.fetch_add(normalized.submitted_pixels, Ordering::AcqRel);
     if normalized.collapsed {
@@ -974,7 +1098,7 @@ pub fn present_damage(vsync: bool, damage: &[DamageRegion]) -> bool {
         VBLANK_TIMEOUTS.fetch_add(1, Ordering::AcqRel);
     }
     let visible = if page_flip {
-        let height = current_mode().height() as u16;
+        let height = height() as u16;
         let prior_front = FRONT_Y.load(Ordering::Acquire);
         let next_front = DRAW_Y.load(Ordering::Acquire);
         write(INDEX_Y_OFFSET, next_front);
@@ -1014,6 +1138,11 @@ pub fn present_damage(vsync: bool, damage: &[DamageRegion]) -> bool {
             visible
         }
     } else {
+        if GOP_ACTIVE.load(Ordering::Acquire) {
+            FRONT_CONTENT_VISIBLE.store(true, Ordering::Release);
+            PRESENTED_FRAMES.fetch_add(1, Ordering::AcqRel);
+            return true;
+        }
         let hardware_y_offset = read(INDEX_Y_OFFSET);
         HARDWARE_Y_OFFSET.store(hardware_y_offset, Ordering::Release);
         let visible = hardware_y_offset == FRONT_Y.load(Ordering::Acquire);
@@ -1035,42 +1164,39 @@ pub fn clear(value: u32) {
     // SAFETY: the validated scanout geometry keeps this complete draw page
     // inside the mapped LFB aperture. The framebuffer is exclusively owned by
     // this module while graphics mode is active.
-    unsafe { fill_dwords(pointer.add(page), value, pixels) };
+    unsafe { fill_dwords(pointer.add(page), encode_pixel(value), pixels) };
 }
 
 pub fn pixel(x: i32, y: i32, value: u32) {
     let Some(pointer) = framebuffer_pointer() else {
         return;
     };
-    let mode = current_mode();
-    if x < 0 || y < 0 || x >= mode.width() as i32 || y >= mode.height() as i32 {
+    if x < 0 || y < 0 || x >= width() as i32 || y >= height() as i32 {
         return;
     }
-    let stride_pixels = mode.stride_bytes() / BYTES_PER_PIXEL;
+    let stride_pixels = stride_bytes() / BYTES_PER_PIXEL;
     let offset = draw_page_offset_pixels() + y as usize * stride_pixels + x as usize;
-    unsafe { core::ptr::write_volatile(pointer.add(offset), value) };
+    unsafe { core::ptr::write_volatile(pointer.add(offset), encode_pixel(value)) };
 }
 
 pub fn read_pixel(x: i32, y: i32) -> u32 {
     let Some(pointer) = framebuffer_pointer() else {
         return 0;
     };
-    let mode = current_mode();
-    if x < 0 || y < 0 || x >= mode.width() as i32 || y >= mode.height() as i32 {
+    if x < 0 || y < 0 || x >= width() as i32 || y >= height() as i32 {
         return 0;
     }
-    let stride_pixels = mode.stride_bytes() / BYTES_PER_PIXEL;
+    let stride_pixels = stride_bytes() / BYTES_PER_PIXEL;
     let offset = draw_page_offset_pixels() + y as usize * stride_pixels + x as usize;
-    unsafe { core::ptr::read_volatile(pointer.add(offset)) }
+    decode_pixel(unsafe { core::ptr::read_volatile(pointer.add(offset)) })
 }
 
 pub fn rect(x: i32, y: i32, width: i32, height: i32, value: u32) {
     let Some(pointer) = framebuffer_pointer() else {
         return;
     };
-    let mode = current_mode();
-    let mode_width = mode.width() as i32;
-    let mode_height = mode.height() as i32;
+    let mode_width = self::width() as i32;
+    let mode_height = self::height() as i32;
     let Some(clipped) = clip_region(
         DamageRegion::new(x, y, width, height),
         mode_width,
@@ -1078,7 +1204,8 @@ pub fn rect(x: i32, y: i32, width: i32, height: i32, value: u32) {
     ) else {
         return;
     };
-    let stride_pixels = mode.stride_bytes() / BYTES_PER_PIXEL;
+    let stride_pixels = stride_bytes() / BYTES_PER_PIXEL;
+    let value = encode_pixel(value);
     let page = draw_page_offset_pixels();
 
     // A full-width rectangle is contiguous and can be emitted as one string
@@ -1098,6 +1225,18 @@ pub fn rect(x: i32, y: i32, width: i32, height: i32, value: u32) {
 
 fn draw_page_offset_pixels() -> usize {
     DRAW_Y.load(Ordering::Acquire) as usize * (stride_bytes() / BYTES_PER_PIXEL)
+}
+
+fn encode_pixel(value: u32) -> u32 {
+    if GOP_ACTIVE.load(Ordering::Relaxed) && GOP_RGB_ORDER.load(Ordering::Relaxed) {
+        (value & 0xFF00_FF00) | ((value & 0x00FF_0000) >> 16) | ((value & 0x0000_00FF) << 16)
+    } else {
+        value
+    }
+}
+
+fn decode_pixel(value: u32) -> u32 {
+    encode_pixel(value)
 }
 
 /// Fill exactly `count` dwords using an architecturally visible x86 string
@@ -1264,9 +1403,8 @@ pub fn rounded_rect(x: i32, y: i32, width: i32, height: i32, radius: i32, value:
 }
 
 pub fn alpha_rect(x: i32, y: i32, width: i32, height: i32, value: u32, alpha: u8) {
-    let mode = current_mode();
-    let mode_width = mode.width() as i32;
-    let mode_height = mode.height() as i32;
+    let mode_width = self::width() as i32;
+    let mode_height = self::height() as i32;
     let left = x.max(0).min(mode_width);
     let top = y.max(0).min(mode_height);
     let right = x.saturating_add(width).max(0).min(mode_width);

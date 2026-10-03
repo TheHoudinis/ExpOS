@@ -104,6 +104,24 @@ impl Input {
         if let Some(byte) = serial::COM1.lock().try_read() {
             return self.decode_serial(byte).map(InputEvent::Key);
         }
+        if let Some(event) = crate::usb::poll_event() {
+            return Some(match event {
+                crate::usb::HidEvent::Key(key) => InputEvent::Key(key),
+                crate::usb::HidEvent::Pointer {
+                    dx,
+                    dy,
+                    buttons,
+                    pressed,
+                    released,
+                } => InputEvent::Pointer(PointerEvent {
+                    dx,
+                    dy,
+                    buttons,
+                    pressed,
+                    released,
+                }),
+            });
+        }
         if self.serial_escape != 0
             && unsafe { _rdtsc() }.wrapping_sub(self.serial_escape_started) > 5_000_000
         {
@@ -403,7 +421,7 @@ fn mouse_command(command: u8) -> bool {
         && controller_read(true) == Some(0xFA)
 }
 
-fn super_binding(key: u8) -> Option<u8> {
+pub(crate) fn super_binding(key: u8) -> Option<u8> {
     match key.to_ascii_lowercase() {
         b' ' => Some(KEY_SUPER_LAUNCHER),
         b'\n' => Some(KEY_SUPER_TERMINAL),
@@ -415,7 +433,7 @@ fn super_binding(key: u8) -> Option<u8> {
     }
 }
 
-fn apply_modifiers(byte: u8, shift: bool, caps_lock: bool) -> u8 {
+pub(crate) fn apply_modifiers(byte: u8, shift: bool, caps_lock: bool) -> u8 {
     if byte.is_ascii_lowercase() {
         return if shift ^ caps_lock {
             byte.to_ascii_uppercase()

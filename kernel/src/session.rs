@@ -499,7 +499,7 @@ pub fn choose_boot_mode(input: &mut Input) -> BootMode {
     let presentation = framebuffer::presentation_stats();
     slog!(
         "EXPOS_BOOT_SCREEN_PRESENTED preset={} frames={} pageflip={} y_offset={} visible={}\r\n",
-        framebuffer::current_mode().label(),
+        framebuffer::active_output_label(),
         presentation.frames,
         presentation.page_flip_available,
         presentation.hardware_y_offset,
@@ -583,6 +583,13 @@ enum LoginAttempt {
 
 fn login_once(input: &mut Input, mode: BootMode) -> LoginAttempt {
     let _ = input.enable_mouse();
+    if crate::boot::native_uefi() {
+        if mode == BootMode::Graphical {
+            crate::graphics_console::disable();
+        } else {
+            let _ = crate::graphics_console::enable_console();
+        }
+    }
     let graphical = mode == BootMode::Graphical && framebuffer::enter();
     if mode == BootMode::Graphical && !graphical {
         return LoginAttempt::SwitchEnvironment;
@@ -614,7 +621,7 @@ fn login_once(input: &mut Input, mode: BootMode) -> LoginAttempt {
         let presentation = framebuffer::presentation_stats();
         slog!(
             "EXPOS_LOGIN_SCREEN_PRESENTED preset={} frames={} pageflip={} y_offset={} visible={}\r\n",
-            framebuffer::current_mode().label(),
+            framebuffer::active_output_label(),
             presentation.frames,
             presentation.page_flip_available,
             presentation.hardware_y_offset,

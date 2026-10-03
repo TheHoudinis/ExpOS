@@ -74,7 +74,7 @@ def check_variant(name: str, mode: bytes, encrypted: bool) -> None:
 
     install_command = base + firmware(f"{name}-install") + [
         "-drive", f"file={target},format=raw,if=ide,index=0",
-        "-cdrom", "build/ExpOS-0.9-x86_64.iso", "-boot", "once=d",
+        "-cdrom", "build/ExpOS-v9-x86_64.iso", "-boot", "once=d",
     ]
     common = b"Test Fabric\nPrimary\ncorrect-horse\ncorrect-horse\nERASE\n\n"
     install_status, install_output = run(
@@ -127,7 +127,7 @@ def check_variant(name: str, mode: bytes, encrypted: bool) -> None:
     )
     for marker in (
         b"EXPOS_ACCOUNTS_READY source=genesis persisted=true",
-        b"EXPOS_EARLY_DISPLAY visible=true backend=bochs-vbe",
+        b"EXPOS_EARLY_DISPLAY visible=true backend=uefi-gop",
         b"EXPOS_EXPFS_BASELINE_READY",
         b"EXPOS_LOGIN_OK user=operator",
         b"EXPOS_COMMAND_OK shutdown",

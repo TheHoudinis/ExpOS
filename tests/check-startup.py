@@ -55,10 +55,13 @@ def check_picture(path, graphical, previous=None):
     total = width * height
     nonblack = total - colors[b"\0\0\0"]
     if graphical:
-        assert (width, height) == (640, 480), f"Unexpected GUI size: {width}x{height}"
-        # A stale OVMF logo has many colors and some lit pixels. ExpOS fills
-        # the screen; requiring a majority rejects that real failure too.
-        assert nonblack > total // 2, f"Blank/stale GUI scanout: {nonblack}/{total} lit pixels"
+        assert 640 <= width <= 1920 and 480 <= height <= 1080, (
+            f"Unexpected GUI size: {width}x{height}"
+        )
+        # A stale OVMF logo lights only a small central area. At native GOP
+        # geometry a non-maximized app may intentionally leave a large black
+        # workspace, so require a strong quarter-frame replacement instead.
+        assert nonblack > total // 4, f"Blank/stale GUI scanout: {nonblack}/{total} lit pixels"
         assert len(colors) >= 8, f"GUI lacks rendered content: {len(colors)} colors"
     else:
         assert (width, height) in ((640, 400), (720, 400)), "VGA text mode was not restored"
@@ -73,6 +76,7 @@ def check_picture(path, graphical, previous=None):
 
 class Startup:
     def __init__(self, firmware, scratch, deadline):
+        self.firmware = firmware
         self.deadline = deadline
         self.artifacts = ROOT / "build" / f"startup-{firmware}"
         self.artifacts.mkdir(parents=True, exist_ok=True)
@@ -174,17 +178,25 @@ class Startup:
         self.picture("browser", previous=desktop)
         self.type("q")
         self.wait_for("EXPOS_SHELL_READY")
-        self.picture("console", graphical=False)
+        # UEFI keeps a GOP-backed text renderer active because VGA text memory
+        # is not scanout on modern firmware. BIOS restores hardware text mode.
+        self.picture("console", graphical=self.firmware == "uefi")
 
         self.type("login\n")
         self.wait_for("EXPOS_BOOT_MODE_READY", count=2)
         self.type("2\n")
         self.wait_for("EXPOS_LOGIN_READY", count=2)
-        console_login = self.picture("console-login", graphical=False)
+        console_login = self.picture(
+            "console-login", graphical=self.firmware == "uefi"
+        )
         self.type("operator\nexpos\n")
         self.wait_for("EXPOS_LOGIN_OK user=operator", count=2)
         self.wait_for("EXPOS_COMMAND_OK login")
-        self.picture("console-authenticated", graphical=False, previous=console_login)
+        self.picture(
+            "console-authenticated",
+            graphical=self.firmware == "uefi",
+            previous=console_login,
+        )
         self.type("shutdown\n")
         self.wait_for("EXPOS_COMMAND_OK shutdown")
         remaining = max(0.1, self.deadline - time.monotonic())

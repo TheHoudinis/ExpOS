@@ -1,9 +1,9 @@
-//! Small graphical console used by Genesis after a native UEFI handoff.
+//! Small graphical console used after a native UEFI handoff.
 //!
 //! UEFI leaves QEMU in GOP graphics mode, so writes to the legacy 0xb8000 VGA
-//! text buffer are not visible. Genesis enables the Bochs framebuffer and
-//! mirrors the existing bounded text interface here; serial and VGA remain
-//! available as diagnostic fallbacks.
+//! text buffer is not visible. Genesis, the unlock path, login and shell mirror
+//! the existing bounded text interface into the firmware framebuffer; serial
+//! and VGA remain diagnostic fallbacks.
 
 use crate::{framebuffer, sync::SpinMutex};
 use core::fmt;
@@ -181,6 +181,12 @@ pub fn enable_genesis() -> bool {
 /// fail-closed manifest diagnostics on installed UEFI systems.
 pub fn enable_boot() -> bool {
     enable("ExpOS Secure Boot", "CFC UNLOCK + VERIFIED STARTUP")
+}
+
+/// Keep the command environment visible when UEFI GOP remains the active
+/// scanout and no legacy VGA text mode exists.
+pub fn enable_console() -> bool {
+    enable("ExpOS Console", "FORM COMMAND ENVIRONMENT")
 }
 
 /// Stop mirroring text and return QEMU to VGA text before the normal session

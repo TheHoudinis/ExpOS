@@ -183,7 +183,7 @@ pub fn print_kernel_features() {
         yes_no(efer & (1 << 11) != 0)
     );
     println!(
-        "kernel: 64-bit paging, TSS/IDT, PIC/PIT, CPL3 Forms, PCI, RTC/TSC, COM1, PS/2, VBE, RTL8139, ATA PIO"
+        "kernel: 64-bit paging, TSS/IDT, PIC/PIT, CPL3 Forms, ASL/PCI, GOP/VBE, xHCI HID, NVMe/AHCI/ATA, RTL8139"
     );
     println!("services: Forms, FIN resolution, persistent state journal, PIMP/DIESE, Handles");
     println!(
@@ -192,7 +192,7 @@ pub fn print_kernel_features() {
     println!("network: Ethernet, ARP, DHCP/IPv4, ICMP, UDP, DNS, TCP, HTTP and verified TLS 1.3");
     println!("radio: capability policy plus PCI Wi-Fi/Bluetooth class discovery");
     println!(
-        "pending: interrupt-driven devices, dynamic page allocation, general filesystem/audio, IPv6, Wi-Fi and USB/Bluetooth"
+        "pending: armed device interrupts, dynamic page allocation, general filesystem/audio, IPv6, Wi-Fi and USB classes/Bluetooth"
     );
 }
 

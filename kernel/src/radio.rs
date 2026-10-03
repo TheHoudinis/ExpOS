@@ -1,8 +1,8 @@
 //! Capability-scoped connectivity policy and honest radio discovery.
 //!
-//! ExpOS currently has a native RTL8139 Ethernet data path, but no 802.11 or
-//! USB host stack.  This module therefore separates three things that desktop
-//! controls often blur together: software policy, detected hardware, and a
+//! ExpOS currently has native RTL8139 Ethernet and xHCI HID paths, but no
+//! 802.11 or USB Bluetooth class driver. This module therefore separates three
+//! things that desktop controls often blur together: software policy, detected hardware, and a
 //! loaded data-plane driver.  A switch is only reported operational when all
 //! three are true.
 
@@ -42,7 +42,7 @@ pub enum DriverState {
     Ready,
     /// Hardware was found, but ExpOS has no driver for it.
     Missing,
-    /// The transport itself (currently USB) has no kernel stack yet.
+    /// The transport cannot enumerate this device class yet.
     BusUnsupported,
     /// A supported device exists, but its driver did not initialize.
     Failed,
@@ -130,7 +130,9 @@ impl AdapterStatus {
             (Presence::Present, DriverState::Ready, _) => "Available",
             (Presence::Present, DriverState::Missing, _) => "Detected - driver unavailable",
             (Presence::Present, DriverState::Failed, _) => "Driver failed to start",
-            (Presence::Unknown, DriverState::BusUnsupported, _) => "Unavailable - no USB stack",
+            (Presence::Unknown, DriverState::BusUnsupported, _) => {
+                "Unavailable - USB Bluetooth class unsupported"
+            }
             (Presence::Absent, _, _) => "No adapter detected",
             _ => "Unavailable",
         }
@@ -148,8 +150,8 @@ pub struct ConnectivitySnapshot {
     pub ethernet: AdapterStatus,
     pub wifi: AdapterStatus,
     pub bluetooth: AdapterStatus,
-    /// True when a PCI USB host controller exists.  This does not imply that
-    /// a Bluetooth adapter was discovered because USB enumeration is absent.
+    /// True when a PCI USB host controller exists. This does not imply that a
+    /// Bluetooth adapter was discovered because only HID devices are enumerated.
     pub usb_controller_detected: bool,
     pub generation: u32,
 }
@@ -498,11 +500,14 @@ mod tests {
     }
 
     #[test]
-    fn bluetooth_reports_unknown_without_usb_enumeration() {
+    fn bluetooth_reports_unknown_without_a_usb_bluetooth_class_driver() {
         let state = ConnectivityState::discovered(None, false, false, None, None, true);
         assert_eq!(state.bluetooth.presence, Presence::Unknown);
         assert_eq!(state.bluetooth.driver, DriverState::BusUnsupported);
-        assert_eq!(state.bluetooth.status_text(), "Unavailable - no USB stack");
+        assert_eq!(
+            state.bluetooth.status_text(),
+            "Unavailable - USB Bluetooth class unsupported"
+        );
     }
 
     #[test]

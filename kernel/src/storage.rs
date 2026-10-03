@@ -1,10 +1,13 @@
-//! Minimal primary-master ATA PIO block transport for the ExpOS state disk.
+//! ExpOS block transport for NVMe, AHCI SATA and legacy ATA-PIO state disks.
 //!
 //! This driver deliberately exposes sectors rather than a filesystem.  The
 //! persistent state layer above it owns versioning, checksums, and atomic slot
 //! selection.  Polls are bounded so absent or faulty hardware cannot hang boot.
 
 use crate::port;
+
+mod ahci;
+mod nvme;
 
 pub const SECTOR_SIZE: usize = 512;
 
@@ -40,14 +43,15 @@ pub enum StorageError {
     OutOfRange,
     Timeout,
     DeviceFault(u8),
+    ControllerFault(u32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Device {
+struct AtaDevice {
     sectors: u32,
 }
 
-impl Device {
+impl AtaDevice {
     pub const fn sectors(self) -> u32 {
         self.sectors
     }
@@ -107,9 +111,126 @@ impl Device {
     }
 }
 
-/// Probe the primary ATA master. The dedicated ExpOS state image must be
-/// attached there; optical media remains on a different IDE unit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Backend {
+    Ata(AtaDevice),
+    Ahci(ahci::Device),
+    Nvme(nvme::Device),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Device {
+    backend: Backend,
+}
+
+impl Device {
+    pub const fn sectors(self) -> u32 {
+        match self.backend {
+            Backend::Ata(device) => device.sectors(),
+            Backend::Ahci(device) => device.sectors(),
+            Backend::Nvme(device) => device.sectors(),
+        }
+    }
+
+    pub const fn backend(self) -> &'static str {
+        match self.backend {
+            Backend::Ata(_) => "ata-pio",
+            Backend::Ahci(_) => "ahci",
+            Backend::Nvme(_) => "nvme",
+        }
+    }
+
+    pub fn read_sector(self, lba: u32, output: &mut [u8; SECTOR_SIZE]) -> Result<(), StorageError> {
+        match self.backend {
+            Backend::Ata(device) => device.read_sector(lba, output),
+            Backend::Ahci(device) => device.read_sector(lba, output),
+            Backend::Nvme(device) => device.read_sector(lba, output),
+        }
+    }
+
+    pub fn write_sector(self, lba: u32, input: &[u8; SECTOR_SIZE]) -> Result<(), StorageError> {
+        match self.backend {
+            Backend::Ata(device) => device.write_sector(lba, input),
+            Backend::Ahci(device) => device.write_sector(lba, input),
+            Backend::Nvme(device) => device.write_sector(lba, input),
+        }
+    }
+
+    pub(crate) fn write_sector_unflushed(
+        self,
+        lba: u32,
+        input: &[u8; SECTOR_SIZE],
+    ) -> Result<(), StorageError> {
+        match self.backend {
+            Backend::Ata(device) => device.write_sector_unflushed(lba, input),
+            Backend::Ahci(device) => device.write_sector_unflushed(lba, input),
+            Backend::Nvme(device) => device.write_sector_unflushed(lba, input),
+        }
+    }
+
+    pub(crate) fn flush(self) -> Result<(), StorageError> {
+        match self.backend {
+            Backend::Ata(device) => device.flush(),
+            Backend::Ahci(device) => device.flush(),
+            Backend::Nvme(device) => device.flush(),
+        }
+    }
+}
+
+/// Probe modern PCI storage first, then fall back to the primary ATA master.
 pub fn initialize() -> Result<Device, StorageError> {
+    match nvme::initialize() {
+        Ok(device) => {
+            let result = Device {
+                backend: Backend::Nvme(device),
+            };
+            crate::slog!(
+                "EXPOS_STORAGE_READY backend={} sectors={} sector_bytes={}\r\n",
+                result.backend(),
+                result.sectors(),
+                SECTOR_SIZE
+            );
+            return Ok(result);
+        }
+        Err(StorageError::NoDevice) => {}
+        Err(error) => crate::slog!(
+            "EXPOS_STORAGE_PROBE_FAILED backend=nvme error={:?}\r\n",
+            error
+        ),
+    }
+    match ahci::initialize() {
+        Ok(device) => {
+            let result = Device {
+                backend: Backend::Ahci(device),
+            };
+            crate::slog!(
+                "EXPOS_STORAGE_READY backend={} sectors={} sector_bytes={}\r\n",
+                result.backend(),
+                result.sectors(),
+                SECTOR_SIZE
+            );
+            return Ok(result);
+        }
+        Err(StorageError::NoDevice) => {}
+        Err(error) => crate::slog!(
+            "EXPOS_STORAGE_PROBE_FAILED backend=ahci error={:?}\r\n",
+            error
+        ),
+    }
+    let device = initialize_ata()?;
+    let result = Device {
+        backend: Backend::Ata(device),
+    };
+    crate::slog!(
+        "EXPOS_STORAGE_READY backend={} sectors={} sector_bytes={}\r\n",
+        result.backend(),
+        result.sectors(),
+        SECTOR_SIZE
+    );
+    Ok(result)
+}
+
+fn initialize_ata() -> Result<AtaDevice, StorageError> {
     unsafe {
         port::outb(DRIVE, 0xA0);
         port::outb(SECTOR_COUNT, 0);
@@ -137,7 +258,7 @@ pub fn initialize() -> Result<Device, StorageError> {
     if sectors == 0 {
         return Err(StorageError::UnsupportedDevice);
     }
-    Ok(Device { sectors })
+    Ok(AtaDevice { sectors })
 }
 
 fn select_lba(lba: u32) -> Result<(), StorageError> {

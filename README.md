@@ -1,10 +1,10 @@
-# ExpOS v8
+# ExpOS v9
 
 ExpOS is the Form-native operating system described by
 [`docs/PHILOSOPHY.txt`](docs/PHILOSOPHY.txt). The current image contains:
 
 - an x86_64 kernel with native UEFI handoff and a separate Multiboot2 fallback,
-  VGA, serial, PS/2 keyboard and mouse input;
+  UEFI GOP/Bochs framebuffer output, serial, PS/2 and xHCI boot-HID input;
 - Operator-authenticated single-user maintenance and normal multi-user startup;
 - ExpPython, a bounded embedded MicroPython interpreter, plus a host Python SDK;
 - FIN identity, Dimensions, PIMP/DIESE policy, capability-scoped Form Handles,
@@ -28,8 +28,8 @@ ExpOS is the Form-native operating system described by
 - ExpDisplay, a runtime-selectable 640x480, 1280x720 or 1920x1080 software
   compositor whose additive v2 protocol advertises Form-owned surfaces, atomic
   commits, multi-region damage, presentation-complete frame events and alpha
-  buffers; bounded damage-region scanout, double-buffered Bochs/QEMU output and
-  selectable 60, 75, 120 or 144 Hz pacing remain compatible with Form ABI v1;
+  buffers; native UEFI uses validated GOP scanout directly, while BIOS/QEMU
+  retains bounded double-buffered Bochs output and selectable pacing;
 - a flat dark desktop with a list/grid application menu, direct entries for
   installed Ayo apps, menu density/content/category/motion controls, and a
   taskbar with movable, closable, minimizable and maximizable windows;
@@ -59,7 +59,7 @@ ExpOS is the Form-native operating system described by
 - a bright white-on-black native command deck with cyan/green identity
   accents, a structured startup banner, grouped help, and aligned system
   status output;
-- dedicated ATA PIO persistence with alternating verified ExpFS CFC snapshots
+- NVMe, AHCI SATA and legacy ATA-PIO persistence with verified ExpFS CFC snapshots
   for arbitrary Forms/content/Dimensions/relationships/revisions/PIMP state,
   accounts, and desktop settings; the old EXPOST03 slots are read-only migration
   input; eight full-state rotating checkpoints can be listed and restored.
@@ -93,7 +93,7 @@ CFC/Dimension-aware confinement, **ExpSeal** for monotonic capability reduction,
 and **ExpBudget** for per-context resource enforcement.
 
 These invariants now have a first end-to-end Genesis vertical slice. `make
-genesis-iso` builds `build/ExpOS-0.9-x86_64.iso`, a native-UEFI hybrid image.
+genesis-iso` builds `build/ExpOS-v9-x86_64.iso`, a native-UEFI hybrid image.
 Its Architect path requires exact `ERASE` confirmation, constructs primary and
 backup GPT metadata, creates a FAT32 EFI System Partition, installs the runtime
 at `EFI/BOOT/BOOTX64.EFI`, mints and persists CFC/Primary Dimension identities,
@@ -110,7 +110,7 @@ copies are unusable or disagree.
 Genesis now offers Basic with mandatory encrypted CFC storage and Architect as
 the explicitly unencrypted development choice. The automated end-to-end
 `genesis-check` installs, disk-boots and authenticates both paths; both claim
-the whole ATA primary-master disk. Genesis now activates a styled 640x480
+the whole selected block device. Genesis now activates a styled firmware-GOP
 framebuffer console immediately after the UEFI handoff, so prompts and masked
 password input are visible in the QEMU window instead of only on serial.
 `make genesis-display-check` captures the real scanout and advances it through
@@ -118,10 +118,9 @@ PS/2 input. Installed UEFI boot uses the same visible console for encrypted-CFC
 unlock and fail-closed manifest errors before handing off to the normal chooser.
 `make run-genesis` creates or safely reuses only a regular virtual-disk image,
 automatically ejects the installer media before reboot, and directly boots an
-image that already contains a Genesis manifest. Safe physical-disk selection,
-AHCI/NVMe/VirtIO-block, USB
-input/media, BIOS installation, Secure Boot, and a mouse-first graphical wizard
-remain open.
+image that already contains a Genesis manifest. Safe physical-disk identity
+selection, VirtIO-block, USB mass storage, BIOS installation, Secure Boot, and
+a mouse-first graphical wizard remain open.
 
 The bounded `Cfc`/`CfcCatalog` model enforces exclusive ownership of registered
 Form and Dimension FINs. ExpScope snapshots that ownership, recovery artifacts
@@ -150,7 +149,7 @@ UEFI builds/tests. Python also supplies the host SDK and test harnesses.
 
 ```sh
 make uefi           # build build/esp/EFI/BOOT/BOOTX64.EFI
-make genesis-iso    # build build/ExpOS-0.9-x86_64.iso
+make genesis-iso    # build build/ExpOS-v9-x86_64.iso
 make genesis-check  # install, disk-boot, log in and shut down under OVMF
 make genesis-display-check # verify visible Genesis scanout and PS/2 input
 make run-genesis     # safely install or boot the persistent QEMU disk
@@ -167,6 +166,7 @@ make internet-check # verify live DNS and public HTTP (requires Internet access)
 make https-check    # verify TLS and fetch youtube.com HTML (requires Internet)
 make search-check   # verify DuckDuckGo HTML address-bar search (requires Internet)
 make persistence-check # verify Forms, Handles, settings and checkpoints across boots
+make modern-hardware-check # NVMe/AHCI persistence and USB-only HID input
 make ayo            # test and build Ayo v3
 make sdk            # verify Rust, Go, C, Python SDKs and the expos project tool
 make all            # run the complete native test suite
@@ -178,8 +178,8 @@ Run the image with:
 make run
 ```
 
-`make run` creates `runtime/expos-state.img` once and attaches it as the
-primary ATA disk. ExpFS Form state, accounts, and customization changes are
+`make run` creates `runtime/expos-state.img` once and attaches it through the
+default ATA compatibility path. ExpFS Form state, accounts, and customization changes are
 journaled there. The
 image is intentionally preserved by `make clean`; copy it to back up the
 current local state.
@@ -188,8 +188,8 @@ The default launch uses native UEFI with OVMF. `make run-bios` retains the
 previous GRUB image as the approved BIOS compatibility, recovery, and
 development fallback. Native UEFI remains the primary architecture.
 
-ExpOS discovers the framebuffer's PCI address assigned by firmware, so both
-OVMF and SeaBIOS draw to the actual video memory. `make startup-check` captures
+ExpOS consumes validated GOP address/geometry/stride/pixel metadata on OVMF and
+discovers the Bochs PCI framebuffer for BIOS fallback. `make startup-check` captures
 the chooser, login and desktop screens and signs in through emulated PS/2
 keyboard events. Screenshots and logs are saved under `build/startup-uefi/`
 and `build/startup-bios/`.
@@ -252,7 +252,7 @@ presentation policy, frame-pacing and scanout counters. The console
 VSync/page-flip state; `displaydiag` also reports submitted and copied damage,
 damage-collapse, page-flip-failure and bounded vertical-retrace-timeout
 counters. `timers` reports the TSC clock source used by the frame pacer.
-`neofetch` works in both graphical and console terminals and draws the ExpOS
+`neofetch` works in both graphical and console terminals and draws a clear ExpOS
 two-eye mark before the current system/session facts. Graphical `windowreset`
 returns every application window to its default recoverable position. In
 Browser, click the address field or press `/`, type an `http://` or `https://`
@@ -491,7 +491,7 @@ make legacy-alpha-check
 make run-alpha
 ```
 
-No fallback component is treated as a native v8 interface until it has a
+No fallback component is treated as a native v9 interface until it has a
 Form/FIN/Dimension and capability-safe boundary.
 The feature pass described above does not modify `legacy/alpha32/`.
 
@@ -504,6 +504,7 @@ The feature pass described above does not modify `legacy/alpha32/`.
 | `ayo/` | Go package manager and development storage bridge |
 | `sdk/` | Rust, Go, C, and Python Form ABI clients plus the `expos` project tool |
 | `docs/FORM_ABI_V1.md` | frozen language-neutral Form ABI v1 contract |
+| `docs/ASL_V1.md` | initial ASL v1 inventory, ownership and interrupt contract |
 | `docs/PACKAGE_ECOSYSTEM.md` | signed registry design and 50-package acceptance bar |
 | `docs/PHILOSOPHY.txt` | source architecture specification |
 | `docs/ARCHITECTURE.md` | implementation and trust boundaries |
@@ -511,5 +512,6 @@ The feature pass described above does not modify `legacy/alpha32/`.
 | `docs/FEATURE_COVERAGE.md` | implemented and missing features |
 | `legacy/alpha32/` | preserved Diamond II source |
 
-ASL's high-level role is defined, but its exact interfaces, bootstrap ordering,
-and cross-architecture implementation remain unspecified and unimplemented.
+ASL v1 now has a bounded boot inventory, exclusive driver claims, PCI/firmware
+classification and MSI/MSI-X discovery. Raw hardware is still kernel-only;
+Handle-backed Form driver grants and non-x86 transports remain future work.

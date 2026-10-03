@@ -567,7 +567,15 @@ impl Shell {
                     "registry capacity: Forms={} Handles={} Dimensions={}",
                     MAX_FORMS, MAX_HANDLES, MAX_DIMENSIONS
                 );
-                println!("input backends: PS/2 mouse/keyboard + COM1 polling");
+                let usb = crate::usb::status();
+                println!(
+                    "input backends: PS/2 + COM1 + xHCI (controller={} keyboards={} mice={} keyboard-reports={} mouse-reports={})",
+                    usb.controller,
+                    usb.keyboards,
+                    usb.mice,
+                    usb.keyboard_reports,
+                    usb.mouse_reports
+                );
                 let event_stats = self.kernel_controls.events().stats();
                 println!(
                     "kernel events: watches={} ready={} delivered={} dropped={} coalesced={}",
@@ -577,6 +585,10 @@ impl Shell {
                     event_stats.dropped,
                     event_stats.coalesced
                 );
+                true
+            }
+            "asl" => {
+                crate::asl::print_inventory();
                 true
             }
             "bootmode" => {
@@ -1053,7 +1065,7 @@ impl Shell {
         println!("  AUTHORITY  grant revoke handlecheck pimp relate unrelate relationships");
         println!("  DISPLAY    desktop browser displayinfo displaydiag safevideo displayreset");
         println!("  RUNTIME    python/python3 ayo formabi games arcade legacy");
-        println!("  SYSTEM     date clock timers cpuinfo features kernelcaps lspci neofetch");
+        println!("  SYSTEM     date clock timers cpuinfo features kernelcaps lspci asl neofetch");
         println!("             sysinfo mem free env uptime ps kstat dmesg bootlog stateinfo diag");
         println!("  NETWORK    ifconfig dhcp netstat ping dns fetch mode");
         println!("  CONTROL    sysctl kqueue/kevent expbudget");
@@ -2981,6 +2993,7 @@ fn is_shell_command(name: &str) -> bool {
             | "uptime"
             | "ps"
             | "kstat"
+            | "asl"
             | "sysctl"
             | "bootmode"
             | "python"

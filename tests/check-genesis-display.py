@@ -43,7 +43,9 @@ def read_ppm(path: Path) -> tuple[int, int, bytes]:
 
 def inspect_genesis_picture(path: Path) -> bytes:
     width, height, pixels = read_ppm(path)
-    assert (width, height) == (640, 480), f"unexpected Genesis size: {width}x{height}"
+    assert 640 <= width <= 1920 and 480 <= height <= 1080, (
+        f"unexpected Genesis size: {width}x{height}"
+    )
     colors = Counter(pixels[index : index + 3] for index in range(0, len(pixels), 3))
     total = width * height
     assert total - colors[b"\0\0\0"] > total * 9 // 10, "Genesis did not replace OVMF scanout"
@@ -108,7 +110,7 @@ def main() -> None:
             "-drive", f"if=pflash,format=raw,readonly=on,file={os.environ.get('OVMF_CODE', '/usr/share/edk2/x64/OVMF_CODE.4m.fd')}",
             "-drive", f"if=pflash,format=raw,file={variables}",
             "-drive", f"file={disk},format=raw,if=ide,index=0",
-            "-cdrom", str(ROOT / "build/ExpOS-0.9-x86_64.iso"), "-boot", "once=d",
+            "-cdrom", str(ROOT / "build/ExpOS-v9-x86_64.iso"), "-boot", "once=d",
             "-serial", f"file:{serial}", "-qmp", f"unix:{qmp_path},server=on,wait=off",
             "-no-reboot",
         ]
@@ -118,7 +120,7 @@ def main() -> None:
         deadline = time.monotonic() + 45
         try:
             wait_for(serial, "Installation mode [1/2]:", process, deadline)
-            wait_for(serial, "EXPOS_GENESIS_DISPLAY visible=true backend=bochs-vbe", process, deadline)
+            wait_for(serial, "EXPOS_GENESIS_DISPLAY visible=true backend=uefi-gop", process, deadline)
             connection, wire, qmp = qmp_connect(qmp_path)
             prompt = ARTIFACTS / "prompt.ppm"
             qmp("screendump", filename=str(prompt))

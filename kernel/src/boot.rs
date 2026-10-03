@@ -1,13 +1,31 @@
 //! Versioned native firmware handoff and session startup policy.
 //! The handoff is distinct from the CFC persistence/Genesis storage format.
 
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 pub const UEFI_MAGIC: u32 = 0x4558_5055;
 const INFO_MAGIC: u64 = 0x4558_504f_5345_4649;
 static SINGLE_USER: AtomicBool = AtomicBool::new(false);
 static NATIVE_UEFI: AtomicBool = AtomicBool::new(false);
 static REQUESTED: AtomicU8 = AtomicU8::new(0);
+static GOP_VALID: AtomicBool = AtomicBool::new(false);
+static GOP_ADDRESS: AtomicU64 = AtomicU64::new(0);
+static GOP_BYTES: AtomicU64 = AtomicU64::new(0);
+static GOP_WIDTH: AtomicU32 = AtomicU32::new(0);
+static GOP_HEIGHT: AtomicU32 = AtomicU32::new(0);
+static GOP_STRIDE: AtomicU32 = AtomicU32::new(0);
+static GOP_FORMAT: AtomicU32 = AtomicU32::new(u32::MAX);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FirmwareFramebuffer {
+    pub address: u64,
+    pub bytes: u64,
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    /// UEFI GOP pixel format: zero is RGBX, one is BGRX.
+    pub format: u32,
+}
 
 #[repr(C)]
 struct NativeInfo {
@@ -33,6 +51,19 @@ pub fn single_user() -> bool {
 
 pub fn native_uefi() -> bool {
     NATIVE_UEFI.load(Ordering::Acquire)
+}
+
+pub fn firmware_framebuffer() -> Option<FirmwareFramebuffer> {
+    GOP_VALID
+        .load(Ordering::Acquire)
+        .then(|| FirmwareFramebuffer {
+            address: GOP_ADDRESS.load(Ordering::Relaxed),
+            bytes: GOP_BYTES.load(Ordering::Relaxed),
+            width: GOP_WIDTH.load(Ordering::Relaxed),
+            height: GOP_HEIGHT.load(Ordering::Relaxed),
+            stride: GOP_STRIDE.load(Ordering::Relaxed),
+            format: GOP_FORMAT.load(Ordering::Relaxed),
+        })
 }
 
 /// Set once at startup. Login/logout cannot enable services disabled by boot.
@@ -73,6 +104,15 @@ pub unsafe fn initialize(magic: u32, address: u64) {
         assert_eq!(info.memory_map_size % info.descriptor_size, 0);
         assert!(info.boot_mode <= 3);
         REQUESTED.store(info.boot_mode as u8, Ordering::Release);
+        if valid_framebuffer(info) {
+            GOP_ADDRESS.store(info.framebuffer, Ordering::Relaxed);
+            GOP_BYTES.store(info.framebuffer_size, Ordering::Relaxed);
+            GOP_WIDTH.store(info.width, Ordering::Relaxed);
+            GOP_HEIGHT.store(info.height, Ordering::Relaxed);
+            GOP_STRIDE.store(info.stride, Ordering::Relaxed);
+            GOP_FORMAT.store(info.format, Ordering::Relaxed);
+            GOP_VALID.store(true, Ordering::Release);
+        }
         crate::slog!("EXPOS_UEFI_HANDOFF version=1 boot_services=exited descriptors={} descriptor_size={}\r\n", info.memory_map_size / info.descriptor_size, info.descriptor_size);
         crate::slog!(
             "EXPOS_UEFI_GOP width={} height={} stride={} format={} address={:#x} bytes={}\r\n",
@@ -86,6 +126,31 @@ pub unsafe fn initialize(magic: u32, address: u64) {
         return;
     }
     NATIVE_UEFI.store(false, Ordering::Release);
+    GOP_VALID.store(false, Ordering::Release);
     assert_eq!(magic, 0x36d7_6289, "unknown firmware handoff");
     crate::slog!("EXPOS_BIOS_HANDOFF protocol=multiboot2\r\n");
+}
+
+fn valid_framebuffer(info: &NativeInfo) -> bool {
+    if info.framebuffer < 0x10_0000
+        || info.framebuffer >= 0x1_0000_0000
+        || info.framebuffer_size == 0
+        || info.width == 0
+        || info.height == 0
+        || info.stride < info.width
+        || !matches!(info.format, 0 | 1)
+    {
+        return false;
+    }
+    let Some(required) = (info.stride as u64)
+        .checked_mul(info.height as u64)
+        .and_then(|pixels| pixels.checked_mul(4))
+    else {
+        return false;
+    };
+    required <= info.framebuffer_size
+        && info
+            .framebuffer
+            .checked_add(info.framebuffer_size)
+            .is_some_and(|end| end <= 0x1_0000_0000)
 }

@@ -598,7 +598,7 @@ impl NativeApps {
                     x + 20,
                     y + 24,
                     "DISPLAY",
-                    framebuffer::current_mode().label(),
+                    framebuffer::active_output_label(),
                     color::CYAN,
                 );
                 metric(

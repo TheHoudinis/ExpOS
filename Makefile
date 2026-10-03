@@ -17,13 +17,13 @@ GENESIS_KERNEL := $(GENESIS_DIR)/kernel.elf
 GENESIS_PAYLOAD_OBJ := $(GENESIS_DIR)/uefi-payload.obj
 GENESIS_APP := $(GENESIS_DIR)/BOOTX64.EFI
 GENESIS_EFI_IMG := $(GENESIS_DIR)/efiboot.img
-GENESIS_ISO := $(BUILD)/ExpOS-0.9-x86_64.iso
+GENESIS_ISO := $(BUILD)/ExpOS-v9-x86_64.iso
 OVMF_CODE  ?= /usr/share/edk2/x64/OVMF_CODE.4m.fd
 OVMF_VARS  ?= /usr/share/edk2/x64/OVMF_VARS.4m.fd
 
-.PHONY: all iso genesis-iso genesis-check genesis-display-check run-genesis test check display-check session-check network-check internet-check https-check search-check wikipedia-check persistence-check ring3-check run debug clean legacy-alpha-check run-alpha ayo sdk rust-sdk go-sdk c-sdk python-sdk sdk-cli-check kernel-build genesis-kernel-build
+.PHONY: all iso genesis-iso genesis-check genesis-display-check run-genesis test check display-check session-check network-check internet-check https-check search-check wikipedia-check persistence-check modern-hardware-check ring3-check run debug clean legacy-alpha-check run-alpha ayo sdk rust-sdk go-sdk c-sdk python-sdk sdk-cli-check kernel-build genesis-kernel-build
 
-all: test check display-check session-check network-check persistence-check ayo sdk python-runtime-check python-check budget-check ring3-check uefi-check bootmode-check startup-check
+all: test check display-check session-check network-check persistence-check modern-hardware-check ayo sdk python-runtime-check python-check budget-check ring3-check uefi-check bootmode-check startup-check
 
 test:
 	cargo test --workspace
@@ -125,6 +125,7 @@ uefi-check: $(UEFI_BOOT_IMG)
 	truncate -s $(STATE_SIZE) $(BUILD)/uefi-state.img
 	TMPDIR=/tmp OVMF_CODE=$(OVMF_CODE) python3 tests/check-uefi.py uefi
 	grep -q 'EXPOS_UEFI_HANDOFF version=1 boot_services=exited' $(BUILD)/uefi-serial.log
+	grep -q 'EXPOS_FRAMEBUFFER_READY source=uefi-gop' $(BUILD)/uefi-serial.log
 	grep -q 'EXPOS_BOOT_OK' $(BUILD)/uefi-serial.log
 	grep -q 'EXPOS_LOGIN_OK user=operator' $(BUILD)/uefi-serial.log
 	grep -q 'hello from UEFI Ring 3' $(BUILD)/uefi-serial.log
@@ -163,7 +164,7 @@ check: $(ISO)
 	grep -q "EXPOS_PASSWORD_CHANGED artist" $(BUILD)/serial.log
 	grep -q "EXPOS_USER_DELETED artist" $(BUILD)/serial.log
 	grep -q "KERNEL FEATURE MATRIX" $(BUILD)/serial.log
-	grep -Fq ".--------.   .--------." $(BUILD)/serial.log
+	grep -Fq "______      ____    _____" $(BUILD)/serial.log
 	grep -q "kern.event.batch=4 (u64, operator-write)" $(BUILD)/serial.log
 	grep -q "EXPOS_SYSCTL_CHANGED node=kern.event.batch value=8" $(BUILD)/serial.log
 	grep -q "watch added: signal 7" $(BUILD)/serial.log
@@ -423,6 +424,10 @@ persistence-check: $(ISO)
 	! grep -q "violetmemory" $(BUILD)/persistence-read.log
 	grep -q "EXPOS_COMMAND_OK shutdown" $(BUILD)/persistence-read.log
 	@echo ">>> EXPOS PERSISTENCE TEST PASSED <<<"
+
+modern-hardware-check: $(ISO)
+	python3 tests/check-modern-hardware.py
+	@echo ">>> EXPOS MODERN HARDWARE TESTS PASSED <<<"
 
 run: run-uefi
 

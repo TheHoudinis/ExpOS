@@ -205,7 +205,7 @@ pub fn run() -> ! {
     slog!(
         "EXPOS_GENESIS_DISPLAY visible={} backend={}\r\n",
         graphical,
-        if graphical { "bochs-vbe" } else { "serial" }
+        if graphical { "uefi-gop" } else { "serial" }
     );
     println!();
     println!("ExpOS Genesis Engine 2");
@@ -230,7 +230,8 @@ pub fn run() -> ! {
         Err(error) => fatal(GenesisError::Storage(error)),
     };
     println!(
-        "Target: ATA primary master, {} MiB ({} sectors)",
+        "Target: {} block device, {} MiB ({} sectors)",
+        device.backend(),
         device.sectors() / 2048,
         device.sectors()
     );
@@ -301,7 +302,7 @@ pub fn run() -> ! {
     );
     println!("  CFC: {}", cfc_name);
     println!("  Primary Dimension: {}", primary_name);
-    println!("  Target: ATA primary master (whole disk)");
+    println!("  Target: {} block device (whole disk)", device.backend());
     println!("WARNING: the existing partition map and accessible data will be replaced.");
     println!("This operation is destructive, but it is not a forensic secure erase.");
     if line(&read_line(
