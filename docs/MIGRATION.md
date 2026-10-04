@@ -5,8 +5,8 @@ Ports land only after their interfaces are expressed in Form-native terms.
 
 | Alpha source | Useful implementation | v9 destination / rule | Status |
 |---|---|---|---|
-| `interrupts`, `paging` | IDT, PIC, PIT, PMM, heap | x86_64 platform layer; no semantic leakage | long-mode TSS/IDT, remapped PIC, 1 kHz PIT, static per-Form page-table arenas and CPL3 fault containment landed; APIC discovery plus PCI MSI/MSI-X vector/message preparation landed but device handlers are not armed; general physical-memory discovery/allocation and full exception coverage remain queued |
-| `process`, `sync` | scheduler, task state, locking | Form execution contexts, kernel synchronization, ExpScope confinement and per-context ExpBudget enforcement | CFC/Dimension/FIN contexts now switch CR3 and complete register images, run executable capsules at CPL3, preempt on PIT IRQ0, and charge real CPU ticks to ExpBudget; concurrent background dispatch and interrupt-driven device/event delivery remain queued; SMP is deliberately outside this phase |
+| `interrupts`, `paging` | IDT, PIC, PIT, PMM, heap | x86_64 platform layer; no semantic leakage | long-mode per-CPU TSS/IDT/GDT state, remapped PIC, BSP PIT and AP local-APIC timers, static per-Form page-table arenas and CPL3 fault containment landed; ACPI MADT CPU discovery and INIT/SIPI startup bring up to eight CPUs; PCI MSI/MSI-X vector/message preparation landed but device handlers are not armed; general physical-memory discovery/allocation and full exception coverage remain queued |
+| `process`, `sync` | scheduler, task state, locking | Form execution contexts, kernel synchronization, ExpScope confinement and per-context ExpBudget enforcement | CFC/Dimension/FIN contexts now switch CR3 and complete register images, run executable capsules at CPL3, preempt on hardware timers, charge real CPU ticks to ExpBudget and can reserve independent AP jobs for concurrent Form slices; `execute-parallel` exposes a bounded foreground pair while a general user-facing background job controller and interrupt-driven device/event delivery remain queued |
 | `intent`, `pipe` | typed intent and event transport | inter-Form messaging through CFC-scoped Form Handles governed by ExpSeal | CFC-scoped Handles, strictly attenuating delegation, revocation and broker-lifetime root-issuance sealing landed in the semantic core; durable per-context seals and universal boundary enforcement are queued |
 | `expfs*` | ATA I/O, cache, journal, revisions | per-CFC persistent Form graph and FIN index with AEAD, wrapped random storage keys, eight rotating checkpoints and protected installation baseline | atomic ExpFS current/checkpoint/baseline records now run over NVMe, AHCI SATA or ATA-PIO; arbitrary Form content survives reboot with Dimensions, relationships, revisions, PIMP state, capabilities, accounts and settings. EXPOST03 is read-only migration input; Basic AEAD/key wrapping and Operator-only baseline restore are live |
 | `driver`, `net`, `fb` | device, RTL8139, framebuffer code | capability-gated Driver Forms | ASL v1 inventory/exclusive claims; direct UEFI GOP with Bochs BIOS fallback; xHCI boot keyboard/mouse; NVMe queues and AHCI DMA; polling RTL8139 Ethernet, ARP, DHCP, IPv4, ICMP, UDP, DNS, TCP, HTTP and bounded TLS 1.3 landed. Device completion remains polling until prepared MSI/MSI-X vectors gain IDT handlers; GPU acceleration, EDID/mode negotiation, USB hubs/classes, IPv6 and physical Wi-Fi remain queued |
@@ -28,10 +28,10 @@ Ports land only after their interfaces are expressed in Form-native terms.
 3. Extend the landed static x86_64 Form page-table arenas, TSS/IDT/PIC/PIT and
    CPL3 fault containment with firmware memory discovery, a general physical
    page allocator and complete exception coverage.
-4. Extend the landed interrupt-preempted, CR3/register-switching Form scheduler
-   from synchronous command launches to concurrent/background dispatch and
-   connect typed messaging and interrupt-driven device events. SMP is not part
-   of this migration phase.
+4. Extend the landed interrupt-preempted, CR3/register-switching SMP Form
+   scheduler from the bounded `execute-parallel` pair to a user-facing
+   background job controller, then connect typed messaging and interrupt-driven
+   device events.
 5. Protect the landed per-CFC ExpFS current-state/checkpoint database with an independent
    random storage key per encrypted CFC, Argon2id-derived KEK wrapping and AEAD;
    and store the protected immutable installation baseline separately from the

@@ -322,15 +322,15 @@ expos_arch_install_form_tss:
 global expos_arch_enter_form
 expos_arch_enter_form:
         cli
-        mov [rel form_kernel_rsp], rsp
-        mov [rel form_kernel_rbx], rbx
-        mov [rel form_kernel_rbp], rbp
-        mov [rel form_kernel_r12], r12
-        mov [rel form_kernel_r13], r13
-        mov [rel form_kernel_r14], r14
-        mov [rel form_kernel_r15], r15
+        mov [gs:0], rsp
+        mov [gs:16], rbx
+        mov [gs:24], rbp
+        mov [gs:32], r12
+        mov [gs:40], r13
+        mov [gs:48], r14
+        mov [gs:56], r15
         mov rax, cr3
-        mov [rel form_kernel_cr3], rax
+        mov [gs:8], rax
         mov cr3, rdi
 
         ; Hardware iret frame: SS, RSP, RFLAGS, CS, RIP.
@@ -399,6 +399,7 @@ expos_arch_enter_form:
 %endmacro
 
 extern expos_form_timer_interrupt
+extern expos_form_interrupt_eoi
 extern expos_form_abi_interrupt
 extern expos_form_fault_interrupt
 
@@ -408,9 +409,9 @@ expos_form_timer_stub:
         FORM_PUSH_REGS
         mov rdi, rsp
         call expos_form_timer_interrupt
-        mov rdi, rax
-        mov al, 0x20
-        out 0x20, al                    ; master PIC EOI
+        mov rbx, rax
+        call expos_form_interrupt_eoi
+        mov rdi, rbx
         test rdi, rdi
         jnz .leave
         FORM_POP_REGS
@@ -457,15 +458,92 @@ expos_form_pf_stub:
 
 expos_arch_leave_form:
         cli
-        mov rdx, [rel form_kernel_cr3]
+        mov rdx, [gs:8]
         mov cr3, rdx
-        mov rsp, [rel form_kernel_rsp]
-        mov rbx, [rel form_kernel_rbx]
-        mov rbp, [rel form_kernel_rbp]
-        mov r12, [rel form_kernel_r12]
-        mov r13, [rel form_kernel_r13]
-        mov r14, [rel form_kernel_r14]
-        mov r15, [rel form_kernel_r15]
+        mov rsp, [gs:0]
+        mov rbx, [gs:16]
+        mov rbp, [gs:24]
+        mov r12, [gs:32]
+        mov r13, [gs:40]
+        mov r14, [gs:48]
+        mov r15, [gs:56]
         ret
+
+; ---------------------------------------------------------------------------
+; Relocatable AP startup page
+; ---------------------------------------------------------------------------
+
+; The BSP copies this block to physical 0x8000 and sends INIT/SIPI. Startup is
+; serialized through the mailbox at 0x8f00, so every AP receives its own stack
+; and logical CPU slot before the next processor is released.
+AP_TRAMPOLINE_PHYS equ 0x8000
+AP_MAILBOX_CR3     equ 0x8F00
+AP_MAILBOX_STACK   equ 0x8F08
+AP_MAILBOX_ENTRY   equ 0x8F10
+AP_MAILBOX_SLOT    equ 0x8F18
+
+align 16
+global expos_ap_trampoline_start
+global expos_ap_trampoline_end
+expos_ap_trampoline_start:
+bits 16
+        cli
+        xor ax, ax
+        mov ds, ax
+        mov es, ax
+        mov ss, ax
+        lgdt [cs:expos_ap_gdt_desc - expos_ap_trampoline_start]
+        mov eax, cr0
+        or eax, 1
+        mov cr0, eax
+        jmp dword 0x18:(AP_TRAMPOLINE_PHYS + expos_ap_protected - expos_ap_trampoline_start)
+
+bits 32
+expos_ap_protected:
+        mov ax, 0x10
+        mov ds, ax
+        mov es, ax
+        mov ss, ax
+        mov eax, cr4
+        or eax, 1 << 5
+        mov cr4, eax
+        mov eax, [AP_MAILBOX_CR3]
+        mov cr3, eax
+        mov ecx, MSR_EFER
+        rdmsr
+        or eax, EFER_LME
+        wrmsr
+        mov eax, cr0
+        or eax, 1 << 31
+        mov cr0, eax
+        jmp 0x08:(AP_TRAMPOLINE_PHYS + expos_ap_long - expos_ap_trampoline_start)
+
+bits 64
+expos_ap_long:
+        mov ax, 0x10
+        mov ds, ax
+        mov es, ax
+        mov ss, ax
+        mov rsp, [abs AP_MAILBOX_STACK]
+        xor ebp, ebp
+        mov rdi, [abs AP_MAILBOX_SLOT]
+        mov rax, [abs AP_MAILBOX_ENTRY]
+        call rax
+.halt:
+        cli
+        hlt
+        jmp .halt
+
+align 8
+expos_ap_gdt:
+        dq 0
+        dq 0x00209A0000000000           ; 0x08: 64-bit kernel code
+        dq 0x0000920000000000           ; 0x10: kernel data
+        dq 0x00CF9A000000FFFF           ; 0x18: 32-bit transition code
+expos_ap_gdt_end:
+expos_ap_gdt_desc:
+        dw expos_ap_gdt_end - expos_ap_gdt - 1
+        dd AP_TRAMPOLINE_PHYS + expos_ap_gdt - expos_ap_trampoline_start
+expos_ap_trampoline_end:
 
 section .note.GNU-stack noalloc noexec nowrite progbits

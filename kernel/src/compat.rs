@@ -133,17 +133,16 @@ fn factor(args: &str) {
 }
 
 fn neofetch() {
-    println!("        ______      ____    _____");
-    println!("       |  ____|    / __ \\  / ____|");
-    println!("       | |__ __  _| |  | || (___");
-    println!("       |  __|\\ \\/ /| |  | | \\___ \\");
-    println!("       | |____>  < | |__| | ____) |");
-    println!("       |______/_/\\_\\ \\____/ |_____/");
-    println!("OS: ExpOS v{}", env!("CARGO_PKG_VERSION"));
-    println!("Kernel: x86_64 Rust no_std");
-    println!("Model: Form-native / Dimension-oriented");
-    println!("Authority: Operator");
-    hardware::print_cpu_info();
+    println!("        .-------------------------------.");
+    println!("       /                                 \\");
+    println!("      |      .--------.   .--------.      |");
+    println!("      |     /          \\ /          \\     |");
+    println!("      |    |     O      |     O      |    |");
+    println!("      |     \\          / \\          /     |");
+    println!("      |      '--------'   '--------'      |");
+    println!("       \\_________________________________/");
+    println!("ExpOS v{}", env!("CARGO_PKG_VERSION"));
+    println!("x86_64");
 }
 
 fn sleep(args: &str) {

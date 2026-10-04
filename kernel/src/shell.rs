@@ -111,6 +111,16 @@ struct Shell {
     scheduler: Scheduler,
 }
 
+struct ParallelLaunch {
+    name: Text,
+    fin: Fin,
+    prepared: crate::form_runtime::PreparedForm,
+    execute_handle: FormHandle,
+    log_handle: FormHandle,
+    context_id: u32,
+    finished: bool,
+}
+
 impl Shell {
     fn session_capabilities(
         report: BootReport,
@@ -903,6 +913,10 @@ impl Shell {
                 self.execute_form(words.next());
                 true
             }
+            "execute-parallel" | "parallel" => {
+                self.execute_parallel(words.next(), words.next());
+                true
+            }
             "view" | "cat" => {
                 self.view_content(words.next(), None);
                 true
@@ -1056,7 +1070,9 @@ impl Shell {
         shell_heading("COMMAND INDEX");
         println!("  CORE       help clear echo about status bootmode whoami history");
         println!("  SESSION    users login logout useradd userdel passwd");
-        println!("  FORMS      forms inspect resolve mkform execute retire activate reclaim");
+        println!(
+            "  FORMS      forms inspect resolve mkform execute execute-parallel retire activate reclaim"
+        );
         println!("  DATA       view/cat write append head delete recover move copy");
         println!(
             "  STORAGE    hexdump du shasum df which checkpoint checkpoints baseline restorepoint restorebaseline"
@@ -2230,6 +2246,359 @@ impl Shell {
         let _ = self.scheduler.dispatch_next();
     }
 
+    fn prepare_parallel_launch(&mut self, identity: &str) -> Option<ParallelLaunch> {
+        let Some(form) = self.find_form(identity).copied() else {
+            println!("No Form named '{}'.", identity);
+            return None;
+        };
+        if form.kind != FormKind::Executable || form.lifecycle != Lifecycle::Active {
+            println!(
+                "DIESE denied: '{}' must be an active executable Form.",
+                identity
+            );
+            return None;
+        }
+        let Some(parent) = self.handles.iter().flatten().copied().find(|handle| {
+            !handle.revoked
+                && handle.target == form.fin
+                && handle.dimension == self.report.stable_fin
+                && handle.operations.contains(Operations::EXECUTE)
+        }) else {
+            println!(
+                "DIESE denied: grant '{}' execute capability before scheduling it.",
+                identity
+            );
+            return None;
+        };
+        let now = crate::hardware::timestamp();
+        if self
+            .broker
+            .authorize(
+                parent.id,
+                form.fin,
+                self.report.stable_fin,
+                Operations::EXECUTE,
+                now,
+            )
+            .is_err()
+        {
+            println!("DIESE denied: the Execute Handle is no longer valid.");
+            return None;
+        }
+        let execute_handle = if let Some(child) = self.broker.find_authorized(
+            form.fin,
+            form.fin,
+            self.report.stable_fin,
+            Operations::EXECUTE,
+            now,
+        ) {
+            child
+        } else {
+            let valid_until = parent.valid_until_tick.saturating_sub(1);
+            match self
+                .broker
+                .delegate(parent.id, form.fin, Operations::EXECUTE, valid_until, now)
+            {
+                Ok(child) => child,
+                Err(error) => {
+                    println!(
+                        "DIESE could not derive the Form-owned Execute Handle: {:?}.",
+                        error
+                    );
+                    return None;
+                }
+            }
+        };
+        let log_handle = if let Some(existing) = self.broker.find_authorized(
+            form.fin,
+            FORM_ABI_FIN,
+            self.report.stable_fin,
+            Operations::READ,
+            now,
+        ) {
+            existing
+        } else {
+            match self.broker.issue_for(
+                form.fin,
+                self.session.authority(),
+                FORM_ABI_FIN,
+                self.report.stable_fin,
+                Operations::READ,
+                u64::MAX,
+            ) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    println!(
+                        "DIESE could not issue the bounded Form ABI Log Handle: {:?}.",
+                        error
+                    );
+                    return None;
+                }
+            }
+        };
+        if self.broker.seal(form.fin, self.report.stable_fin).is_none()
+            && self
+                .broker
+                .seal_context(form.fin, self.report.stable_fin)
+                .is_err()
+        {
+            println!(
+                "ExpSeal could not close ambient authority for '{}'.",
+                identity
+            );
+            return None;
+        }
+        let index = self
+            .forms
+            .iter()
+            .position(|candidate| candidate.is_some_and(|candidate| candidate.fin == form.fin))
+            .expect("parallel Form remains registered");
+        let content = self.content[index];
+        let Some(prepared) = crate::form_runtime::prepare(
+            form.fin,
+            execute_handle,
+            log_handle,
+            &content.bytes[..content.length as usize],
+        ) else {
+            println!("No isolated native address-space slot is available.");
+            return None;
+        };
+        let address_space = prepared.address_space();
+        let identity_key =
+            ExecutionIdentity::new(self.report.cfc_fin, self.report.stable_fin, form.fin);
+        let mut context = match ExecutionContext::new(identity_key, address_space, 256) {
+            Ok(context) => context,
+            Err(error) => {
+                crate::form_runtime::finish(prepared);
+                println!("Scheduler rejected the native address space: {:?}.", error);
+                return None;
+            }
+        };
+        context.set_runtime(ExecutionRuntime::NativeForm);
+        for launch_handle in [execute_handle, log_handle] {
+            if let Err(error) = context.attach_handle(launch_handle) {
+                crate::form_runtime::finish(prepared);
+                println!("Scheduler rejected the Form Handle set: {:?}.", error);
+                return None;
+            }
+        }
+        let context_id = match self.scheduler.admit(context) {
+            Ok(id) => id,
+            Err(error) => {
+                crate::form_runtime::finish(prepared);
+                println!("Scheduler admission failed: {:?}.", error);
+                return None;
+            }
+        };
+        slog!(
+            "EXPOS_RING3_PARALLEL_ADMIT context={} fin={} cr3={:#x}\r\n",
+            context_id,
+            form.fin,
+            address_space.root
+        );
+        Some(ParallelLaunch {
+            name: form.name,
+            fin: form.fin,
+            prepared,
+            execute_handle,
+            log_handle,
+            context_id,
+            finished: false,
+        })
+    }
+
+    fn account_parallel_slice(
+        &mut self,
+        launch: &mut ParallelLaunch,
+        slice: crate::form_runtime::SliceResult,
+    ) {
+        self.scheduler
+            .resume(launch.context_id)
+            .expect("parallel Form is ready before slice accounting");
+        let cpu = CpuState {
+            instruction_pointer: slice.frame.rip,
+            stack_pointer: slice.frame.rsp,
+            flags: slice.frame.rflags,
+            accumulator: slice.frame.rax,
+        };
+        match slice.reason {
+            crate::form_runtime::SliceReason::Preempted => {
+                self.scheduler
+                    .preempt(launch.context_id, cpu, slice.timer_ticks.max(1), false)
+                    .expect("parallel timer preemption targets the running Form");
+            }
+            crate::form_runtime::SliceReason::BudgetExhausted => {
+                self.scheduler
+                    .preempt(launch.context_id, cpu, slice.timer_ticks, true)
+                    .expect("parallel budget expiry targets the running Form");
+                let ticks = self
+                    .scheduler
+                    .context(launch.context_id)
+                    .unwrap()
+                    .cpu_ticks();
+                println!(
+                    "ExpBudget stopped '{}' after {} hardware timer ticks.",
+                    launch.name, ticks
+                );
+                launch.finished = true;
+            }
+            crate::form_runtime::SliceReason::Exited => {
+                self.scheduler
+                    .finish_slice(
+                        launch.context_id,
+                        cpu,
+                        slice.timer_ticks.max(1),
+                        slice.result,
+                    )
+                    .expect("parallel ABI exit targets the running Form");
+                println!(
+                    "Executable Form '{}' exited with result {} in Ring 3.",
+                    launch.name, slice.result
+                );
+                launch.finished = true;
+            }
+            crate::form_runtime::SliceReason::Fault(vector) => {
+                self.scheduler
+                    .finish_slice(
+                        launch.context_id,
+                        cpu,
+                        slice.timer_ticks.max(1),
+                        128_u64.saturating_add(vector as u64),
+                    )
+                    .expect("parallel fault exit targets the running Form");
+                println!(
+                    "Executable Form '{}' faulted at vector {}.",
+                    launch.name, vector
+                );
+                launch.finished = true;
+            }
+        }
+    }
+
+    fn execute_parallel(&mut self, first: Option<&str>, second: Option<&str>) {
+        let (Some(first), Some(second)) = (first, second) else {
+            println!("usage: execute-parallel <Form-A> <Form-B>");
+            return;
+        };
+        if first == second {
+            println!("Parallel launches require two distinct Form identities.");
+            return;
+        }
+        if crate::smp::online_count() < 2 {
+            println!("Parallel execution requires at least two online CPUs.");
+            return;
+        }
+        let Some(mut left) = self.prepare_parallel_launch(first) else {
+            return;
+        };
+        let Some(mut right) = self.prepare_parallel_launch(second) else {
+            let _ = self.scheduler.finish(left.context_id, 255);
+            crate::form_runtime::finish(left.prepared);
+            return;
+        };
+        println!(
+            "Running '{}' and '{}' concurrently across {} online CPUs.",
+            left.name,
+            right.name,
+            crate::smp::online_count()
+        );
+        slog!(
+            "EXPOS_SMP_PARALLEL_START left={} right={} cpus={}\r\n",
+            left.fin,
+            right.fin,
+            crate::smp::online_count()
+        );
+
+        while !left.finished || !right.finished {
+            let left_remaining = (!left.finished).then(|| {
+                self.scheduler
+                    .context(left.context_id)
+                    .unwrap()
+                    .budget()
+                    .account(ResourceKind::CpuTicks)
+                    .remaining_before_soft()
+            });
+            let right_remaining = (!right.finished).then(|| {
+                self.scheduler
+                    .context(right.context_id)
+                    .unwrap()
+                    .budget()
+                    .account(ResourceKind::CpuTicks)
+                    .remaining_before_soft()
+            });
+
+            let left_authorization = crate::form_runtime::RunAuthorization::new(
+                &self.broker,
+                self.report.cfc_fin,
+                self.report.stable_fin,
+                left.fin,
+                left.execute_handle,
+                left.log_handle,
+            );
+            let right_authorization = crate::form_runtime::RunAuthorization::new(
+                &self.broker,
+                self.report.cfc_fin,
+                self.report.stable_fin,
+                right.fin,
+                right.execute_handle,
+                right.log_handle,
+            );
+
+            let left_pending = left_remaining.and_then(|remaining| {
+                crate::form_runtime::submit_ap_slice(
+                    &mut left.prepared,
+                    left_authorization,
+                    remaining,
+                )
+            });
+            let right_pending = right_remaining.and_then(|remaining| {
+                crate::form_runtime::submit_ap_slice(
+                    &mut right.prepared,
+                    right_authorization,
+                    remaining,
+                )
+            });
+
+            let right_result = if let Some(pending) = right_pending {
+                Some(crate::form_runtime::join_ap_slice(pending))
+            } else {
+                right_remaining.map(|remaining| {
+                    crate::form_runtime::run_slice(
+                        &mut right.prepared,
+                        right_authorization,
+                        remaining,
+                    )
+                })
+            };
+            let left_result = if let Some(pending) = left_pending {
+                Some(crate::form_runtime::join_ap_slice(pending))
+            } else {
+                left_remaining.map(|remaining| {
+                    crate::form_runtime::run_slice(
+                        &mut left.prepared,
+                        left_authorization,
+                        remaining,
+                    )
+                })
+            };
+            if let Some(slice) = left_result {
+                self.account_parallel_slice(&mut left, slice);
+            }
+            if let Some(slice) = right_result {
+                self.account_parallel_slice(&mut right, slice);
+            }
+        }
+
+        slog!(
+            "EXPOS_SMP_PARALLEL_COMPLETE left={} right={}\r\n",
+            left.fin,
+            right.fin
+        );
+        crate::form_runtime::finish(left.prepared);
+        crate::form_runtime::finish(right.prepared);
+        let _ = self.scheduler.dispatch_next();
+    }
+
     fn inspect(&self, identity: Option<&str>) {
         let Some(identity) = identity else {
             println!("usage: inspect <Form-name>");
@@ -3027,6 +3396,8 @@ fn is_shell_command(name: &str) -> bool {
             | "handles"
             | "mkform"
             | "execute"
+            | "execute-parallel"
+            | "parallel"
             | "view"
             | "cat"
             | "head"
@@ -3385,6 +3756,14 @@ mod tests {
                 !is_mutating_command(command),
                 "subcommand authorization must remain fine-grained: {command}"
             );
+            assert!(!is_operator_command(command));
+        }
+    }
+
+    #[test]
+    fn command_registry_includes_parallel_form_execution() {
+        for command in ["execute-parallel", "parallel"] {
+            assert!(is_shell_command(command), "missing command: {command}");
             assert!(!is_operator_command(command));
         }
     }

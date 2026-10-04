@@ -10,11 +10,14 @@ pub const KEY_DOWN: u8 = 0x81;
 pub const KEY_LEFT: u8 = 0x82;
 pub const KEY_RIGHT: u8 = 0x83;
 pub const KEY_SUPER_LAUNCHER: u8 = 0x90;
-pub const KEY_SUPER_TERMINAL: u8 = 0x91;
-pub const KEY_SUPER_BROWSER: u8 = 0x92;
 pub const KEY_SUPER_CLOSE: u8 = 0x93;
 pub const KEY_SUPER_CYCLE: u8 = 0x94;
 pub const KEY_SUPER_FULLSCREEN: u8 = 0x95;
+pub const KEY_DESKTOP_SHELL_CONFIRM: u8 = 0x96;
+pub const KEY_SUPER_ALT_LEFT: u8 = 0x97;
+pub const KEY_SUPER_ALT_RIGHT: u8 = 0x98;
+pub const KEY_SUPER_ALT_UP: u8 = 0x99;
+pub const KEY_SUPER_ALT_DOWN: u8 = 0x9A;
 pub const KEY_SUPER_LEFT: u8 = 0x9B;
 pub const KEY_SUPER_RIGHT: u8 = 0x9C;
 pub const KEY_SUPER_UP: u8 = 0x9D;
@@ -37,6 +40,8 @@ pub enum InputEvent {
 
 pub struct Input {
     shift: bool,
+    control: bool,
+    alt: bool,
     caps_lock: bool,
     extended: bool,
     super_key: bool,
@@ -53,6 +58,8 @@ impl Input {
     pub const fn new() -> Self {
         Self {
             shift: false,
+            control: false,
+            alt: false,
             caps_lock: false,
             extended: false,
             super_key: false,
@@ -226,19 +233,53 @@ impl Input {
                     self.super_key = false;
                     None
                 }
-                0x48 => Some(if self.super_key { KEY_SUPER_UP } else { KEY_UP }),
+                0x1D => {
+                    self.control = true;
+                    None
+                }
+                0x9D => {
+                    self.control = false;
+                    None
+                }
+                0x38 => {
+                    self.alt = true;
+                    None
+                }
+                0xB8 => {
+                    self.alt = false;
+                    None
+                }
+                0x48 => Some(if self.super_key && self.alt {
+                    KEY_SUPER_ALT_UP
+                } else if self.super_key {
+                    KEY_SUPER_UP
+                } else {
+                    KEY_UP
+                }),
                 0x50 => Some(if self.super_key {
-                    KEY_SUPER_DOWN
+                    if self.alt {
+                        KEY_SUPER_ALT_DOWN
+                    } else {
+                        KEY_SUPER_DOWN
+                    }
                 } else {
                     KEY_DOWN
                 }),
                 0x4B => Some(if self.super_key {
-                    KEY_SUPER_LEFT
+                    if self.alt {
+                        KEY_SUPER_ALT_LEFT
+                    } else {
+                        KEY_SUPER_LEFT
+                    }
                 } else {
                     KEY_LEFT
                 }),
                 0x4D => Some(if self.super_key {
-                    KEY_SUPER_RIGHT
+                    if self.alt {
+                        KEY_SUPER_ALT_RIGHT
+                    } else {
+                        KEY_SUPER_RIGHT
+                    }
                 } else {
                     KEY_RIGHT
                 }),
@@ -252,6 +293,22 @@ impl Input {
             }
             0xAA | 0xB6 => {
                 self.shift = false;
+                return None;
+            }
+            0x1D => {
+                self.control = true;
+                return None;
+            }
+            0x9D => {
+                self.control = false;
+                return None;
+            }
+            0x38 => {
+                self.alt = true;
+                return None;
+            }
+            0xB8 => {
+                self.alt = false;
                 return None;
             }
             0x3A => {
@@ -317,6 +374,9 @@ impl Input {
             0x39 => b' ',
             _ => return None,
         };
+        if base == 0x1B && self.control && self.shift {
+            return Some(KEY_DESKTOP_SHELL_CONFIRM);
+        }
         let key = apply_modifiers(base, self.shift, self.caps_lock);
         if self.super_key {
             super_binding(key)
@@ -424,8 +484,6 @@ fn mouse_command(command: u8) -> bool {
 pub(crate) fn super_binding(key: u8) -> Option<u8> {
     match key.to_ascii_lowercase() {
         b' ' => Some(KEY_SUPER_LAUNCHER),
-        b'\n' => Some(KEY_SUPER_TERMINAL),
-        b'b' => Some(KEY_SUPER_BROWSER),
         b'q' => Some(KEY_SUPER_CLOSE),
         b'\t' => Some(KEY_SUPER_CYCLE),
         b'f' => Some(KEY_SUPER_FULLSCREEN),
@@ -472,7 +530,10 @@ pub(crate) fn apply_modifiers(byte: u8, shift: bool, caps_lock: bool) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{can_merge_pointer_motion, Input, InputEvent, PointerEvent};
+    use super::{
+        can_merge_pointer_motion, Input, InputEvent, PointerEvent, KEY_DESKTOP_SHELL_CONFIRM,
+        KEY_SUPER_ALT_DOWN, KEY_SUPER_RIGHT,
+    };
 
     const fn pointer(dx: i16, dy: i16, buttons: u8, pressed: u8, released: u8) -> PointerEvent {
         PointerEvent {
@@ -511,5 +572,24 @@ mod tests {
 
         assert_eq!(input.poll_event(), Some(transition));
         assert!(input.pending_event.is_none());
+    }
+
+    #[test]
+    fn ps2_modifiers_emit_shell_confirmation_and_window_actions() {
+        let mut input = Input::new();
+        assert_eq!(input.decode_scancode(0x1D), None); // Ctrl
+        assert_eq!(input.decode_scancode(0x2A), None); // Shift
+        assert_eq!(input.decode_scancode(0x01), Some(KEY_DESKTOP_SHELL_CONFIRM));
+        assert_eq!(input.decode_scancode(0x9D), None);
+        assert_eq!(input.decode_scancode(0xAA), None);
+
+        assert_eq!(input.decode_scancode(0xE0), None);
+        assert_eq!(input.decode_scancode(0x5B), None); // Super
+        assert_eq!(input.decode_scancode(0xE0), None);
+        assert_eq!(input.decode_scancode(0x4D), Some(KEY_SUPER_RIGHT));
+        assert_eq!(input.decode_scancode(0xE0), None);
+        assert_eq!(input.decode_scancode(0x38), None); // Alt
+        assert_eq!(input.decode_scancode(0xE0), None);
+        assert_eq!(input.decode_scancode(0x50), Some(KEY_SUPER_ALT_DOWN));
     }
 }

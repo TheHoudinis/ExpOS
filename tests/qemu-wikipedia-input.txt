@@ -3,5 +3,6 @@ operator
 expos
 browser
 /https://en.wikipedia.org/wiki/NetBSD
-q
+~	?
+console
 shutdown

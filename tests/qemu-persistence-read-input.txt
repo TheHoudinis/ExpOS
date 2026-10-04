@@ -5,7 +5,8 @@ whoami
 safevideo
 displayreset
 desktop
-q
+~	?
+console
 view MyNotes
 execute MyNotes
 checkpoints

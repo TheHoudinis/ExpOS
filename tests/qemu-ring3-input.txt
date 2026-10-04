@@ -13,5 +13,12 @@ mkform BudgetLoop executable
 write BudgetLoop native:spin
 grant BudgetLoop execute
 execute BudgetLoop
+mkform ParallelLeft executable
+write ParallelLeft native:log parallel left
+grant ParallelLeft execute
+mkform ParallelRight executable
+write ParallelRight native:log parallel right
+grant ParallelRight execute
+execute-parallel ParallelLeft ParallelRight
 ps
 shutdown

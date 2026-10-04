@@ -154,6 +154,14 @@ class Startup:
             self.qmp("send-key", keys=[{"type": "qcode", "data": name}], **{"hold-time": 30})
             time.sleep(0.08)
 
+    def keys(self, *names):
+        self.qmp(
+            "send-key",
+            keys=[{"type": "qcode", "data": name} for name in names],
+            **{"hold-time": 40},
+        )
+        time.sleep(0.12)
+
     def picture(self, name, graphical=True, previous=None):
         # QEMU's UI refresh can lag a completed guest frame by one timer tick.
         time.sleep(0.2)
@@ -173,10 +181,16 @@ class Startup:
         self.type("operator\nexpos\n")
         self.wait_for("EXPOS_DESKTOP_EMPTY")
         desktop = self.picture("desktop", previous=login)
-        self.type("b")
+        self.keys("meta_l", "spc")
+        self.type("\n")
         self.wait_for("EXPOS_APP_OPENED BROWSER")
         self.picture("browser", previous=desktop)
-        self.type("q")
+        self.keys("ctrl", "shift", "esc")
+        self.wait_for("EXPOS_SHELL_CONFIRMATION state=open")
+        self.type("y")
+        self.wait_for("EXPOS_SHELL_CONFIRMATION state=accepted")
+        self.wait_for("EXPOS_APP_OPENED TERMINAL")
+        self.type("console\n")
         self.wait_for("EXPOS_SHELL_READY")
         # UEFI keeps a GOP-backed text renderer active because VGA text memory
         # is not scanout on modern firmware. BIOS restores hardware text mode.

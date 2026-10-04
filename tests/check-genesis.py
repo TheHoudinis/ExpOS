@@ -61,7 +61,7 @@ def run(name: str, command: list[str], ready: bytes, supplied: bytes, timeout: i
 
 
 base = [
-    "qemu-system-x86_64", "-machine", "pc", "-cpu", "max", "-m", "256M",
+    "qemu-system-x86_64", "-machine", "pc", "-cpu", "max", "-smp", "4", "-m", "256M",
     "-vga", "std", "-display", "none", "-serial", "stdio", "-no-reboot",
 ]
 
@@ -80,8 +80,8 @@ def check_variant(name: str, mode: bytes, encrypted: bool) -> None:
     install_status, install_output = run(
         f"{name}-install",
         install_command,
-        b"Installation mode [1/2]:",
-        mode + b"\n" + common,
+        b"Language [1-5]:",
+        b"1\n" + mode + b"\n" + common,
         240 if encrypted else 150,
     )
     assert install_status == 0, (

@@ -14,7 +14,7 @@ name = "single" if single else "uefi"
 code = os.environ.get("OVMF_CODE", "/usr/share/edk2/x64/OVMF_CODE.4m.fd")
 boot_image = root / f"build/{name}-test-boot.img"
 shutil.copyfile(root / "build/uefi-boot.img", boot_image)
-command = ["qemu-system-x86_64", "-machine", "pc", "-cpu", "max", "-m", "256M",
+command = ["qemu-system-x86_64", "-machine", "pc", "-cpu", "max", "-smp", "4", "-m", "256M",
            "-vga", "std", "-global", "VGA.vgamem_mb=16", "-netdev", "user,id=net0",
            "-device", "rtl8139,netdev=net0", "-drive", f"if=pflash,format=raw,readonly=on,file={code}",
            "-drive", f"if=pflash,format=raw,file=build/OVMF-{name}-vars.fd",

@@ -105,7 +105,7 @@ def main() -> None:
         )
         qmp_path = scratch / "qmp.sock"
         command = [
-            "qemu-system-x86_64", "-machine", "pc", "-cpu", "max", "-m", "256M",
+            "qemu-system-x86_64", "-machine", "pc", "-cpu", "max", "-smp", "4", "-m", "256M",
             "-vga", "std", "-global", "VGA.vgamem_mb=16", "-display", "none",
             "-drive", f"if=pflash,format=raw,readonly=on,file={os.environ.get('OVMF_CODE', '/usr/share/edk2/x64/OVMF_CODE.4m.fd')}",
             "-drive", f"if=pflash,format=raw,file={variables}",
@@ -119,9 +119,12 @@ def main() -> None:
         connection = wire = None
         deadline = time.monotonic() + 45
         try:
-            wait_for(serial, "Installation mode [1/2]:", process, deadline)
+            wait_for(serial, "Language [1-5]:", process, deadline)
             wait_for(serial, "EXPOS_GENESIS_DISPLAY visible=true backend=uefi-gop", process, deadline)
             connection, wire, qmp = qmp_connect(qmp_path)
+            qmp("send-key", keys=[{"type": "qcode", "data": "1"}], **{"hold-time": 30})
+            qmp("send-key", keys=[{"type": "qcode", "data": "ret"}], **{"hold-time": 30})
+            wait_for(serial, "Installation mode [1/2]:", process, deadline)
             prompt = ARTIFACTS / "prompt.ppm"
             qmp("screendump", filename=str(prompt))
             prompt_pixels = inspect_genesis_picture(prompt)

@@ -2,16 +2,18 @@ use crate::{
     display_timing::{FrameDecision, FramePacer, RefreshRate, TimingConfig, VSyncPolicy},
     framebuffer,
     input::{
-        Input, InputEvent, PointerEvent, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_SUPER_BROWSER,
+        Input, InputEvent, PointerEvent, KEY_DESKTOP_SHELL_CONFIRM, KEY_DOWN, KEY_LEFT, KEY_RIGHT,
+        KEY_SUPER_ALT_DOWN, KEY_SUPER_ALT_LEFT, KEY_SUPER_ALT_RIGHT, KEY_SUPER_ALT_UP,
         KEY_SUPER_CLOSE, KEY_SUPER_CYCLE, KEY_SUPER_DOWN, KEY_SUPER_FULLSCREEN, KEY_SUPER_LAUNCHER,
-        KEY_SUPER_LEFT, KEY_SUPER_RIGHT, KEY_SUPER_TERMINAL, KEY_SUPER_UP, KEY_UP,
+        KEY_SUPER_LEFT, KEY_SUPER_RIGHT, KEY_SUPER_UP, KEY_UP,
     },
+    locale::{Locale, Text as LocalText},
     network, radio, slog, state,
 };
 use expos_core::{
     AbiCall, AbiRequest, AbiResponse, AbiStatus, Authority, BrowserText, BufferFormat,
-    BufferHandle, CapabilityBroker, CfcFin, DisplayServer, Document, Fin, NativeCallGate, NodeKind,
-    Operations, Rect, SurfaceRole, TextAlign, FORM_ABI_VERSION,
+    BufferHandle, CapabilityBroker, CfcFin, DisplayServer, Document, Fin, FormKind, NativeCallGate,
+    NodeKind, Operations, Rect, SurfaceRole, TextAlign, FORM_ABI_VERSION,
 };
 use framebuffer::color;
 
@@ -28,6 +30,8 @@ pub const APPS_FIN: Fin = Fin::from_u128(0x4150_5053_0000_0000_0000_0000_0000_00
 pub const AYO_FIN: Fin = Fin::from_u128(0x4159_4F00_0000_0000_0000_0000_0000_0001);
 
 const APP_COUNT: usize = 9;
+const DESKTOP_UI_STATE: &str = "DesktopUI.state";
+const DESKTOP_UI_MAGIC: [u8; 4] = *b"DUI1";
 const TERMINAL_HISTORY: usize = 24;
 const TERMINAL_CAPACITY: usize = 96;
 const TERMINAL_SCROLLBACK: usize = 40;
@@ -513,18 +517,8 @@ impl AppKind {
         }
     }
 
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Browser => "Browser",
-            Self::Terminal => "Terminal",
-            Self::Forms => "Forms",
-            Self::Packages => "Ayo",
-            Self::Settings => "Settings",
-            Self::System => "System",
-            Self::Games => "Games",
-            Self::Notes => "Notes",
-            Self::Apps => "Apps",
-        }
+    const fn localized_label(self, locale: Locale) -> &'static str {
+        locale.app(self.index())
     }
 
     const fn owner(self) -> Fin {
@@ -616,15 +610,21 @@ fn launcher_item_count(desktop: &DesktopState) -> usize {
 }
 
 fn launcher_columns(preferences: DesktopPreferences) -> usize {
-    if preferences.menu_grid {
-        2
-    } else {
-        1
+    match preferences.menu_layout {
+        0 => 1,
+        2 => 3,
+        3 => 2,
+        _ => 2,
     }
 }
 
 fn launcher_row_height(preferences: DesktopPreferences) -> i32 {
-    state::MENU_ROW_HEIGHTS_PX[preferences.menu_density.min(4) as usize] as i32
+    let base = state::MENU_ROW_HEIGHTS_PX[preferences.menu_density.min(4) as usize] as i32;
+    match preferences.menu_layout {
+        2 => (base - 4).max(18),
+        3 => base + 12,
+        _ => base,
+    }
 }
 
 fn launcher_visible_rows(preferences: DesktopPreferences) -> usize {
@@ -636,7 +636,7 @@ fn launcher_capacity(preferences: DesktopPreferences) -> usize {
     launcher_visible_rows(preferences) * launcher_columns(preferences)
 }
 
-const SETTINGS_CATEGORY_COUNT: usize = 14;
+const SETTINGS_CATEGORY_COUNT: usize = 16;
 const CUSTOMIZATION_VALUE_COUNT: usize = state::THEME_PALETTE_CHOICES
     + state::WALLPAPER_VARIANT_CHOICES
     + state::ACCENT_COLOR_CHOICES
@@ -687,6 +687,8 @@ enum SettingsCategory {
     Menu,
     Privacy,
     About,
+    Terminal,
+    Language,
 }
 
 impl SettingsCategory {
@@ -705,6 +707,8 @@ impl SettingsCategory {
         Self::Accessibility,
         Self::Privacy,
         Self::About,
+        Self::Terminal,
+        Self::Language,
     ];
 
     const fn index(self) -> usize {
@@ -723,25 +727,8 @@ impl SettingsCategory {
             Self::Accessibility => 11,
             Self::Privacy => 12,
             Self::About => 13,
-        }
-    }
-
-    const fn label(self) -> &'static str {
-        match self {
-            Self::System => "System",
-            Self::Profiles => "Profiles",
-            Self::Appearance => "Appearance",
-            Self::Accessibility => "Accessibility",
-            Self::Network => "Network & Wi-Fi",
-            Self::Bluetooth => "Bluetooth",
-            Self::Display => "Display",
-            Self::Performance => "Performance",
-            Self::Input => "Mouse & keyboard",
-            Self::Windows => "Windows",
-            Self::Taskbar => "Taskbar",
-            Self::Menu => "Menu",
-            Self::Privacy => "Privacy",
-            Self::About => "About",
+            Self::Terminal => 14,
+            Self::Language => 15,
         }
     }
 
@@ -761,6 +748,8 @@ impl SettingsCategory {
             Self::Menu => "Launcher layout, contents, and motion",
             Self::Privacy => "Local data and access",
             Self::About => "ExpOS system information",
+            Self::Terminal => "Font, size, color, and spacing",
+            Self::Language => "System and Genesis language",
         }
     }
 
@@ -780,6 +769,8 @@ impl SettingsCategory {
             Self::Menu => 9,
             Self::Privacy => 2,
             Self::About => 4,
+            Self::Terminal => 5,
+            Self::Language => 5,
         }
     }
 
@@ -941,6 +932,11 @@ const TASKBAR_SIZE_LABELS: [&str; 9] = [
 const MENU_DENSITY_LABELS: [&str; 5] = ["Dense", "Compact", "Balanced", "Comfortable", "Large"];
 const ANIMATION_LABELS: [&str; 5] = ["Off", "Fast", "Balanced", "Smooth", "Cinematic"];
 const UI_SCALE_LABELS: [&str; 7] = ["100%", "80%", "90%", "110%", "125%", "150%", "200%"];
+const MENU_LAYOUT_LABELS: [&str; 4] = ["List", "Grid", "Compact grid", "Dashboard"];
+const TERMINAL_SCALE_LABELS: [&str; 3] = ["Small", "Medium", "Large"];
+const TERMINAL_COLOR_LABELS: [&str; 8] = [
+    "Default", "White", "Green", "Cyan", "Amber", "Rose", "Blue", "Black",
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AccentChoice(u8);
@@ -1328,6 +1324,13 @@ struct DesktopPreferences {
     menu_show_installed: bool,
     menu_grid: bool,
     menu_categories: bool,
+    menu_layout: u8,
+    terminal_font_face: framebuffer::FontFace,
+    terminal_font_weight: framebuffer::FontWeight,
+    terminal_scale: u8,
+    terminal_foreground: u8,
+    terminal_background: u8,
+    locale: u8,
 }
 
 impl DesktopPreferences {
@@ -1472,7 +1475,51 @@ impl DesktopPreferences {
             menu_show_installed: flags & state::PREF_MENU_HIDE_INSTALLED == 0,
             menu_grid: flags & state::PREF_MENU_GRID != 0,
             menu_categories: flags & state::PREF_MENU_CATEGORIES != 0,
+            menu_layout: u8::from(flags & state::PREF_MENU_GRID != 0),
+            terminal_font_face: framebuffer::FontFace::System,
+            terminal_font_weight: framebuffer::FontWeight::Regular,
+            terminal_scale: 0,
+            terminal_foreground: 0,
+            terminal_background: 0,
+            locale: crate::locale::active().persisted(),
         }
+    }
+
+    fn load_ui_extension(mut self, cfc: CfcFin) -> Self {
+        let Some((bytes, length)) = crate::expfs_store::load_data_form(cfc, DESKTOP_UI_STATE)
+        else {
+            return self;
+        };
+        if length < 11 || bytes[..4] != DESKTOP_UI_MAGIC {
+            return self;
+        }
+        self.locale = bytes[4].min(4);
+        self.menu_layout = bytes[5].min(3);
+        self.menu_grid = self.menu_layout != 0;
+        self.terminal_font_face = framebuffer::FontFace::from_persisted(bytes[6])
+            .unwrap_or(framebuffer::FontFace::System);
+        self.terminal_font_weight = framebuffer::FontWeight::from_persisted(bytes[7])
+            .unwrap_or(framebuffer::FontWeight::Regular);
+        self.terminal_scale = bytes[8].min(2);
+        self.terminal_foreground = bytes[9].min(7);
+        self.terminal_background = bytes[10].min(7);
+        self
+    }
+
+    fn encode_ui_extension(self) -> [u8; 11] {
+        [
+            DESKTOP_UI_MAGIC[0],
+            DESKTOP_UI_MAGIC[1],
+            DESKTOP_UI_MAGIC[2],
+            DESKTOP_UI_MAGIC[3],
+            self.locale,
+            self.menu_layout,
+            self.terminal_font_face.persisted(),
+            self.terminal_font_weight.persisted(),
+            self.terminal_scale,
+            self.terminal_foreground,
+            self.terminal_background,
+        ]
     }
 
     fn with_profile(self, profile: CustomizationProfile) -> Self {
@@ -1484,6 +1531,16 @@ impl DesktopPreferences {
         next.vsync = self.vsync;
         next.taskbar_visible = self.taskbar_visible;
         next.status_visible = self.status_visible;
+        // Appearance profiles must not silently replace separately chosen
+        // launcher, language or terminal preferences.
+        next.menu_layout = self.menu_layout;
+        next.menu_grid = self.menu_layout != 0;
+        next.terminal_font_face = self.terminal_font_face;
+        next.terminal_font_weight = self.terminal_font_weight;
+        next.terminal_scale = self.terminal_scale;
+        next.terminal_foreground = self.terminal_foreground;
+        next.terminal_background = self.terminal_background;
+        next.locale = self.locale;
 
         match profile {
             CustomizationProfile::Balanced => {}
@@ -1716,6 +1773,8 @@ struct DesktopState {
     active: AppKind,
     launcher_open: bool,
     launcher_scroll: usize,
+    launcher_selection: usize,
+    shell_confirmation: bool,
     fullscreen: bool,
     preferences: DesktopPreferences,
     settings_category: SettingsCategory,
@@ -1755,6 +1814,7 @@ struct DesktopState {
     notes_status: &'static str,
     games: crate::games::GameHub,
     native_apps: crate::apps::NativeApps,
+    cfc: CfcFin,
     session: crate::session::Session,
     cursor: PointerCursor,
     dragging: Option<AppKind>,
@@ -1959,6 +2019,10 @@ impl PointerCursor {
 }
 
 impl DesktopState {
+    const fn locale(&self) -> Locale {
+        Locale::from_persisted(self.preferences.locale)
+    }
+
     fn new(
         start_app: Option<AppKind>,
         session: crate::session::Session,
@@ -1966,7 +2030,8 @@ impl DesktopState {
         cfc: CfcFin,
     ) -> Self {
         let active = start_app.unwrap_or(AppKind::Terminal);
-        let preferences = DesktopPreferences::from_persistent(state::preferences());
+        let preferences =
+            DesktopPreferences::from_persistent(state::preferences()).load_ui_extension(cfc);
         framebuffer::set_font_style(framebuffer::FontStyle::new(
             preferences.font_face,
             preferences.font_weight,
@@ -2168,6 +2233,8 @@ impl DesktopState {
             active,
             launcher_open: false,
             launcher_scroll: 0,
+            launcher_selection: 0,
+            shell_confirmation: false,
             fullscreen: false,
             preferences,
             settings_category: SettingsCategory::System,
@@ -2207,6 +2274,7 @@ impl DesktopState {
             notes_status,
             games: crate::games::GameHub::new(),
             native_apps,
+            cfc,
             session,
             cursor: PointerCursor::new(
                 preferences.cursor,
@@ -2256,6 +2324,13 @@ impl DesktopState {
         if let Err(error) = state::save_preferences(persistent) {
             self.settings_notice = error.message();
             slog!("EXPOS_SETTING_PERSIST_FAILED error={:?}\r\n", error);
+        }
+        let extension = self.preferences.encode_ui_extension();
+        if let Err(error) =
+            crate::expfs_store::save_data_form(self.cfc, DESKTOP_UI_STATE, &extension)
+        {
+            self.settings_notice = error.message();
+            slog!("EXPOS_UI_PERSIST_FAILED error={:?}\r\n", error);
         }
     }
 
@@ -2451,15 +2526,11 @@ impl DesktopState {
                     let column = (content_x / cell_width).min(columns as i16 - 1) as usize;
                     let row = (content_y / row_height) as usize;
                     let ordinal = self.launcher_scroll + row * columns + column;
-                    match launcher_item(self, ordinal) {
-                        Some(LauncherItem::BuiltIn(app)) => self.focus_existing(app),
-                        Some(LauncherItem::Installed(index)) => {
-                            if self.native_apps.activate_installed(index) {
-                                self.focus_existing(AppKind::Apps);
-                            }
-                        }
-                        None => return false,
+                    if launcher_item(self, ordinal).is_none() {
+                        return false;
                     }
+                    self.launcher_selection = ordinal;
+                    self.activate_launcher_selection();
                     return true;
                 }
                 return false;
@@ -2709,6 +2780,9 @@ impl DesktopState {
             .set_visible(DISPLAY_FIN, self.launcher_surface, self.launcher_open);
         let _ = self.server.commit(DISPLAY_FIN, self.launcher_surface);
         if self.launcher_open {
+            self.launcher_selection = self
+                .launcher_selection
+                .min(launcher_item_count(self).saturating_sub(1));
             self.sync_taskbar_visibility();
             let _ = self.server.focus(self.launcher_surface);
         } else if self.has_active_window() {
@@ -2724,6 +2798,49 @@ impl DesktopState {
                 .set_visible(DISPLAY_FIN, self.launcher_surface, false);
             let _ = self.server.commit(DISPLAY_FIN, self.launcher_surface);
             self.sync_taskbar_visibility();
+        }
+    }
+
+    fn activate_launcher_selection(&mut self) {
+        match launcher_item(self, self.launcher_selection) {
+            Some(LauncherItem::BuiltIn(app)) => self.focus_existing(app),
+            Some(LauncherItem::Installed(index)) if self.native_apps.activate_installed(index) => {
+                self.focus_existing(AppKind::Apps);
+            }
+            Some(LauncherItem::Installed(_)) => {}
+            None => {}
+        }
+    }
+
+    fn move_launcher_selection(&mut self, delta: isize) {
+        let total = launcher_item_count(self);
+        if total == 0 {
+            self.launcher_selection = 0;
+            self.launcher_scroll = 0;
+            return;
+        }
+        self.launcher_selection = self
+            .launcher_selection
+            .saturating_add_signed(delta)
+            .min(total - 1);
+        let capacity = launcher_capacity(self.preferences);
+        if self.launcher_selection < self.launcher_scroll {
+            self.launcher_scroll = self.launcher_selection;
+        } else if self.launcher_selection >= self.launcher_scroll + capacity {
+            self.launcher_scroll = self.launcher_selection + 1 - capacity;
+        }
+    }
+
+    fn cycle_launcher_selection(&mut self) {
+        let total = launcher_item_count(self);
+        if total == 0 {
+            return;
+        }
+        if self.launcher_selection + 1 >= total {
+            self.launcher_selection = 0;
+            self.launcher_scroll = 0;
+        } else {
+            self.move_launcher_selection(1);
         }
     }
 
@@ -2743,6 +2860,27 @@ impl DesktopState {
         );
         let _ = self.server.set_position(owner, id, x, y);
         let _ = self.server.commit(owner, id);
+    }
+
+    fn tile_active(&mut self, right_half: bool) {
+        if !self.has_active_window() {
+            return;
+        }
+        self.fullscreen = false;
+        let area = self.usable_area();
+        let left_width = area.width / 2;
+        let right_width = area.width - left_width;
+        let rect = if right_half {
+            Rect::new(
+                area.x.saturating_add_unsigned(left_width),
+                area.y,
+                right_width,
+                area.height,
+            )
+        } else {
+            Rect::new(area.x, area.y, left_width, area.height)
+        };
+        self.set_app_geometry(self.active, rect);
     }
 
     fn constrain_window_position(&self, rect: Rect, mut x: i32, mut y: i32) -> (i16, i16) {
@@ -4204,17 +4342,18 @@ impl DesktopState {
                 self.settings_notice = "Taskbar clock precision updated.";
             }
             (SettingsCategory::Menu, 0) => {
-                self.preferences.menu_grid = !self.preferences.menu_grid;
+                self.preferences.menu_layout = shift_index(
+                    self.preferences.menu_layout,
+                    MENU_LAYOUT_LABELS.len() as u8,
+                    direction,
+                );
+                self.preferences.menu_grid = self.preferences.menu_layout != 0;
                 self.launcher_scroll = 0;
                 self.sync_desktop_geometry();
                 self.settings_notice = "Launcher layout updated.";
                 slog!(
                     "EXPOS_SETTING_CHANGED key=menu-layout value={}\r\n",
-                    if self.preferences.menu_grid {
-                        "grid"
-                    } else {
-                        "list"
-                    }
+                    MENU_LAYOUT_LABELS[self.preferences.menu_layout as usize]
                 );
             }
             (SettingsCategory::Menu, 1) => {
@@ -4267,6 +4406,51 @@ impl DesktopState {
                 self.preferences.notification_animations =
                     !self.preferences.notification_animations;
                 self.settings_notice = "Menu install feedback updated.";
+            }
+            (SettingsCategory::Terminal, 0) => {
+                let next = shift_index(
+                    self.preferences.terminal_font_face.persisted(),
+                    state::FONT_FACE_CHOICES,
+                    direction,
+                );
+                self.preferences.terminal_font_face =
+                    framebuffer::FontFace::from_persisted(next).unwrap_or_default();
+                self.settings_notice = "Shell font updated.";
+            }
+            (SettingsCategory::Terminal, 1) => {
+                let next = shift_index(
+                    self.preferences.terminal_font_weight.persisted(),
+                    state::FONT_WEIGHT_CHOICES,
+                    direction,
+                );
+                self.preferences.terminal_font_weight =
+                    framebuffer::FontWeight::from_persisted(next).unwrap_or_default();
+                self.settings_notice = "Shell font weight updated.";
+            }
+            (SettingsCategory::Terminal, 2) => {
+                self.preferences.terminal_scale =
+                    shift_index(self.preferences.terminal_scale, 3, direction);
+                self.settings_notice = "Shell font size updated.";
+            }
+            (SettingsCategory::Terminal, 3) => {
+                self.preferences.terminal_foreground =
+                    shift_index(self.preferences.terminal_foreground, 8, direction);
+                self.settings_notice = "Shell text color updated.";
+            }
+            (SettingsCategory::Terminal, 4) => {
+                self.preferences.terminal_background =
+                    shift_index(self.preferences.terminal_background, 8, direction);
+                self.settings_notice = "Shell background updated.";
+            }
+            (SettingsCategory::Language, row @ 0..=4) => {
+                self.preferences.locale = row as u8;
+                crate::locale::set_active(Locale::from_persisted(row as u8));
+                self.full_redraw_requested = true;
+                self.settings_notice = "System language updated.";
+                slog!(
+                    "EXPOS_SETTING_CHANGED key=language value={}\r\n",
+                    Locale::ALL[row].name()
+                );
             }
             (SettingsCategory::Privacy, 0) => {
                 self.browser_line.fill(0);
@@ -4588,24 +4772,24 @@ impl DesktopState {
         self.terminal_push(
             "  help clear status version hostname pwd whoami id uname uptime neofetch",
         );
-        self.terminal_push("  users display resolution network netstat storage theme history");
-        self.terminal_push("  apps ls ps echo <text> windowreset");
-        self.terminal_push("  open <app> close exit shell");
+        self.terminal_push("  users display resolution network netstat storage theme history cpus");
+        self.terminal_push("  apps ls ps forms read <name> write <name.txt> <text>");
+        self.terminal_push("  echo <text> windowreset");
+        self.terminal_push("  open <app> close console shutdown reboot");
         self.terminal_push("Use Up/Down for command history.");
     }
 
     fn terminal_print_neofetch(&mut self) {
-        self.terminal_push("        ______      ____    _____");
-        self.terminal_push("       |  ____|    / __ \\  / ____|");
-        self.terminal_push("       | |__ __  _| |  | || (___");
-        self.terminal_push("       |  __|\\ \\/ /| |  | | \\___ \\");
-        self.terminal_push("       | |____>  < | |__| | ____) |");
-        self.terminal_push("       |______/_/\\_\\ \\____/ |_____/");
-        self.terminal_push_parts(&["OS: ExpOS ", env!("CARGO_PKG_VERSION")]);
-        self.terminal_push("Kernel: x86_64 Rust no_std");
-        self.terminal_push("Model: Form-native / Dimension-oriented");
-        self.terminal_push_parts(&["Display: ", framebuffer::active_output_label(), " XRGB8888"]);
-        self.terminal_push_parts(&["Authority: ", self.session.authority_name()]);
+        self.terminal_push("        .-------------------------------.");
+        self.terminal_push("       /                                 \\");
+        self.terminal_push("      |      .--------.   .--------.      |");
+        self.terminal_push("      |     /          \\ /          \\     |");
+        self.terminal_push("      |    |     O      |     O      |    |");
+        self.terminal_push("      |     \\          / \\          /     |");
+        self.terminal_push("      |      '--------'   '--------'      |");
+        self.terminal_push("       \\_________________________________/");
+        self.terminal_push_parts(&["ExpOS v", env!("CARGO_PKG_VERSION")]);
+        self.terminal_push("x86_64");
     }
 
     fn terminal_print_status(&mut self) {
@@ -4739,7 +4923,7 @@ impl DesktopState {
             if open[app.index()] {
                 self.terminal_push_parts(&[
                     "  ",
-                    app.label(),
+                    app.localized_label(self.locale()),
                     if minimized[app.index()] {
                         " (minimized)"
                     } else {
@@ -4810,6 +4994,80 @@ impl DesktopState {
         self.terminal_push("stores: accounts and desktop preferences");
     }
 
+    fn terminal_print_cpus(&mut self) {
+        self.terminal_push_number("online CPUs: ", crate::smp::online_count() as u64, "");
+        self.terminal_push("scheduler: preemptive per-CPU Form contexts");
+    }
+
+    fn terminal_print_forms(&mut self) {
+        let Some(snapshot) = crate::expfs_store::loaded_snapshot(self.cfc) else {
+            self.terminal_push("ExpFS Form graph is unavailable.");
+            return;
+        };
+        self.terminal_push("Forms:");
+        let mut count = 0;
+        for stored in snapshot.forms.iter().flatten() {
+            self.terminal_push_parts(&[
+                "  ",
+                stored.form.name.as_str(),
+                "  ",
+                form_kind_label(stored.form.kind),
+            ]);
+            count += 1;
+        }
+        if count == 0 {
+            self.terminal_push("  none");
+        }
+    }
+
+    fn terminal_read_form(&mut self, arguments: &[u8]) {
+        let Ok(name) = core::str::from_utf8(trim_ascii(arguments)) else {
+            self.terminal_push("Form name must be UTF-8.");
+            return;
+        };
+        if name.is_empty() {
+            self.terminal_push("usage: read <form-name>");
+            return;
+        }
+        let Some(snapshot) = crate::expfs_store::loaded_snapshot(self.cfc) else {
+            self.terminal_push("ExpFS Form graph is unavailable.");
+            return;
+        };
+        let Some(stored) = snapshot
+            .forms
+            .iter()
+            .flatten()
+            .find(|stored| stored.form.name.as_str() == name)
+        else {
+            self.terminal_push("Form not found.");
+            return;
+        };
+        self.terminal_push_parts(&[
+            stored.form.name.as_str(),
+            "  ",
+            form_kind_label(stored.form.kind),
+        ]);
+        self.terminal_push_bytes(&stored.content[..stored.content_len as usize]);
+    }
+
+    fn terminal_write_form(&mut self, arguments: &[u8]) {
+        let (name, content) = split_command(arguments);
+        let Ok(name) = core::str::from_utf8(name) else {
+            self.terminal_push("Form name must be UTF-8.");
+            return;
+        };
+        if name.is_empty() || content.is_empty() {
+            self.terminal_push("usage: write <name.txt> <text>");
+            return;
+        }
+        match crate::expfs_store::save_text_form(self.cfc, name, content) {
+            Ok((_fin, revision)) => {
+                self.terminal_push_number("saved revision ", revision as u64, "");
+            }
+            Err(error) => self.terminal_push_parts(&["write failed: ", error.message()]),
+        }
+    }
+
     fn execute_terminal_command(&mut self, command: &[u8]) {
         let (name, arguments) = split_command(command);
         if let Ok(name) = core::str::from_utf8(name) {
@@ -4855,10 +5113,18 @@ impl DesktopState {
             self.terminal_print_network();
         } else if name.eq_ignore_ascii_case(b"storage") {
             self.terminal_print_storage();
+        } else if name.eq_ignore_ascii_case(b"cpus") || name.eq_ignore_ascii_case(b"smp") {
+            self.terminal_print_cpus();
         } else if name.eq_ignore_ascii_case(b"theme") {
             self.terminal_print_theme();
         } else if name.eq_ignore_ascii_case(b"history") {
             self.terminal_print_history();
+        } else if name.eq_ignore_ascii_case(b"forms") {
+            self.terminal_print_forms();
+        } else if name.eq_ignore_ascii_case(b"read") {
+            self.terminal_read_form(arguments);
+        } else if name.eq_ignore_ascii_case(b"write") {
+            self.terminal_write_form(arguments);
         } else if name.eq_ignore_ascii_case(b"apps") || name.eq_ignore_ascii_case(b"ls") {
             self.terminal_push("browser terminal forms packages settings system games notes");
         } else if name.eq_ignore_ascii_case(b"ps") {
@@ -4872,17 +5138,24 @@ impl DesktopState {
             self.terminal_push("All application windows returned to their default positions.");
         } else if name.eq_ignore_ascii_case(b"open") {
             if let Some(app) = parse_app(arguments) {
-                self.terminal_push_parts(&["Opening ", app.label(), "."]);
+                self.terminal_push_parts(&["Opening ", app.localized_label(self.locale()), "."]);
                 self.switch_to(app);
             } else {
                 self.terminal_push(
                     "usage: open <browser|forms|packages|settings|system|games|notes>",
                 );
             }
-        } else if name.eq_ignore_ascii_case(b"close") {
+        } else if name.eq_ignore_ascii_case(b"close") || name.eq_ignore_ascii_case(b"exit") {
             self.close_active();
-        } else if name.eq_ignore_ascii_case(b"exit") || name.eq_ignore_ascii_case(b"shell") {
+        } else if name.eq_ignore_ascii_case(b"console") {
             self.should_exit = true;
+            slog!("EXPOS_TERMINAL_CONSOLE_REQUESTED\r\n");
+        } else if name.eq_ignore_ascii_case(b"shutdown") || name.eq_ignore_ascii_case(b"halt") {
+            slog!("EXPOS_COMMAND_OK shutdown\r\n");
+            crate::port::shutdown();
+        } else if name.eq_ignore_ascii_case(b"reboot") {
+            slog!("EXPOS_COMMAND_OK reboot\r\n");
+            crate::port::reboot();
         } else {
             self.terminal_push("Unknown command. Type help.");
         }
@@ -5136,6 +5409,29 @@ fn run_session(
                 continue;
             }
         };
+        if desktop.shell_confirmation {
+            match key.to_ascii_lowercase() {
+                b'y' | b'\n' => {
+                    desktop.shell_confirmation = false;
+                    slog!("EXPOS_SHELL_CONFIRMATION state=accepted\r\n");
+                    desktop.switch_to(AppKind::Terminal);
+                }
+                b'n' | 0x1B | KEY_DESKTOP_SHELL_CONFIRM => {
+                    desktop.shell_confirmation = false;
+                    slog!("EXPOS_SHELL_CONFIRMATION state=cancelled\r\n");
+                }
+                _ => {}
+            }
+            render(&mut desktop);
+            continue;
+        }
+        if key == KEY_DESKTOP_SHELL_CONFIRM {
+            desktop.close_launcher();
+            desktop.shell_confirmation = true;
+            slog!("EXPOS_SHELL_CONFIRMATION state=open\r\n");
+            render(&mut desktop);
+            continue;
+        }
         desktop.route_key(key);
 
         if key == 0x1B {
@@ -5153,7 +5449,7 @@ fn run_session(
                 render(&mut desktop);
                 continue;
             }
-            break;
+            continue;
         }
         if key == b'\x60' || key == b'~' || key == KEY_SUPER_LAUNCHER {
             desktop.toggle_launcher();
@@ -5161,29 +5457,15 @@ fn run_session(
             continue;
         }
         if desktop.launcher_open {
+            let columns = launcher_columns(desktop.preferences) as isize;
             match key {
-                KEY_UP => {
-                    desktop.launcher_scroll = desktop
-                        .launcher_scroll
-                        .saturating_sub(launcher_columns(desktop.preferences));
-                }
-                KEY_DOWN => {
-                    let total = launcher_item_count(&desktop);
-                    let capacity = launcher_capacity(desktop.preferences);
-                    let max_scroll = total.saturating_sub(capacity);
-                    desktop.launcher_scroll = (desktop.launcher_scroll
-                        + launcher_columns(desktop.preferences))
-                    .min(max_scroll);
-                }
-                _ => {
-                    if let Some(app) = launcher_shortcut(key) {
-                        // The shared native Apps host intentionally has no
-                        // public launcher entry; installed tools open directly.
-                        if app != AppKind::Apps {
-                            desktop.switch_to(app);
-                        }
-                    }
-                }
+                KEY_UP => desktop.move_launcher_selection(-columns),
+                KEY_DOWN => desktop.move_launcher_selection(columns),
+                KEY_LEFT => desktop.move_launcher_selection(-1),
+                KEY_RIGHT => desktop.move_launcher_selection(1),
+                b'\t' => desktop.cycle_launcher_selection(),
+                b'\n' | b' ' => desktop.activate_launcher_selection(),
+                _ => {}
             }
             render(&mut desktop);
             continue;
@@ -5247,16 +5529,17 @@ fn run_session(
             continue;
         }
         match key {
-            KEY_SUPER_TERMINAL => desktop.switch_to(AppKind::Terminal),
-            KEY_SUPER_BROWSER => desktop.switch_to(AppKind::Browser),
             KEY_SUPER_CLOSE => desktop.close_active(),
-            KEY_SUPER_CYCLE | KEY_SUPER_LEFT | KEY_SUPER_RIGHT => desktop.cycle_app(),
+            KEY_SUPER_CYCLE => desktop.cycle_app(),
             KEY_SUPER_FULLSCREEN => desktop.toggle_fullscreen(),
-            KEY_SUPER_UP if !desktop.fullscreen && desktop.app_is_visible(desktop.active) => {
-                desktop.toggle_fullscreen()
-            }
-            KEY_SUPER_DOWN if desktop.fullscreen => desktop.toggle_fullscreen(),
-            KEY_SUPER_DOWN if desktop.app_is_visible(desktop.active) => desktop.minimize_active(),
+            KEY_SUPER_LEFT => desktop.move_active(-12, 0),
+            KEY_SUPER_RIGHT => desktop.move_active(12, 0),
+            KEY_SUPER_UP => desktop.move_active(0, -12),
+            KEY_SUPER_DOWN => desktop.move_active(0, 12),
+            KEY_SUPER_ALT_LEFT => desktop.tile_active(false),
+            KEY_SUPER_ALT_RIGHT => desktop.tile_active(true),
+            KEY_SUPER_ALT_UP => desktop.toggle_fullscreen(),
+            KEY_SUPER_ALT_DOWN => desktop.minimize_active(),
             b'\t' => desktop.cycle_app(),
             KEY_UP if desktop.active == AppKind::Terminal => {
                 desktop.recall_terminal_history(true);
@@ -5268,10 +5551,6 @@ fn run_session(
                 render_active_window(&mut desktop);
                 continue;
             }
-            KEY_LEFT => desktop.move_active(-12, 0),
-            KEY_RIGHT => desktop.move_active(12, 0),
-            KEY_UP => desktop.move_active(0, -12),
-            KEY_DOWN => desktop.move_active(0, 12),
             _ if desktop.active == AppKind::Terminal
                 && desktop.app_is_visible(AppKind::Terminal) =>
             {
@@ -5283,11 +5562,9 @@ fn run_session(
                 }
                 continue;
             }
-            b'q' | b'Q' => break,
+            b'q' | b'Q' => {}
             _ => {
-                if let Some(app) = app_shortcut(key) {
-                    desktop.switch_to(app);
-                } else if desktop.active == AppKind::Browser {
+                if desktop.active == AppKind::Browser {
                     match key.to_ascii_lowercase() {
                         b'/' | b'l' => {
                             desktop.browser_len = 0;
@@ -5335,36 +5612,6 @@ fn run_session(
     slog!("EXPOS_DISPLAY_CLOSED\r\n");
 }
 
-fn app_shortcut(key: u8) -> Option<AppKind> {
-    match key.to_ascii_lowercase() {
-        b'b' => Some(AppKind::Browser),
-        b't' => Some(AppKind::Terminal),
-        b'f' => Some(AppKind::Forms),
-        b'p' => Some(AppKind::Packages),
-        b's' => Some(AppKind::Settings),
-        b'i' => Some(AppKind::System),
-        b'g' => Some(AppKind::Games),
-        b'n' => Some(AppKind::Notes),
-        b'a' => Some(AppKind::Apps),
-        _ => None,
-    }
-}
-
-fn launcher_shortcut(key: u8) -> Option<AppKind> {
-    match key.to_ascii_lowercase() {
-        b'b' | b'1' => Some(AppKind::Browser),
-        b't' | b'2' => Some(AppKind::Terminal),
-        b'f' | b'3' => Some(AppKind::Forms),
-        b'p' | b'4' => Some(AppKind::Packages),
-        b's' | b'5' => Some(AppKind::Settings),
-        b'i' | b'6' => Some(AppKind::System),
-        b'g' | b'7' => Some(AppKind::Games),
-        b'n' | b'8' => Some(AppKind::Notes),
-        b'a' | b'9' => Some(AppKind::Apps),
-        _ => None,
-    }
-}
-
 fn split_command(command: &[u8]) -> (&[u8], &[u8]) {
     let command = trim_ascii(command);
     let split = command
@@ -5378,6 +5625,19 @@ fn split_command(command: &[u8]) -> (&[u8], &[u8]) {
         &[]
     };
     (name, arguments)
+}
+
+const fn form_kind_label(kind: FormKind) -> &'static str {
+    match kind {
+        FormKind::Root => "root",
+        FormKind::Service => "service",
+        FormKind::Interface => "interface",
+        FormKind::Package => "package",
+        FormKind::Driver => "driver",
+        FormKind::Data => "data",
+        FormKind::Policy => "policy",
+        FormKind::Executable => "executable",
+    }
 }
 
 fn parse_app(value: &[u8]) -> Option<AppKind> {
@@ -5586,6 +5846,9 @@ fn render(desktop: &mut DesktopState) {
     if desktop.launcher_open {
         draw_launcher(desktop);
     }
+    if desktop.shell_confirmation {
+        draw_shell_confirmation(desktop);
+    }
     desktop.cursor.draw();
     present_frame(desktop);
 }
@@ -5719,7 +5982,7 @@ fn draw_app(desktop: &DesktopState, app: AppKind, focused: bool, draw_shadow: bo
     let title = if app == AppKind::Apps && desktop.native_apps.installed_count() != 0 {
         crate::apps::NativeApps::app_name(desktop.native_apps.active_index())
     } else {
-        app.label()
+        app.localized_label(desktop.locale())
     };
     draw_window(rect, title, focused, desktop.preferences, draw_shadow);
     let responsive_full = matches!(
@@ -6157,7 +6420,11 @@ fn browser_text_contains(value: &str, query: &str) -> bool {
 }
 
 fn browser_text_prefix(value: &str, capacity: usize) -> &str {
-    &value[..value.len().min(capacity)]
+    let end = value
+        .char_indices()
+        .nth(capacity)
+        .map_or(value.len(), |(index, _)| index);
+    &value[..end]
 }
 
 fn browser_find_stats(desktop: &DesktopState) -> (usize, usize) {
@@ -6591,6 +6858,31 @@ fn draw_terminal(rect: Rect, desktop: &DesktopState) {
     let width = rect.width as i32;
     let height = rect.height as i32;
     let titlebar_height = desktop.preferences.titlebar_height() as i32;
+    let terminal_background = match desktop.preferences.terminal_background {
+        1 => 0x0015_171B,
+        2 => 0x0006_170F,
+        3 => 0x0005_1419,
+        4 => 0x001B_1405,
+        5 => 0x001B_0911,
+        6 => 0x0008_1020,
+        7 => 0x0000_0000,
+        _ => desktop.preferences.theme.terminal(),
+    };
+    let terminal_foreground = match desktop.preferences.terminal_foreground {
+        1 => color::WHITE,
+        2 => color::GREEN,
+        3 => color::CYAN,
+        4 => 0x00F0_C46B,
+        5 => 0x00F0_8AA4,
+        6 => 0x008E_B8FF,
+        7 => 0x0030_343A,
+        _ => color::INK,
+    };
+    let previous_style = framebuffer::font_style();
+    framebuffer::set_font_style(framebuffer::FontStyle::new(
+        desktop.preferences.terminal_font_face,
+        desktop.preferences.terminal_font_weight,
+    ));
     fill_window_region(
         rect,
         desktop.preferences,
@@ -6598,11 +6890,12 @@ fn draw_terminal(rect: Rect, desktop: &DesktopState) {
         titlebar_height,
         width - 2,
         height - titlebar_height - 1,
-        desktop.preferences.theme.terminal(),
+        terminal_background,
     );
     let prompt_y = y + height - 34;
     let output_top = y + titlebar_height + 16;
-    let line_height = 14;
+    let text_scale = desktop.preferences.terminal_scale as i32 + 1;
+    let line_height = if text_scale == 1 { 12 } else { 20 };
     let visible_lines = ((prompt_y - output_top - 8) / line_height).max(0) as usize;
     let lines = visible_lines.min(desktop.terminal_output_count);
     for visual_index in 0..lines {
@@ -6610,7 +6903,7 @@ fn draw_terminal(rect: Rect, desktop: &DesktopState) {
         if let Some(line) = desktop.terminal_output_entry(reverse_index) {
             let visible_length = line
                 .len()
-                .min(((width - 40) / framebuffer::text_advance(1)).max(1) as usize);
+                .min(((width - 40) / framebuffer::text_advance(text_scale)).max(1) as usize);
             framebuffer::text(
                 x + 20,
                 output_top + visual_index as i32 * line_height,
@@ -6618,9 +6911,9 @@ fn draw_terminal(rect: Rect, desktop: &DesktopState) {
                 if line.starts_with("$ ") {
                     desktop.preferences.accent.color()
                 } else {
-                    color::INK
+                    terminal_foreground
                 },
-                1,
+                text_scale,
             );
         }
     }
@@ -6631,7 +6924,7 @@ fn draw_terminal(rect: Rect, desktop: &DesktopState) {
         prompt_y - 10,
         desktop.preferences.border_color(false),
     );
-    let prompt_scale = if width < 800 { 1 } else { 2 };
+    let prompt_scale = text_scale;
     let advance = framebuffer::text_advance(prompt_scale);
     let accent = desktop.preferences.accent.color();
     framebuffer::text(
@@ -6653,7 +6946,13 @@ fn draw_terminal(rect: Rect, desktop: &DesktopState) {
         let visible_capacity = ((x + width - 20 - input_x) / advance).max(1) as usize;
         let visible_start = line.len().saturating_sub(visible_capacity);
         let visible = &line[visible_start..];
-        framebuffer::text(input_x, prompt_y, visible, color::WHITE, prompt_scale);
+        framebuffer::text(
+            input_x,
+            prompt_y,
+            visible,
+            terminal_foreground,
+            prompt_scale,
+        );
         framebuffer::rect(
             input_x + visible.len() as i32 * advance,
             prompt_y,
@@ -6662,6 +6961,7 @@ fn draw_terminal(rect: Rect, desktop: &DesktopState) {
             color::MUTED,
         );
     }
+    framebuffer::set_font_style(previous_style);
 }
 
 fn draw_notes(rect: Rect, desktop: &DesktopState) {
@@ -6818,7 +7118,7 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
     framebuffer::text(
         x + 20,
         y + if compact { 44 } else { 54 },
-        "Settings",
+        desktop.locale().text(LocalText::Settings),
         color::INK,
         if compact { 1 } else { 2 },
     );
@@ -6848,7 +7148,7 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
         framebuffer::text(
             x + 26,
             row_y + 14,
-            category.label(),
+            desktop.locale().category(category.index()),
             if selected { color::WHITE } else { color::MUTED },
             1,
         );
@@ -6865,7 +7165,7 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
     framebuffer::text(
         content_x,
         y + if compact { 45 } else { 55 },
-        desktop.settings_category.label(),
+        desktop.locale().category(desktop.settings_category.index()),
         color::INK,
         if compact { 1 } else { 2 },
     );
@@ -7716,12 +8016,8 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 content_width,
                 0,
                 "Layout",
-                "Choose a compact list or a two-column application grid",
-                if desktop.preferences.menu_grid {
-                    "Grid"
-                } else {
-                    "List"
-                },
+                "List, grid, compact grid, or dashboard",
+                MENU_LAYOUT_LABELS[desktop.preferences.menu_layout as usize],
                 SettingControl::Choice,
             );
             settings_row(
@@ -7847,6 +8143,87 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                     available: true,
                 },
             );
+        }
+        SettingsCategory::Terminal => {
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                0,
+                "Font",
+                "Independent command-shell typeface",
+                state::FONT_FACE_NAMES[desktop.preferences.terminal_font_face.persisted() as usize],
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                1,
+                "Weight",
+                "Light, regular, or bold shell text",
+                state::FONT_WEIGHT_NAMES
+                    [desktop.preferences.terminal_font_weight.persisted() as usize],
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                2,
+                "Text size",
+                "Shell-only text scale",
+                TERMINAL_SCALE_LABELS[desktop.preferences.terminal_scale as usize],
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                3,
+                "Text color",
+                "Readable foreground palette",
+                TERMINAL_COLOR_LABELS[desktop.preferences.terminal_foreground as usize],
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                4,
+                "Background",
+                "Independent shell background palette",
+                TERMINAL_COLOR_LABELS[desktop.preferences.terminal_background as usize],
+                SettingControl::Choice,
+            );
+        }
+        SettingsCategory::Language => {
+            for (row, language) in Locale::ALL.iter().map(|locale| locale.name()).enumerate() {
+                settings_row(
+                    desktop,
+                    content_x,
+                    y,
+                    content_width,
+                    row,
+                    language,
+                    if Locale::ALL[row].is_rtl() {
+                        desktop.locale().text(LocalText::RtlInterface)
+                    } else {
+                        desktop.locale().text(LocalText::SystemInstallerLanguage)
+                    },
+                    if desktop.preferences.locale as usize == row {
+                        desktop.locale().text(LocalText::Selected)
+                    } else {
+                        desktop.locale().text(LocalText::Available)
+                    },
+                    SettingControl::Choice,
+                );
+            }
         }
         SettingsCategory::Privacy => {
             settings_row(
@@ -8220,7 +8597,13 @@ fn draw_system(rect: Rect, desktop: &DesktopState) {
         color::GREEN,
     );
     framebuffer::text(x + 352, y + 343, "Active", color::MUTED, 1);
-    framebuffer::text(x + 430, y + 343, desktop.active.label(), color::CYAN, 1);
+    framebuffer::text(
+        x + 430,
+        y + 343,
+        desktop.active.localized_label(desktop.locale()),
+        color::CYAN,
+        1,
+    );
     let stats = framebuffer::presentation_stats();
     framebuffer::text(x + 540, y + 343, "Frames", color::MUTED, 1);
     draw_number(x + 602, y + 343, stats.frames, color::GREEN);
@@ -8296,12 +8679,12 @@ fn draw_dock(desktop: &DesktopState) {
         {
             let capacity =
                 ((item.width as i32 - 34) / framebuffer::text_advance(1)).max(0) as usize;
-            let label = app.label();
+            let label = app.localized_label(desktop.locale());
             if capacity > 0 {
                 framebuffer::text(
                     item_x + 30,
                     item_y + (item.height as i32 - 8) / 2,
-                    &label[..label.len().min(capacity)],
+                    browser_text_prefix(label, capacity),
                     color::INK,
                     1,
                 );
@@ -8404,7 +8787,13 @@ fn draw_launcher(desktop: &DesktopState) {
     let height = launcher.height as i32;
     framebuffer::rounded_rect(x, y, width, height, 9, desktop.preferences.panel_color());
     framebuffer::outline(x, y, width, height, desktop.preferences.border_color(false));
-    framebuffer::text(x + 16, y + 17, "Applications", color::INK, 1);
+    framebuffer::text(
+        x + 16,
+        y + 17,
+        desktop.locale().app(AppKind::Apps.index()),
+        color::INK,
+        1,
+    );
     let installed = desktop.native_apps.installed_count();
     if installed != 0 {
         framebuffer::text(x + width - 92, y + 17, "AYO DIRECT", color::CYAN, 1);
@@ -8428,7 +8817,7 @@ fn draw_launcher(desktop: &DesktopState) {
         let row_y = y + 48 + row as i32 * row_height;
         let (label, category, accent, shortcut, running) = match item {
             LauncherItem::BuiltIn(app) => (
-                app.label(),
+                app.localized_label(desktop.locale()),
                 "ExpOS",
                 app.accent(),
                 app.shortcut(),
@@ -8446,18 +8835,34 @@ fn draw_launcher(desktop: &DesktopState) {
                 )
             }
         };
+        let selected = ordinal == desktop.launcher_selection;
         framebuffer::rounded_rect(
             row_x,
             row_y,
             cell_width - 4,
             row_height - 3,
             5,
-            if running {
+            if selected {
+                blend_color(
+                    desktop.preferences.panel_color(),
+                    desktop.preferences.accent.color(),
+                    72,
+                )
+            } else if running {
                 0x0024_292F
             } else {
                 desktop.preferences.panel_color()
             },
         );
+        if selected {
+            framebuffer::outline(
+                row_x,
+                row_y,
+                cell_width - 4,
+                row_height - 3,
+                desktop.preferences.accent.color(),
+            );
+        }
         let icon_x = row_x + 7;
         let icon_y = row_y + (row_height - icon_size) / 2;
         framebuffer::rounded_rect(icon_x, icon_y, icon_size, icon_size, 4, accent);
@@ -8531,6 +8936,61 @@ fn draw_launcher(desktop: &DesktopState) {
             1,
         );
     }
+}
+
+fn draw_shell_confirmation(desktop: &DesktopState) {
+    let width = 420_i32.min(framebuffer::width() as i32 - 32);
+    let height = 126_i32;
+    let x = (framebuffer::width() as i32 - width) / 2;
+    let y = (framebuffer::height() as i32 - height) / 2;
+    framebuffer::alpha_rect(
+        0,
+        0,
+        framebuffer::width() as i32,
+        framebuffer::height() as i32,
+        0,
+        150,
+    );
+    framebuffer::rounded_rect(x, y, width, height, 8, desktop.preferences.panel_color());
+    framebuffer::outline(x, y, width, height, desktop.preferences.accent.color());
+    let locale = desktop.locale();
+    framebuffer::text(
+        x + 20,
+        y + 20,
+        locale.text(LocalText::OpenShell),
+        color::INK,
+        2,
+    );
+    framebuffer::text(
+        x + 20,
+        y + 56,
+        locale.text(LocalText::DesktopStaysActive),
+        color::MUTED,
+        1,
+    );
+    framebuffer::rounded_rect(
+        x + 20,
+        y + 84,
+        116,
+        26,
+        4,
+        desktop.preferences.accent.color(),
+    );
+    framebuffer::text(
+        x + 34,
+        y + 93,
+        locale.text(LocalText::Open),
+        color::WHITE,
+        1,
+    );
+    framebuffer::outline(x + 150, y + 84, 116, 26, color::BORDER);
+    framebuffer::text(
+        x + 169,
+        y + 93,
+        locale.text(LocalText::Cancel),
+        color::INK,
+        1,
+    );
 }
 
 fn wrapped_text(mut x: i32, mut y: i32, width: i32, value: &str, color: u32, scale: i32) -> i32 {
@@ -8931,7 +9391,7 @@ mod tests {
         assert!(!preferences.wallpaper_effects);
         assert!(!preferences.responsive_presentation);
         assert_eq!(preferences.presentation_policy_label(), "Efficient");
-        assert_eq!(SettingsCategory::ALL.len(), 14);
+        assert_eq!(SettingsCategory::ALL.len(), 16);
         assert_eq!(SettingsCategory::Performance.index(), 5);
         assert_eq!(SettingsCategory::Performance.row_count(), 4);
     }
@@ -8947,6 +9407,8 @@ mod tests {
         assert_eq!(SettingsCategory::Windows.row_count(), 8);
         assert_eq!(SettingsCategory::Taskbar.row_count(), 7);
         assert_eq!(SettingsCategory::Menu.row_count(), 9);
+        assert_eq!(SettingsCategory::Terminal.row_count(), 5);
+        assert_eq!(SettingsCategory::Language.row_count(), 5);
     }
 
     #[test]
@@ -8976,7 +9438,10 @@ mod tests {
         let mut persistent = state::PersistentPreferences::new();
         persistent.refresh_rate = state::RefreshRate::Hz120;
         persistent.vsync = false;
-        let current = DesktopPreferences::from_persistent(persistent);
+        let mut current = DesktopPreferences::from_persistent(persistent);
+        current.locale = Locale::Hebrew.persisted();
+        current.menu_layout = 3;
+        current.terminal_scale = 2;
 
         let accessible = current.with_profile(CustomizationProfile::Accessible);
         assert!(accessible.high_contrast);
@@ -8987,6 +9452,9 @@ mod tests {
         assert_eq!(accessible.animation_level, 0);
         assert_eq!(accessible.refresh_rate, state::RefreshRate::Hz120);
         assert!(!accessible.vsync);
+        assert_eq!(accessible.locale, Locale::Hebrew.persisted());
+        assert_eq!(accessible.menu_layout, 3);
+        assert_eq!(accessible.terminal_scale, 2);
 
         let showcase = current.with_profile(CustomizationProfile::Showcase);
         assert!(showcase.window_shadows);

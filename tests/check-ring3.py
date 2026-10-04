@@ -18,6 +18,7 @@ command = [
     "qemu-system-x86_64",
     "-machine", "pc",
     "-cpu", "max",
+    "-smp", "4",
     "-m", "256M",
     "-vga", "std",
     "-global", "VGA.vgamem_mb=16",
@@ -83,14 +84,40 @@ for expected in (
     "Executable Form 'EscapeProbe' faulted at vector 14.",
     "EXPOS_FORM_PREEMPT",
     "EXPOS_FORM_BUDGET_EXHAUSTED",
+    "EXPOS_SMP_READY discovered=4 online=4",
+    "EXPOS_SMP_FORM_DISPATCH",
+    "EXPOS_SMP_FORM_COMPLETE",
+    "EXPOS_SMP_PARALLEL_START",
+    "parallel left",
+    "parallel right",
+    "EXPOS_SMP_PARALLEL_COMPLETE",
     "ExpBudget stopped 'BudgetLoop' after 256 hardware timer ticks.",
     "budget-blocked",
     "EXPOS_COMMAND_OK shutdown",
 ):
     assert expected in output, f"missing {expected!r}; see build/ring3-serial.log"
 
-roots = re.findall(r"EXPOS_RING3_ENTER .*? cr3=(0x[0-9a-f]+)", output)
-assert len(roots) == 3, f"expected three Ring 3 launches, got {roots!r}"
-assert len(set(roots)) == 3, f"Forms shared a CR3 root: {roots!r}"
+roots = re.findall(
+    r"EXPOS_RING3_(?:ENTER|PARALLEL_ADMIT) .*? cr3=(0x[0-9a-f]+)", output
+)
+assert len(roots) == 5, f"expected five Ring 3 launches, got {roots!r}"
+assert len(set(roots)) == 5, f"Forms shared a CR3 root: {roots!r}"
+
+parallel_start = output.index("EXPOS_SMP_PARALLEL_START")
+parallel_end = output.index("EXPOS_SMP_PARALLEL_COMPLETE", parallel_start)
+parallel_log = output[parallel_start:parallel_end]
+dispatches = re.findall(
+    r"EXPOS_SMP_FORM_DISPATCH fin=([0-9A-F-]+) cpu_slot=(\d+)", parallel_log
+)
+completions = re.findall(
+    r"EXPOS_SMP_FORM_COMPLETE fin=([0-9A-F-]+) cpu_slot=(\d+)", parallel_log
+)
+assert len(dispatches) == 2, f"expected two parallel dispatches, got {dispatches!r}"
+assert len(completions) == 2, f"expected two parallel completions, got {completions!r}"
+assert len({fin for fin, _ in dispatches}) == 2, "same Form dispatched twice"
+assert len({slot for _, slot in dispatches}) == 2, "parallel Forms shared one CPU slot"
+first_completion = parallel_log.index("EXPOS_SMP_FORM_COMPLETE")
+second_dispatch = parallel_log.rfind("EXPOS_SMP_FORM_DISPATCH")
+assert second_dispatch < first_completion, "a Form completed before its peer was dispatched"
 assert "[KERNEL PANIC]" not in output
 print("EXPOS RING 3 / VM / PREEMPTION TEST PASSED")

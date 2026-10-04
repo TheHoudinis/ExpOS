@@ -14,7 +14,7 @@ use expos_core::{CfcFin, Fin, Text};
 const MANIFEST_LBA: u32 = 40;
 const MANIFEST_BACKUP_LBA: u32 = 41;
 const MANIFEST_MAGIC: [u8; 8] = *b"EXGEN001";
-const MANIFEST_VERSION: u16 = 2;
+const MANIFEST_VERSION: u16 = 3;
 const EFI_PARTITION_START: u32 = 2048;
 const GPT_ENTRY_SECTORS: u32 = 32;
 const FAT_RESERVED_SECTORS: u32 = 32;
@@ -43,6 +43,7 @@ pub struct GenesisConfig {
     pub primary_fin: Fin,
     pub primary_name: Text,
     pub operator: session::StoredGenesisAccount,
+    pub locale: crate::locale::Locale,
     pub storage_key: Option<[u8; crate::crypto::STORAGE_KEY_LEN]>,
     storage_envelope: Option<StorageEnvelope>,
 }
@@ -199,7 +200,12 @@ const RUNTIME_UEFI_APP: &[u8] = include_bytes!("../../build/genesis/runtime-BOOT
 
 #[cfg(feature = "genesis-installer")]
 pub fn run() -> ! {
-    use crate::{crypto, input::Input, port, println, slog};
+    use crate::{
+        crypto,
+        input::Input,
+        locale::{Locale, Text as LocalText},
+        port, println, slog,
+    };
 
     let graphical = crate::graphics_console::enable_genesis();
     slog!(
@@ -207,15 +213,32 @@ pub fn run() -> ! {
         graphical,
         if graphical { "uefi-gop" } else { "serial" }
     );
-    println!();
-    println!("ExpOS Genesis Engine 2");
-    println!("Construct a verified Central Inflation Fabric");
-    println!("------------------------------------------------");
-    println!("1. Basic      (encrypted CFC storage)");
-    println!("2. Architect  (whole disk, unencrypted preview)");
     let mut input = Input::new();
+    println!();
+    println!("ExpOS Genesis");
+    for (index, locale) in Locale::ALL.iter().copied().enumerate() {
+        println!("{}. {}", index + 1, locale.name());
+    }
+    let locale = loop {
+        let value = read_line(
+            &mut input,
+            Locale::English.text(LocalText::LanguagePrompt),
+            false,
+        );
+        let Some(choice) = line(&value).as_bytes().first().copied() else {
+            continue;
+        };
+        if (b'1'..=b'5').contains(&choice) {
+            break Locale::ALL[(choice - b'1') as usize];
+        }
+    };
+    crate::locale::set_active(locale);
+    println!();
+    println!("ExpOS Genesis");
+    println!("1. {}", locale.text(LocalText::BasicEncrypted));
+    println!("2. {}", locale.text(LocalText::ArchitectPreview));
     let basic = loop {
-        let mode = read_line(&mut input, "Installation mode [1/2]: ", false);
+        let mode = read_line(&mut input, locale.text(LocalText::InstallationMode), false);
         if line(&mode) == "1" {
             break true;
         }
@@ -241,13 +264,13 @@ pub fn run() -> ! {
     }
     println!("[ok] target can hold the CFC database and UEFI runtime");
 
-    let cfc_name = prompt_text(&mut input, "CFC name: ");
-    let primary_name = prompt_text(&mut input, "Primary Dimension name: ");
+    let cfc_name = prompt_text(&mut input, locale.text(LocalText::CfcName));
+    let primary_name = prompt_text(&mut input, locale.text(LocalText::PrimaryName));
     let cfc_fin = CfcFin::from_u128(random_identity(*b"CFC!", b"genesis-cfc"));
     let primary_fin = Fin::from_u128(random_identity(*b"DIM!", b"genesis-primary"));
     let (operator, storage_key, storage_envelope) = loop {
-        let mut password = read_line(&mut input, "Operator password (8-23 characters): ", true);
-        let mut confirmation = read_line(&mut input, "Confirm Operator password: ", true);
+        let mut password = read_line(&mut input, locale.text(LocalText::OperatorPassword), true);
+        let mut confirmation = read_line(&mut input, locale.text(LocalText::ConfirmPassword), true);
         if line_bytes(&password) != line_bytes(&confirmation) {
             crypto::wipe(&mut password);
             crypto::wipe(&mut confirmation);
@@ -286,12 +309,13 @@ pub fn run() -> ! {
         primary_fin,
         primary_name,
         operator: session::StoredGenesisAccount(operator),
+        locale,
         storage_key,
         storage_envelope,
     };
 
     println!();
-    println!("Installation plan");
+    println!("{}", locale.text(LocalText::InstallationPlan));
     println!(
         "  Mode: {}",
         if basic {
@@ -303,15 +327,15 @@ pub fn run() -> ! {
     println!("  CFC: {}", cfc_name);
     println!("  Primary Dimension: {}", primary_name);
     println!("  Target: {} block device (whole disk)", device.backend());
-    println!("WARNING: the existing partition map and accessible data will be replaced.");
+    println!("{}", locale.text(LocalText::DestructiveWarning));
     println!("This operation is destructive, but it is not a forensic secure erase.");
     if line(&read_line(
         &mut input,
-        "Type ERASE to construct this CFC: ",
+        locale.text(LocalText::TypeErase),
         false,
     )) != "ERASE"
     {
-        println!("Installation cancelled; no disk writes were made.");
+        println!("{}", locale.text(LocalText::Cancelled));
         port::shutdown();
     }
 
@@ -338,7 +362,8 @@ pub fn run() -> ! {
     println!("[ok] EFI/BOOT/BOOTX64.EFI installed");
     println!("[ok] primary/backup manifests and boot payload verified");
     println!();
-    println!("Installation complete. Remove the USB, then press Enter to reboot.");
+    println!("{}", locale.text(LocalText::Complete));
+    println!("Remove the USB, then press Enter to reboot.");
     let _ = read_line(&mut input, "", false);
     port::reboot();
 }
@@ -786,6 +811,7 @@ fn encode_manifest(config: GenesisConfig) -> [u8; 512] {
         2
     };
     sector[11] = u8::from(config.storage_envelope.is_some());
+    sector[12] = config.locale.persisted();
     sector[16..32].copy_from_slice(&config.cfc_fin.bytes());
     sector[32..48].copy_from_slice(&config.primary_fin.bytes());
     put_text(&mut sector, 48, config.cfc_name);
@@ -862,6 +888,11 @@ fn decode_manifest(sector: &[u8; 512]) -> Option<GenesisConfig> {
         primary_fin,
         primary_name,
         operator: session::StoredGenesisAccount(account),
+        locale: if version >= 3 {
+            crate::locale::Locale::from_persisted(sector[12])
+        } else {
+            crate::locale::Locale::English
+        },
         storage_key: None,
         storage_envelope,
     })
@@ -960,6 +991,7 @@ mod tests {
             operator: session::StoredGenesisAccount(
                 session::genesis_operator(b"correct-horse").unwrap(),
             ),
+            locale: crate::locale::Locale::English,
             storage_key: None,
             storage_envelope: None,
         }
@@ -973,6 +1005,7 @@ mod tests {
         assert_eq!(decoded.cfc_name, original.cfc_name);
         assert_eq!(decoded.primary_fin, original.primary_fin);
         assert_eq!(decoded.primary_name, original.primary_name);
+        assert_eq!(decoded.locale, original.locale);
         assert_eq!(decoded.operator.0.name_len, 8);
         assert_ne!(decoded.operator.0.password_hash, [0; 32]);
     }

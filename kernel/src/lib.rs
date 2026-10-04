@@ -27,6 +27,7 @@ mod hardware;
 mod input;
 mod interrupts;
 mod kernel_controls;
+mod locale;
 mod network;
 mod pci;
 mod port;
@@ -35,6 +36,7 @@ mod radio;
 mod serial;
 mod session;
 mod shell;
+mod smp;
 pub(crate) mod state;
 mod storage;
 mod sync;
@@ -142,7 +144,13 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
 
     unsafe { boot::initialize(magic, mbi_phys) };
     form_runtime::initialize();
-    let _ = interrupts::initialize();
+    let interrupt_platform = interrupts::initialize();
+    let online_cpus = smp::initialize(interrupt_platform);
+    println!(
+        "[ok] {} CPU{} online",
+        online_cpus,
+        if online_cpus == 1 { "" } else { "s" }
+    );
     asl::initialize();
     let _ = usb::initialize();
     println!("[ok] boot handoff @ {:#x}", mbi_phys);
@@ -182,6 +190,9 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
                 port::shutdown();
             }
         };
+        if let Some(config) = genesis_config {
+            locale::set_active(config.locale);
+        }
         let report = match genesis_config {
             Some(config) => expos_core::bootstrap_with_identity(
                 config.cfc_fin,

@@ -80,7 +80,9 @@ typedef struct {
     u32 descriptor_version, boot_mode;
     u64 framebuffer, framebuffer_size;
     u32 width, height, stride, format;
+    u64 rsdp;
 } BootInfo;
+typedef struct { Guid guid; void *table; } ConfigurationTable;
 typedef struct {
     u8 ident[16];
     u16 type, machine;
@@ -169,6 +171,21 @@ Status efi_main(Handle image, SystemTable *system) {
     info->signature = INFO_MAGIC;
     info->version = 1;
     info->size = sizeof(*info);
+    ConfigurationTable *tables = system->tables;
+    const Guid acpi20 = {0x8868e871, 0xe4f1, 0x11d3, {0xbc,0x22,0,0x80,0xc7,0x3c,0x88,0x81}};
+    const Guid acpi10 = {0xeb9d2d30, 0x2d88, 0x11d3, {0x9a,0x16,0,0x90,0x27,0x3f,0xc1,0x4d}};
+    for (usize index = 0; index < system->table_count; index++) {
+        const Guid *guid = &tables[index].guid;
+        const u8 *left = (const u8 *)guid;
+        const u8 *right20 = (const u8 *)&acpi20;
+        const u8 *right10 = (const u8 *)&acpi10;
+        int match20 = 1, match10 = 1;
+        for (usize byte = 0; byte < sizeof(Guid); byte++) {
+            if (left[byte] != right20[byte]) match20 = 0;
+            if (left[byte] != right10[byte]) match10 = 0;
+        }
+        if (match20 || (!info->rsdp && match10)) info->rsdp = (u64)tables[index].table;
+    }
     Guid loaded_guid = {0x5b1b31a1, 0x9562, 0x11d2, {0x8e,0x3f,0,0xa0,0xc9,0x69,0x72,0x3b}};
     LoadedImage *loaded = 0;
     if (!boot->handle_protocol(image, &loaded_guid, (void **)&loaded) && loaded->options && loaded->options_size <= 4096) {

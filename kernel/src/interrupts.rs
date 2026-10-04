@@ -15,6 +15,7 @@ const MSI_CAPABILITY: u8 = 0x05;
 const MSIX_CAPABILITY: u8 = 0x11;
 static NEXT_VECTOR: AtomicU8 = AtomicU8::new(FIRST_DEVICE_VECTOR);
 static APIC_AVAILABLE: AtomicBool = AtomicBool::new(false);
+static APIC_BASE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MessageKind {
@@ -48,6 +49,7 @@ pub fn initialize() -> Platform {
         0
     };
     APIC_AVAILABLE.store(local_apic, Ordering::Release);
+    APIC_BASE.store(base, Ordering::Release);
     crate::slog!(
         "EXPOS_INTERRUPT_PLATFORM apic={} x2apic={} bsp={} base={:#x} pic_fallback=true msi_phase=prepared\r\n",
         local_apic,
@@ -60,6 +62,31 @@ pub fn initialize() -> Platform {
         x2apic,
         base,
         bootstrap_id,
+    }
+}
+
+pub fn initialize_local_timer(slot: usize) {
+    let base = APIC_BASE.load(Ordering::Acquire) as usize;
+    if base == 0 || slot == 0 {
+        return;
+    }
+    unsafe {
+        let svr = core::ptr::read_volatile((base + 0xF0) as *const u32);
+        core::ptr::write_volatile((base + 0xF0) as *mut u32, svr | 0x100 | 0xFF);
+        core::ptr::write_volatile((base + 0x3E0) as *mut u32, 0x3);
+        core::ptr::write_volatile((base + 0x320) as *mut u32, (1 << 17) | 32);
+        core::ptr::write_volatile((base + 0x380) as *mut u32, 10_000_000);
+    }
+}
+
+pub fn timer_eoi(slot: usize) {
+    if slot == 0 {
+        unsafe { crate::port::outb(0x20, 0x20) };
+        return;
+    }
+    let base = APIC_BASE.load(Ordering::Acquire) as usize;
+    if base != 0 {
+        unsafe { core::ptr::write_volatile((base + 0xB0) as *mut u32, 0) };
     }
 }
 

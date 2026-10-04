@@ -66,8 +66,9 @@ preemptive Form scheduler tick.
 This release supplies the x86_64 PCI/UEFI backend only. The semantic record and
 exclusive-claim rules are intended to survive another architecture, but PCI
 configuration mechanism 1, APIC messages and UEFI GOP are not presented as
-portable interfaces. SMP is deliberately outside this milestone and ASL v1
-does not define CPU topology or cross-core scheduling.
+portable interfaces. CPU topology and cross-core scheduling are kernel
+facilities rather than ASL v1 records; the x86_64 backend discovers ACPI MADT
+processors and starts APs without making that mechanism part of portable ASL.
 
 ## Verification
 

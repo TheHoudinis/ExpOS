@@ -3,5 +3,6 @@ operator
 expos
 browser
 /ExpOS capability kernel
-q
+~	?
+console
 shutdown

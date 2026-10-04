@@ -22,6 +22,10 @@ ExpOS is the Form-native operating system described by
   register state, requester-bound Handles and a hardware-tick ExpBudget; the
   x86_64 loader enters CPL3 with `iretq`, accepts only Form ABI traffic through
   a DPL3 interrupt gate, and forcibly stops non-yielding code at quota;
+- ACPI MADT discovery and x86_64 SMP bring-up for as many as eight logical
+  CPUs, with per-CPU GDT/TSS/kernel stacks, local-APIC timer preemption and
+  independently reservable AP jobs; `execute-parallel <Form-A> <Form-B>` runs
+  two isolated Ring 3 Form contexts concurrently on distinct CPU slots;
 - bounded Form-native kernel controls: typed tunables, signal/timer/resource
   readiness watches, and shell-runtime-local resource accounting with DIESE-gated
   mutation;
@@ -29,18 +33,22 @@ ExpOS is the Form-native operating system described by
   compositor whose additive v2 protocol advertises Form-owned surfaces, atomic
   commits, multi-region damage, presentation-complete frame events and alpha
   buffers; native UEFI uses validated GOP scanout directly, while BIOS/QEMU
-  retains bounded double-buffered Bochs output and selectable pacing;
-- a flat dark desktop with a list/grid application menu, direct entries for
+  retains bounded double-buffered Bochs output and selectable pacing; GOP also
+  composes into a shadow scanout and copies only completed damage, so partially
+  redrawn widgets never become visible;
+- a flat dark desktop with list, grid, compact-grid and dashboard application
+  menu layouts, direct entries for
   installed Ayo apps, menu density/content/category/motion controls, and a
   taskbar with movable, closable, minimizable and maximizable windows;
 - an interactive Settings control center for profiles, accessibility,
   appearance, windows, taskbar, display, performance, input, network, Wi-Fi,
-  Bluetooth, privacy, system and menu behavior, including six coordinated
+  Bluetooth, privacy, system, terminal, language and menu behavior, including six coordinated
   desktop profiles, 256 coordinated theme palettes, 252 wallpaper variants,
   256 accent colors, 256 backdrop tones, four cursor themes, five font faces
   and three real font weights;
 - readable case-sensitive 8x8 framebuffer text with runtime face/weight
-  rasterization and an expanded 8x16 VGA console font;
+  rasterization, an expanded 8x16 VGA console font, and persisted English,
+  Russian, Hebrew, German and Esperanto UI/Genesis locales;
 - Ayo v3 package installation, verification, ownership, rollback and recovery,
   with a categorized 25-package built-in catalog;
 - a frozen language-neutral Form ABI v1 plus Rust, Go, C, and Python SDK
@@ -112,7 +120,9 @@ the explicitly unencrypted development choice. The automated end-to-end
 `genesis-check` installs, disk-boots and authenticates both paths; both claim
 the whole selected block device. Genesis now activates a styled firmware-GOP
 framebuffer console immediately after the UEFI handoff, so prompts and masked
-password input are visible in the QEMU window instead of only on serial.
+password input are visible in the QEMU window instead of only on serial. Its
+first prompt selects English, Russian, Hebrew, German or Esperanto and records
+the choice in the redundant installation manifest.
 `make genesis-display-check` captures the real scanout and advances it through
 PS/2 input. Installed UEFI boot uses the same visible console for encrypted-CFC
 unlock and fail-closed manifest errors before handing off to the normal chooser.
@@ -234,26 +244,27 @@ capability identifiers and instruction footers are not shown.
 Useful keys:
 
 ```text
-Super+Enter     Terminal
-Super+B         Browser
-Super+Tab       Next running application
-Super+Up        Maximize
-Super+Down      Restore or minimize
-Super+Q         Close
-Esc             Return to the console
+Super+Space           Application menu
+Super+Arrow           Move the active window
+Super+Alt+Left/Right  Tile left or right
+Super+Alt+Up          Maximize or restore
+Super+Alt+Down        Minimize
+Ctrl+Shift+Esc        Ask before opening the desktop Terminal
+Esc                   Cancel editing or close the application menu
 ```
 
 The graphical Terminal has 40 lines of scrollback, 24 history entries with Up
 and Down recall, and commands for identity, status, display, networking,
-applications, users and basic shell-style operations. Run `help` inside it for
+applications, users, CPU topology, ExpFS Form listing/reading/writing and basic
+shell-style operations. Run `help` inside it for
 the exact list. Its `display` command reports the active and requested modes,
 presentation policy, frame-pacing and scanout counters. The console
 `displayinfo` command summarizes the selected presentation target and
 VSync/page-flip state; `displaydiag` also reports submitted and copied damage,
 damage-collapse, page-flip-failure and bounded vertical-retrace-timeout
 counters. `timers` reports the TSC clock source used by the frame pacer.
-`neofetch` works in both graphical and console terminals and draws a clear ExpOS
-two-eye mark before the current system/session facts. Graphical `windowreset`
+`neofetch` works in both graphical and console terminals and draws only a large
+two-eye mark, the ExpOS version and architecture. Graphical `windowreset`
 returns every application window to its default recoverable position. In
 Browser, click the address field or press `/`, type an `http://` or `https://`
 URL, and press Enter. Text without a scheme is treated as a search query and

@@ -25,7 +25,7 @@ struct Console {
     enabled: bool,
     col: usize,
     row: usize,
-    cells: [[u8; COLS]; ROWS],
+    cells: [[char; COLS]; ROWS],
 }
 
 impl Console {
@@ -34,14 +34,14 @@ impl Console {
             enabled: false,
             col: 0,
             row: 0,
-            cells: [[b' '; COLS]; ROWS],
+            cells: [[' '; COLS]; ROWS],
         }
     }
 
     fn reset(&mut self) {
         self.col = 0;
         self.row = 0;
-        self.cells = [[b' '; COLS]; ROWS];
+        self.cells = [[' '; COLS]; ROWS];
     }
 
     fn draw_chrome(&self, title: &str, subtitle: &str) {
@@ -60,9 +60,9 @@ impl Console {
         let x = ORIGIN_X + col as i32 * CELL_WIDTH;
         let y = ORIGIN_Y + row as i32 * CELL_HEIGHT;
         framebuffer::rect(x, y, CELL_WIDTH, CELL_HEIGHT, PANEL);
-        let byte = self.cells[row][col];
-        if byte != b' ' {
-            framebuffer::glyph(x, y, byte, INK, 1);
+        let character = self.cells[row][col];
+        if character != ' ' {
+            framebuffer::glyph_char(x, y, character, INK, 1);
         }
     }
 
@@ -94,7 +94,7 @@ impl Console {
         );
         for row in 0..ROWS {
             for col in 0..COLS {
-                if self.cells[row][col] != b' ' {
+                if self.cells[row][col] != ' ' {
                     self.draw_cell(col, row);
                 }
             }
@@ -110,24 +110,24 @@ impl Console {
         for row in 1..ROWS {
             self.cells[row - 1] = self.cells[row];
         }
-        self.cells[ROWS - 1] = [b' '; COLS];
+        self.cells[ROWS - 1] = [' '; COLS];
         self.redraw_body();
         true
     }
 
-    fn write_byte(&mut self, byte: u8) -> Option<framebuffer::DamageRegion> {
-        match byte {
-            b'\n' => self.new_line().then(Self::body_damage),
-            0x08 if self.col != 0 => {
+    fn write_character(&mut self, character: char) -> Option<framebuffer::DamageRegion> {
+        match character {
+            '\n' => self.new_line().then(Self::body_damage),
+            '\u{8}' if self.col != 0 => {
                 self.col -= 1;
-                self.cells[self.row][self.col] = b' ';
+                self.cells[self.row][self.col] = ' ';
                 self.draw_cell(self.col, self.row);
                 Some(Self::cell_damage(self.col, self.row))
             }
-            0x08 => None,
-            byte @ 0x20..=0x7E => {
+            '\u{8}' => None,
+            character if !character.is_control() => {
                 let scrolled = self.col >= COLS && self.new_line();
-                self.cells[self.row][self.col] = byte;
+                self.cells[self.row][self.col] = character;
                 self.draw_cell(self.col, self.row);
                 let cell = Self::cell_damage(self.col, self.row);
                 self.col += 1;
@@ -144,9 +144,20 @@ impl fmt::Write for Console {
             return Ok(());
         }
         let mut damage: Option<framebuffer::DamageRegion> = None;
-        for byte in value.bytes() {
-            if let Some(changed) = self.write_byte(byte) {
-                damage = Some(damage.map_or(changed, |current| current.union(changed)));
+        let rtl = value
+            .chars()
+            .any(|character| matches!(character as u32, 0x0590..=0x05FF));
+        if rtl {
+            for character in value.chars().rev() {
+                if let Some(changed) = self.write_character(character) {
+                    damage = Some(damage.map_or(changed, |current| current.union(changed)));
+                }
+            }
+        } else {
+            for character in value.chars() {
+                if let Some(changed) = self.write_character(character) {
+                    damage = Some(damage.map_or(changed, |current| current.union(changed)));
+                }
             }
         }
         if let Some(damage) = damage {
@@ -219,10 +230,10 @@ mod tests {
         for _ in 0..ROWS + 2 {
             console.write_str("line\n").unwrap();
         }
-        assert_eq!(&console.cells[ROWS - 2][..4], b"line");
+        assert_eq!(&console.cells[ROWS - 2][..4], &['l', 'i', 'n', 'e']);
         console.write_str("abc\x08 ").unwrap();
-        assert_eq!(console.cells[ROWS - 1][0], b'a');
-        assert_eq!(console.cells[ROWS - 1][1], b'b');
-        assert_eq!(console.cells[ROWS - 1][2], b' ');
+        assert_eq!(console.cells[ROWS - 1][0], 'a');
+        assert_eq!(console.cells[ROWS - 1][1], 'b');
+        assert_eq!(console.cells[ROWS - 1][2], ' ');
     }
 }

@@ -982,7 +982,9 @@ fn decode_report(device: &mut Device, report: &[u8]) -> Option<HidEvent> {
 }
 
 fn hid_key(usage: u8, modifiers: u8) -> Option<u8> {
+    let control = modifiers & 0x11 != 0;
     let shift = modifiers & 0x22 != 0;
+    let alt = modifiers & 0x44 != 0;
     let super_key = modifiers & 0x88 != 0;
     let base = match usage {
         0x04..=0x1D => b'a' + usage - 0x04,
@@ -1005,28 +1007,36 @@ fn hid_key(usage: u8, modifiers: u8) -> Option<u8> {
         0x37 => b'.',
         0x38 => b'/',
         0x4F => {
-            return Some(if super_key {
+            return Some(if super_key && alt {
+                crate::input::KEY_SUPER_ALT_RIGHT
+            } else if super_key {
                 crate::input::KEY_SUPER_RIGHT
             } else {
                 crate::input::KEY_RIGHT
             })
         }
         0x50 => {
-            return Some(if super_key {
+            return Some(if super_key && alt {
+                crate::input::KEY_SUPER_ALT_LEFT
+            } else if super_key {
                 crate::input::KEY_SUPER_LEFT
             } else {
                 crate::input::KEY_LEFT
             })
         }
         0x51 => {
-            return Some(if super_key {
+            return Some(if super_key && alt {
+                crate::input::KEY_SUPER_ALT_DOWN
+            } else if super_key {
                 crate::input::KEY_SUPER_DOWN
             } else {
                 crate::input::KEY_DOWN
             })
         }
         0x52 => {
-            return Some(if super_key {
+            return Some(if super_key && alt {
+                crate::input::KEY_SUPER_ALT_UP
+            } else if super_key {
                 crate::input::KEY_SUPER_UP
             } else {
                 crate::input::KEY_UP
@@ -1034,6 +1044,9 @@ fn hid_key(usage: u8, modifiers: u8) -> Option<u8> {
         }
         _ => return None,
     };
+    if base == 0x1B && control && shift {
+        return Some(crate::input::KEY_DESKTOP_SHELL_CONFIRM);
+    }
     let key = crate::input::apply_modifiers(base, shift, false);
     if super_key {
         crate::input::super_binding(key)
@@ -1165,10 +1178,15 @@ mod tests {
     }
 
     #[test]
-    fn hid_keyboard_translation_preserves_exp_os_shortcuts() {
+    fn hid_keyboard_translation_preserves_desktop_actions() {
         assert_eq!(hid_key(0x04, 0), Some(b'a'));
         assert_eq!(hid_key(0x04, 0x02), Some(b'A'));
         assert_eq!(hid_key(0x2C, 0x08), Some(crate::input::KEY_SUPER_LAUNCHER));
         assert_eq!(hid_key(0x4F, 0x08), Some(crate::input::KEY_SUPER_RIGHT));
+        assert_eq!(hid_key(0x4F, 0x0C), Some(crate::input::KEY_SUPER_ALT_RIGHT));
+        assert_eq!(
+            hid_key(0x29, 0x03),
+            Some(crate::input::KEY_DESKTOP_SHELL_CONFIRM)
+        );
     }
 }

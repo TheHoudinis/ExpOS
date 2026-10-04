@@ -3,7 +3,8 @@ operator
 expos
 useradd keeper power violetmemory
 desktop
-s2
+~				?
+2
 5++
 j
 
@@ -13,7 +14,8 @@ j
 j
 j
 9
-q
+~					?
+console
 mkform MyNotes data
 write MyNotes hello
 grant MyNotes execute

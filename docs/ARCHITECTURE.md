@@ -30,7 +30,7 @@ CfcFin -> CFC ownership/catalog (semantic core)
           +-> checkpoint record/view semantics
           |
           v
- Form Execution Context -> PIT-preempted CPL3 / per-Form CR3
+ Form Execution Context -> hardware-timer-preempted CPL3 / per-Form CR3 / SMP AP job
 ```
 
 ## Approved target architecture (not yet complete)
@@ -82,8 +82,16 @@ without disclosing BAR addresses. See `ASL_V1.md` for the exact first contract.
 PCI MSI/MSI-X discovery, vectors `0x40..0x7f`, message construction and the
 programming path have landed. Drivers currently reserve but do not arm those
 messages because device-specific IDT completion handlers have not landed; NVMe,
-AHCI, xHCI and RTL8139 therefore retain bounded polling. SMP is deliberately
-outside this milestone.
+AHCI, xHCI and RTL8139 therefore retain bounded polling.
+
+The boot handoff carries the ACPI RSDP. The x86_64 SMP layer validates the
+RSDT/XSDT and MADT, starts as many as seven application processors with
+INIT/SIPI, and installs a per-CPU GDT, TSS, kernel interrupt stack and GS-based
+execution record. The BSP keeps the PIT scheduler tick; APs use local-APIC
+timers. Scheduler slots are independently reserved, allowing separate prepared
+Form contexts and CR3 roots to execute concurrently. The bounded foreground
+command `execute-parallel <Form-A> <Form-B>` submits both slices before joining
+either and refuses to run without at least two online CPUs.
 
 ### Current enforcement and execution flow
 
@@ -97,8 +105,8 @@ outside this milestone.
   `Connect`, `DNS`, and `RawPacket` have not yet been split into distinct bits.
 - Core `ExpBudget` charges context-owned resource accounts before work and
   rejects overflow or a soft-limit breach atomically. Native scheduler slices
-  charge `CpuTicks` delivered by PIT IRQ0; code that never yields is stopped at
-  the soft limit. Kernel controls separately enforce live Form
+  charge `CpuTicks` delivered by the BSP PIT or AP local-APIC timer; code that
+  never yields is stopped at the soft limit. Kernel controls separately enforce live Form
   bytes/operations, event watches, IPC reservations, and scratch pages. PIMP
   does not yet compile budget keys directly into every context's limits.
 - `execute` requires an active target-scoped Execute Handle and admits a
@@ -132,8 +140,9 @@ outside this milestone.
 8. The kernel starts a graphical Session Manager and maps the selected identity
    to Operator, Power or Guest authority before opening the command environment.
    COM1, PS/2 and xHCI boot-HID input remain polling devices; the native Form
-   platform separately installs a TSS/IDT, remaps the PIC and programs PIT IRQ0
-   for CPL3 preemption. Commands can
+   platform separately installs per-CPU GDT/TSS/interrupt state, remaps the PIC,
+   starts ACPI-described APs and programs PIT/local-APIC timers for CPL3
+   preemption. Commands can
    create and inspect Forms, change lifecycle state, grant or revoke Handles,
    validate PIMP specifications, inspect system state, reboot, and shut down.
 9. Bounded NVMe, AHCI SATA or ATA-PIO drivers load a dedicated ExpOS state image.
@@ -155,9 +164,11 @@ outside this milestone.
 13. Form-native execution contexts carry CFC, Dimension, FIN, address-space
     identity, a bounded Handle set, event queue, complete interrupt-frame CPU
     state, and ExpBudget. Executable Forms switch to per-Form page tables and
-    CPL3, are sliced by PIT interrupts, resume from saved registers, and retain
-    ABI exit/fault results. `make ring3-check` proves distinct roots and stops
-    an infinite loop at its hardware-tick quota.
+    CPL3, are sliced by per-CPU hardware timers, resume from saved registers,
+    and retain ABI exit/fault results. Independent AP jobs permit concurrent
+    contexts. `make ring3-check` proves four-CPU bring-up, two distinct AP slots
+    dispatched before either completion, distinct CR3 roots, and an infinite
+    loop stopped at its hardware-tick quota.
 14. CFC-bound recovery metadata stores an installation-baseline descriptor
     outside an up-to-eight-entry rotating checkpoint ring. The native ExpFS
     adapter now persists eight complete CFC database checkpoints, rotates the
@@ -228,8 +239,11 @@ outside this milestone.
   `FrameDone` is emitted only after the compositor crosses the framebuffer
   presentation boundary; queue pressure defers rather than drops it. Focus,
   configure, frame-complete, key and pointer events are routed back to the
-  owning FIN. Native UEFI scanout consumes the validated GOP address, size,
+  owning FIN. Native UEFI output consumes the validated GOP address, size,
   geometry, stride and RGB/BGR order without reprogramming a Bochs device.
+  Composition happens in a bounded shadow scanout; only a completed normalized
+  damage set is copied to GOP memory, so intermediate clearing and repaint
+  steps cannot flicker on the physical display.
   BIOS fallback can program 640x480, 1280x720 or 1920x1080 XRGB scanout in
   QEMU standard VGA's 16 MiB linear framebuffer BAR. The bootstrap maps RAM
   and PCI windows below 4 GiB. ExpDisplay checks mapped bounds and geometry
@@ -275,9 +289,10 @@ outside this milestone.
   taskbar can occupy any edge, use
   one of nine thicknesses, align running apps at start/center/end, auto-hide and
   reveal at that edge, blend translucently, show horizontal labels, and include
-  RTC seconds. The fourteen-category Settings UI adds coordinated whole-desktop
-  Profiles, a dedicated Accessibility page, and a Menu page for list/grid
-  layout, density, scale, content visibility, categories and motion, and computes compact category/row
+  RTC seconds. The sixteen-category Settings UI adds coordinated whole-desktop
+  Profiles, dedicated Accessibility, Terminal and Language pages, and a Menu
+  page for list, grid, compact-grid and dashboard layout, density, scale,
+  content visibility, categories and motion, and computes compact category/row
   viewports so the selected item remains visible at 480p. Appearance, Windows
   Taskbar, Menu and Profiles expose 1,141 directly working selectable values.
   Profiles atomically apply Balanced, Compact, Focus, Accessible, Showcase or
@@ -291,12 +306,19 @@ outside this milestone.
   independent presentation constraint. All three optional features persist and
   default off or Efficient so a fresh state starts on the least expensive path.
   The graphical Terminal keeps bounded scrollback and command history, exposes
-  identity, system, display, network and application commands, draws the same
-  two-eye `neofetch` art as the console, and provides window-layout recovery.
+  identity, system, display, network, CPU, application and ExpFS Form
+  list/read/write commands, draws the same minimal two-eye `neofetch` art as the
+  console, and provides window-layout recovery. Its face, weight, scale,
+  foreground and background persist independently of the desktop font. English,
+  Russian, Hebrew, German and Esperanto locale selections persist alongside
+  these settings; the renderer supplies the required built-in glyphs and a
+  bounded right-to-left presentation path for Hebrew.
   Each application receives a child Handle containing
   only Display and Input rights; the compositor checks it before visibility,
-  geometry, commit or key routing. Leaving graphics restores the VGA mode 3
-  register set before the kernel redraws its text console.
+  geometry, commit or key routing. Ctrl+Shift+Esc opens a confirmation before
+  focusing the desktop Terminal; plain Esc only cancels an editor or launcher,
+  so GOP is not torn down by an accidental keypress. BIOS-only graphics exits
+  retain a VGA mode 3 recovery path.
 - The PS/2 adapter enables the auxiliary device, validates ACKs and decodes
   synchronized three-byte packets. The compositor clamps a save-under cursor,
   hit-tests the topmost visible surface and checks its Input Handle before

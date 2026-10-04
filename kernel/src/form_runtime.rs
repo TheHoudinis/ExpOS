@@ -5,11 +5,17 @@
 //! code page, one ABI/data page and one stack page. CPL3 can enter the kernel
 //! only through the DPL3 Form ABI gate; PIT IRQ0 is the preemption source.
 
-use core::{arch::asm, mem::size_of, ptr};
+use core::{
+    arch::asm,
+    marker::PhantomData,
+    mem::size_of,
+    ptr,
+    sync::atomic::{AtomicU8, Ordering},
+};
 
 use expos_core::{
     AbiCall, AbiRequest, AbiResponse, AbiStatus, AddressSpace, CapabilityBroker, CfcFin, Fin,
-    FormHandle, NativeCallGate, FORM_ABI_VERSION,
+    FormHandle, NativeCallGate, Operations, FORM_ABI_VERSION,
 };
 
 use crate::{port, println, slog};
@@ -17,6 +23,9 @@ use crate::{port, println, slog};
 const PAGE_BYTES: usize = 4096;
 const PAGE_ENTRIES: usize = 512;
 const MAX_NATIVE_SPACES: usize = 8;
+const MAX_CPUS: usize = crate::smp::MAX_CPUS;
+const CPU_KERNEL_STACK_BYTES: usize = 64 * 1024;
+const IA32_GS_BASE: u32 = 0xC000_0101;
 
 pub const USER_CODE: u64 = 0x0000_4000_0000_0000;
 pub const USER_DATA: u64 = USER_CODE + PAGE_BYTES as u64;
@@ -115,6 +124,31 @@ pub struct TrapFrame {
     pub ss: u64,
 }
 
+impl TrapFrame {
+    const EMPTY: Self = Self {
+        r15: 0,
+        r14: 0,
+        r13: 0,
+        r12: 0,
+        r11: 0,
+        r10: 0,
+        r9: 0,
+        r8: 0,
+        rsi: 0,
+        rdi: 0,
+        rbp: 0,
+        rdx: 0,
+        rcx: 0,
+        rbx: 0,
+        rax: 0,
+        rip: 0,
+        cs: 0,
+        rflags: 0,
+        rsp: 0,
+        ss: 0,
+    };
+}
+
 const _: () = assert!(size_of::<TrapFrame>() == 160);
 const _: () = assert!(size_of::<AbiRequest>() == 72);
 const _: () = assert!(size_of::<AbiResponse>() == 40);
@@ -142,6 +176,64 @@ pub struct PreparedForm {
     frame: TrapFrame,
 }
 
+const JOB_IDLE: u8 = 0;
+const JOB_READY: u8 = 1;
+const JOB_RUNNING: u8 = 2;
+const JOB_DONE: u8 = 3;
+const JOB_RESERVED: u8 = 4;
+
+struct ApJob {
+    prepared: *mut PreparedForm,
+    broker: *const CapabilityBroker,
+    cfc: CfcFin,
+    dimension: Fin,
+    form: Fin,
+    execute_handle: FormHandle,
+    log_handle: FormHandle,
+    tick_limit: u64,
+    reason: u8,
+    fault: u8,
+    timer_ticks: u64,
+    result: u64,
+    frame: TrapFrame,
+}
+
+impl ApJob {
+    const EMPTY: Self = Self {
+        prepared: ptr::null_mut(),
+        broker: ptr::null(),
+        cfc: CfcFin::ZERO,
+        dimension: Fin::ZERO,
+        form: Fin::ZERO,
+        execute_handle: empty_handle(),
+        log_handle: empty_handle(),
+        tick_limit: 0,
+        reason: 0,
+        fault: 0,
+        timer_ticks: 0,
+        result: 0,
+        frame: TrapFrame::EMPTY,
+    };
+}
+
+const fn empty_handle() -> FormHandle {
+    FormHandle {
+        id: 0,
+        parent_id: 0,
+        cfc: CfcFin::ZERO,
+        requester: Fin::ZERO,
+        target: Fin::ZERO,
+        dimension: Fin::ZERO,
+        operations: Operations::NONE,
+        valid_until_tick: 0,
+        revoked: true,
+    }
+}
+
+static AP_JOB_STATE: [AtomicU8; MAX_CPUS] = [const { AtomicU8::new(JOB_IDLE) }; MAX_CPUS];
+static mut AP_JOBS: [ApJob; MAX_CPUS] = [const { ApJob::EMPTY }; MAX_CPUS];
+static NEXT_AP: AtomicU8 = AtomicU8::new(1);
+
 #[derive(Clone, Copy)]
 pub struct RunAuthorization<'a> {
     broker: &'a CapabilityBroker,
@@ -150,6 +242,16 @@ pub struct RunAuthorization<'a> {
     form: Fin,
     execute_handle: FormHandle,
     log_handle: FormHandle,
+}
+
+/// An AP-owned Form slice. Several tickets may be alive at once as long as
+/// each one owns a different PreparedForm and scheduler slot.
+#[must_use = "a submitted Form slice must be joined"]
+pub struct PendingSlice<'a> {
+    slot: usize,
+    form: Fin,
+    _prepared: PhantomData<&'a mut PreparedForm>,
+    _broker: PhantomData<&'a CapabilityBroker>,
 }
 
 impl<'a> RunAuthorization<'a> {
@@ -191,7 +293,46 @@ struct ActiveExecution {
     fault: u8,
 }
 
-static mut ACTIVE: *mut ActiveExecution = ptr::null_mut();
+#[repr(C, align(64))]
+struct PerCpuExecution {
+    saved_rsp: u64,
+    saved_cr3: u64,
+    saved_rbx: u64,
+    saved_rbp: u64,
+    saved_r12: u64,
+    saved_r13: u64,
+    saved_r14: u64,
+    saved_r15: u64,
+    active: *mut ActiveExecution,
+    slot: u64,
+}
+
+impl PerCpuExecution {
+    const EMPTY: Self = Self {
+        saved_rsp: 0,
+        saved_cr3: 0,
+        saved_rbx: 0,
+        saved_rbp: 0,
+        saved_r12: 0,
+        saved_r13: 0,
+        saved_r14: 0,
+        saved_r15: 0,
+        active: ptr::null_mut(),
+        slot: 0,
+    };
+}
+
+#[repr(C, align(16))]
+struct CpuKernelStack([u8; CPU_KERNEL_STACK_BYTES]);
+
+#[repr(C, align(16))]
+struct TaskState([u8; 104]);
+
+static mut PER_CPU: [PerCpuExecution; MAX_CPUS] = [const { PerCpuExecution::EMPTY }; MAX_CPUS];
+static mut CPU_STACKS: [CpuKernelStack; MAX_CPUS] =
+    [const { CpuKernelStack([0; CPU_KERNEL_STACK_BYTES]) }; MAX_CPUS];
+static mut CPU_TSS: [TaskState; MAX_CPUS] = [const { TaskState([0; 104]) }; MAX_CPUS];
+static mut CPU_GDT: [[u64; 7]; MAX_CPUS] = [[0; 7]; MAX_CPUS];
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
@@ -240,7 +381,6 @@ static mut IDT: [IdtEntry; 256] = [IdtEntry::MISSING; 256];
 static mut INITIALIZED: bool = false;
 
 unsafe extern "C" {
-    fn expos_arch_install_form_tss();
     fn expos_arch_enter_form(cr3: u64, state: *const TrapFrame) -> u64;
     fn expos_form_timer_stub();
     fn expos_form_abi_stub();
@@ -256,7 +396,6 @@ pub fn initialize() {
         if INITIALIZED {
             return;
         }
-        expos_arch_install_form_tss();
         IDT[6] = IdtEntry::interrupt(expos_form_ud_stub, 0);
         IDT[13] = IdtEntry::interrupt(expos_form_gp_stub, 0);
         IDT[14] = IdtEntry::interrupt(expos_form_pf_stub, 0);
@@ -267,10 +406,122 @@ pub fn initialize() {
             base: ptr::addr_of!(IDT) as u64,
         };
         asm!("lidt [{}]", in(reg) &descriptor, options(readonly, nostack, preserves_flags));
+        initialize_cpu_arch(0);
         initialize_pic_and_pit();
         INITIALIZED = true;
     }
     slog!("EXPOS_FORM_PLATFORM_READY cpl=3 pit_hz=1000 abi_vector=0x80\r\n");
+}
+
+/// Install the shared interrupt table on an application processor. Per-CPU
+/// TSS and native execution state are populated by the SMP scheduler before a
+/// Ring-3 slice is assigned; idle APs never enter user mode.
+pub fn initialize_ap(slot: usize) {
+    unsafe {
+        initialize_cpu_arch(slot);
+        let descriptor = DescriptorTablePointer {
+            limit: (size_of::<[IdtEntry; 256]>() - 1) as u16,
+            base: ptr::addr_of!(IDT) as u64,
+        };
+        asm!("lidt [{}]", in(reg) &descriptor, options(readonly, nostack, preserves_flags));
+    }
+    crate::interrupts::initialize_local_timer(slot);
+}
+
+pub fn run_ap_work(slot: usize) {
+    if slot == 0 || slot >= crate::smp::online_count() {
+        return;
+    }
+    if AP_JOB_STATE[slot]
+        .compare_exchange(JOB_READY, JOB_RUNNING, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    let job = unsafe { &mut *ptr::addr_of_mut!(AP_JOBS[slot]) };
+    let authorization = RunAuthorization::new(
+        unsafe { &*job.broker },
+        job.cfc,
+        job.dimension,
+        job.form,
+        job.execute_handle,
+        job.log_handle,
+    );
+    let result = run_slice_local(unsafe { &mut *job.prepared }, authorization, job.tick_limit);
+    (job.reason, job.fault) = encode_reason(result.reason);
+    job.timer_ticks = result.timer_ticks;
+    job.result = result.result;
+    job.frame = result.frame;
+    AP_JOB_STATE[slot].store(JOB_DONE, Ordering::Release);
+}
+
+unsafe fn initialize_cpu_arch(slot: usize) {
+    assert!(slot < MAX_CPUS);
+    let per_cpu = ptr::addr_of_mut!(PER_CPU[slot]);
+    (*per_cpu).slot = slot as u64;
+    write_msr(IA32_GS_BASE, per_cpu as u64);
+
+    let stack_top = ptr::addr_of_mut!(CPU_STACKS[slot].0)
+        .cast::<u8>()
+        .add(CPU_KERNEL_STACK_BYTES) as u64;
+    let tss = ptr::addr_of_mut!(CPU_TSS[slot].0).cast::<u8>();
+    ptr::write_unaligned(tss.add(4).cast::<u64>(), stack_top);
+    ptr::write_unaligned(tss.add(102).cast::<u16>(), 104);
+
+    let tss_base = tss as u64;
+    let limit = 103_u64;
+    let mut descriptor = limit & 0xFFFF;
+    descriptor |= (tss_base & 0xFF_FFFF) << 16;
+    descriptor |= 0x89_u64 << 40;
+    descriptor |= ((tss_base >> 24) & 0xFF) << 56;
+    let gdt = &mut *ptr::addr_of_mut!(CPU_GDT[slot]);
+    gdt[0] = 0;
+    gdt[1] = 0x0020_9A00_0000_0000;
+    gdt[2] = 0x0000_9200_0000_0000;
+    gdt[3] = 0x0000_F200_0000_0000;
+    gdt[4] = 0x0020_FA00_0000_0000;
+    gdt[5] = descriptor;
+    gdt[6] = tss_base >> 32;
+    let table = DescriptorTablePointer {
+        limit: (size_of::<[u64; 7]>() - 1) as u16,
+        base: ptr::addr_of!(CPU_GDT[slot]) as u64,
+    };
+    asm!("lgdt [{}]", in(reg) &table, options(readonly, nostack, preserves_flags));
+    asm!(
+        "mov ax, 0x10",
+        "mov ds, ax",
+        "mov es, ax",
+        "mov ss, ax",
+        out("ax") _,
+        options(nostack, preserves_flags)
+    );
+    asm!("ltr ax", in("ax") 0x28_u16, options(nostack, preserves_flags));
+}
+
+fn current_slot() -> usize {
+    let slot: u64;
+    unsafe {
+        asm!("mov {}, gs:[72]", out(reg) slot, options(nomem, nostack, preserves_flags));
+    }
+    slot as usize
+}
+
+fn active_execution() -> Option<&'static mut ActiveExecution> {
+    let slot = current_slot();
+    if slot >= MAX_CPUS {
+        return None;
+    }
+    unsafe { (*ptr::addr_of_mut!(PER_CPU[slot])).active.as_mut() }
+}
+
+unsafe fn write_msr(msr: u32, value: u64) {
+    asm!(
+        "wrmsr",
+        in("ecx") msr,
+        in("eax") value as u32,
+        in("edx") (value >> 32) as u32,
+        options(nostack, preserves_flags)
+    );
 }
 
 unsafe fn initialize_pic_and_pit() {
@@ -435,6 +686,106 @@ pub fn run_slice(
     authorization: RunAuthorization<'_>,
     tick_limit: u64,
 ) -> SliceResult {
+    if current_slot() == 0 && crate::smp::online_count() > 1 {
+        if let Some(pending) = submit_ap_slice(prepared, authorization, tick_limit) {
+            return join_ap_slice(pending);
+        }
+    }
+    run_slice_local(prepared, authorization, tick_limit)
+}
+
+/// Reserve an application processor and start a slice without waiting for it.
+/// The caller can submit other prepared Forms before joining this ticket.
+pub fn submit_ap_slice<'a>(
+    prepared: &'a mut PreparedForm,
+    authorization: RunAuthorization<'a>,
+    tick_limit: u64,
+) -> Option<PendingSlice<'a>> {
+    if current_slot() != 0 {
+        return None;
+    }
+    let online = crate::smp::online_count().min(MAX_CPUS);
+    let workers = online.saturating_sub(1);
+    if workers == 0 {
+        return None;
+    }
+    let start = 1 + usize::from(NEXT_AP.fetch_add(1, Ordering::Relaxed)) % workers;
+    let slot = (0..workers)
+        .map(|offset| 1 + (start - 1 + offset) % workers)
+        .find(|slot| {
+            AP_JOB_STATE[*slot]
+                .compare_exchange(JOB_IDLE, JOB_RESERVED, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        })?;
+    let job = unsafe { &mut *ptr::addr_of_mut!(AP_JOBS[slot]) };
+    job.prepared = prepared;
+    job.broker = authorization.broker;
+    job.cfc = authorization.cfc;
+    job.dimension = authorization.dimension;
+    job.form = authorization.form;
+    job.execute_handle = authorization.execute_handle;
+    job.log_handle = authorization.log_handle;
+    job.tick_limit = tick_limit;
+    AP_JOB_STATE[slot].store(JOB_READY, Ordering::Release);
+    slog!(
+        "EXPOS_SMP_FORM_DISPATCH fin={} cpu_slot={}\r\n",
+        authorization.form,
+        slot
+    );
+    Some(PendingSlice {
+        slot,
+        form: authorization.form,
+        _prepared: PhantomData,
+        _broker: PhantomData,
+    })
+}
+
+/// Wait for a previously submitted AP slice and release its CPU slot.
+pub fn join_ap_slice(pending: PendingSlice<'_>) -> SliceResult {
+    let slot = pending.slot;
+    while AP_JOB_STATE[slot].load(Ordering::Acquire) != JOB_DONE {
+        core::hint::spin_loop();
+    }
+    let job = unsafe { &mut *ptr::addr_of_mut!(AP_JOBS[slot]) };
+    let result = SliceResult {
+        reason: decode_reason(job.reason, job.fault),
+        timer_ticks: job.timer_ticks,
+        result: job.result,
+        frame: job.frame,
+    };
+    AP_JOB_STATE[slot].store(JOB_IDLE, Ordering::Release);
+    slog!(
+        "EXPOS_SMP_FORM_COMPLETE fin={} cpu_slot={} ticks={}\r\n",
+        pending.form,
+        slot,
+        result.timer_ticks
+    );
+    result
+}
+
+const fn encode_reason(reason: SliceReason) -> (u8, u8) {
+    match reason {
+        SliceReason::Preempted => (1, 0),
+        SliceReason::BudgetExhausted => (2, 0),
+        SliceReason::Exited => (3, 0),
+        SliceReason::Fault(vector) => (4, vector),
+    }
+}
+
+const fn decode_reason(reason: u8, fault: u8) -> SliceReason {
+    match reason {
+        1 => SliceReason::Preempted,
+        2 => SliceReason::BudgetExhausted,
+        3 => SliceReason::Exited,
+        _ => SliceReason::Fault(fault),
+    }
+}
+
+fn run_slice_local(
+    prepared: &mut PreparedForm,
+    authorization: RunAuthorization<'_>,
+    tick_limit: u64,
+) -> SliceResult {
     let mut active = ActiveExecution {
         broker: authorization.broker,
         cfc: authorization.cfc,
@@ -447,18 +798,15 @@ pub fn run_slice(
         result: 0,
         fault: 0,
     };
-    unsafe {
-        assert!(
-            ACTIVE.is_null(),
-            "native Form execution is single-core serialized"
-        );
-        ACTIVE = &mut active;
-    }
+    let cpu = unsafe { &mut *ptr::addr_of_mut!(PER_CPU[current_slot()]) };
+    assert!(
+        cpu.active.is_null(),
+        "CPU already owns a native Form context"
+    );
+    cpu.active = &mut active;
     let disposition =
         unsafe { expos_arch_enter_form(prepared.address_space.root, ptr::addr_of!(active.frame)) };
-    unsafe {
-        ACTIVE = ptr::null_mut();
-    }
+    cpu.active = ptr::null_mut();
     prepared.frame = active.frame;
     let reason = match disposition {
         DISPOSITION_PREEMPT => SliceReason::Preempted,
@@ -483,8 +831,7 @@ pub fn finish(prepared: PreparedForm) {
 
 #[no_mangle]
 pub extern "C" fn expos_form_timer_interrupt(frame: *mut TrapFrame) -> u64 {
-    let active = unsafe { ACTIVE.as_mut() };
-    let Some(active) = active else {
+    let Some(active) = active_execution() else {
         return DISPOSITION_FAULT;
     };
     active.slice_ticks = active.slice_ticks.saturating_add(1);
@@ -500,8 +847,13 @@ pub extern "C" fn expos_form_timer_interrupt(frame: *mut TrapFrame) -> u64 {
 }
 
 #[no_mangle]
+pub extern "C" fn expos_form_interrupt_eoi() {
+    crate::interrupts::timer_eoi(current_slot());
+}
+
+#[no_mangle]
 pub extern "C" fn expos_form_abi_interrupt(frame: *mut TrapFrame) -> u64 {
-    let Some(active) = (unsafe { ACTIVE.as_mut() }) else {
+    let Some(active) = active_execution() else {
         return DISPOSITION_FAULT;
     };
     let frame = unsafe { &mut *frame };
@@ -592,7 +944,7 @@ fn write_abi_response(response: AbiResponse) {
 
 #[no_mangle]
 pub extern "C" fn expos_form_fault_interrupt(vector: u64) {
-    let Some(active) = (unsafe { ACTIVE.as_mut() }) else {
+    let Some(active) = active_execution() else {
         loop {
             port::halt();
         }

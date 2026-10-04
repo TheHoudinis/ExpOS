@@ -6,7 +6,8 @@ fetch http://10.0.2.2:18080/http-fixture.txt
 browser
 /http://10.0.2.2:18080/browser-fixture.html
 /http://10.0.2.2:18080/redirect-target
-
+~	?
+console
 ping 10.0.2.2 160
 netstat
 shutdown

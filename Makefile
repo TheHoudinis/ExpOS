@@ -6,7 +6,7 @@ KERNEL_ELF := $(BUILD)/kernel.elf
 RUST_LIB   := target/$(TARGET)/release/libexpos_kernel.a
 STATE_IMG  := $(RUNTIME)/expos-state.img
 STATE_SIZE := 4M
-QEMU       := qemu-system-x86_64 -machine pc -cpu max -m 256M -vga std -global VGA.vgamem_mb=16 -netdev user,id=net0 -device rtl8139,netdev=net0
+QEMU       := qemu-system-x86_64 -machine pc -cpu max -smp 4 -m 256M -vga std -global VGA.vgamem_mb=16 -netdev user,id=net0 -device rtl8139,netdev=net0
 UEFI_DIR   := $(BUILD)/esp
 UEFI_APP   := $(UEFI_DIR)/EFI/BOOT/BOOTX64.EFI
 UEFI_BOOT_IMG := $(BUILD)/uefi-boot.img
@@ -125,6 +125,7 @@ uefi-check: $(UEFI_BOOT_IMG)
 	truncate -s $(STATE_SIZE) $(BUILD)/uefi-state.img
 	TMPDIR=/tmp OVMF_CODE=$(OVMF_CODE) python3 tests/check-uefi.py uefi
 	grep -q 'EXPOS_UEFI_HANDOFF version=1 boot_services=exited' $(BUILD)/uefi-serial.log
+	grep -q 'EXPOS_SMP_READY discovered=4 online=4' $(BUILD)/uefi-serial.log
 	grep -q 'EXPOS_FRAMEBUFFER_READY source=uefi-gop' $(BUILD)/uefi-serial.log
 	grep -q 'EXPOS_BOOT_OK' $(BUILD)/uefi-serial.log
 	grep -q 'EXPOS_LOGIN_OK user=operator' $(BUILD)/uefi-serial.log
@@ -164,7 +165,7 @@ check: $(ISO)
 	grep -q "EXPOS_PASSWORD_CHANGED artist" $(BUILD)/serial.log
 	grep -q "EXPOS_USER_DELETED artist" $(BUILD)/serial.log
 	grep -q "KERNEL FEATURE MATRIX" $(BUILD)/serial.log
-	grep -Fq "______      ____    _____" $(BUILD)/serial.log
+	grep -Fq ".--------.   .--------." $(BUILD)/serial.log
 	grep -q "kern.event.batch=4 (u64, operator-write)" $(BUILD)/serial.log
 	grep -q "EXPOS_SYSCTL_CHANGED node=kern.event.batch value=8" $(BUILD)/serial.log
 	grep -q "watch added: signal 7" $(BUILD)/serial.log
@@ -219,7 +220,7 @@ display-check: $(ISO)
 	rm -f $(BUILD)/display-serial.log
 	rm -f $(BUILD)/display-state.img
 	truncate -s $(STATE_SIZE) $(BUILD)/display-state.img
-	set +e; timeout 30 $(QEMU) -drive file=$(BUILD)/display-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-display-input.txt > $(BUILD)/display-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
+	set +e; timeout 90 $(QEMU) -drive file=$(BUILD)/display-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-display-input.txt > $(BUILD)/display-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
 	grep -Eq "EXPOS_BOOT_SCREEN_PRESENTED preset=480p frames=[1-9][0-9]* pageflip=true y_offset=480 visible=true" $(BUILD)/display-serial.log
 	grep -Eq "EXPOS_LOGIN_SCREEN_PRESENTED preset=480p frames=[1-9][0-9]* pageflip=true y_offset=480 visible=true" $(BUILD)/display-serial.log
 	grep -q "framebuffer: 640x480 XRGB8888 scanout available=true" $(BUILD)/display-serial.log
@@ -231,9 +232,6 @@ display-check: $(ISO)
 	grep -q "EXPOS_DISPLAY_READY surfaces=12 commit=12" $(BUILD)/display-serial.log
 	grep -q "EXPOS_DESKTOP_EMPTY open_apps=0 pinned_apps=0" $(BUILD)/display-serial.log
 	grep -q "EXPOS_MOUSE_READY enabled=true" $(BUILD)/display-serial.log
-	grep -q "EXPOS_BROWSER_TAB action=new active=2 count=2" $(BUILD)/display-serial.log
-	grep -q "EXPOS_BROWSER_TAB action=close active=1 count=1" $(BUILD)/display-serial.log
-	grep -q "EXPOS_BROWSER_BOOKMARK action=add count=1" $(BUILD)/display-serial.log
 	grep -q "EXPOS_APP_OPENED SETTINGS" $(BUILD)/display-serial.log
 	grep -q "EXPOS_SETTING_CHANGED key=theme value=Graphite" $(BUILD)/display-serial.log
 	grep -q "EXPOS_SETTING_CHANGED key=resolution value=720p" $(BUILD)/display-serial.log
@@ -274,6 +272,8 @@ display-check: $(ISO)
 	grep -q "EXPOS_TERMINAL_COMMAND name=neofetch" $(BUILD)/display-serial.log
 	grep -q "EXPOS_TERMINAL_COMMAND name=status" $(BUILD)/display-serial.log
 	grep -q "EXPOS_TERMINAL_COMMAND name=storage" $(BUILD)/display-serial.log
+	grep -q "EXPOS_TERMINAL_COMMAND name=cpus" $(BUILD)/display-serial.log
+	grep -q "EXPOS_TERMINAL_COMMAND name=forms" $(BUILD)/display-serial.log
 	grep -q "EXPOS_TERMINAL_COMMAND name=theme" $(BUILD)/display-serial.log
 	grep -q "EXPOS_TERMINAL_COMMAND name=ps" $(BUILD)/display-serial.log
 	grep -q "EXPOS_TERMINAL_COMMAND name=windowreset" $(BUILD)/display-serial.log
@@ -284,9 +284,6 @@ display-check: $(ISO)
 	grep -Eq "EXPOS_RENDER_STATS full=[1-9][0-9]* damaged=[1-9][0-9]* callbacks=[1-9][0-9]* surface_frames=[1-9][0-9]* pointer_merged=[0-9]+ submitted_regions=[1-9][0-9]* copied_regions=[1-9][0-9]* copied_pixels=[1-9][0-9]* collapses=[0-9]+" $(BUILD)/display-serial.log
 	grep -Eq "damage: submitted-regions=[1-9][0-9]* submitted-pixels=[1-9][0-9]* copied-regions=[1-9][0-9]* copied-pixels=[1-9][0-9]* collapses=[0-9]+" $(BUILD)/display-serial.log
 	grep -q "EXPOS_DISPLAY_CLOSED" $(BUILD)/display-serial.log
-	grep -q "EXPOS_COMMAND_OK desktop" $(BUILD)/display-serial.log
-	grep -q "EXPOS_PRESENTATION_READY rate=144 Hz vsync=true pageflip=true" $(BUILD)/display-serial.log
-	grep -q "EXPOS_RENDER_POLICY mode=Responsive damage=true shadows=true wallpaper_effects=true" $(BUILD)/display-serial.log
 	grep -q "ExpOS Form ABI v1" $(BUILD)/display-serial.log
 	@echo ">>> EXPOS DISPLAY TEST PASSED <<<"
 

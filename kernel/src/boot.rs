@@ -15,6 +15,7 @@ static GOP_WIDTH: AtomicU32 = AtomicU32::new(0);
 static GOP_HEIGHT: AtomicU32 = AtomicU32::new(0);
 static GOP_STRIDE: AtomicU32 = AtomicU32::new(0);
 static GOP_FORMAT: AtomicU32 = AtomicU32::new(u32::MAX);
+static ACPI_RSDP: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FirmwareFramebuffer {
@@ -43,6 +44,7 @@ struct NativeInfo {
     height: u32,
     stride: u32,
     format: u32,
+    rsdp: u64,
 }
 
 pub fn single_user() -> bool {
@@ -64,6 +66,11 @@ pub fn firmware_framebuffer() -> Option<FirmwareFramebuffer> {
             stride: GOP_STRIDE.load(Ordering::Relaxed),
             format: GOP_FORMAT.load(Ordering::Relaxed),
         })
+}
+
+pub fn acpi_rsdp() -> Option<u64> {
+    let address = ACPI_RSDP.load(Ordering::Acquire);
+    (address != 0).then_some(address)
 }
 
 /// Set once at startup. Login/logout cannot enable services disabled by boot.
@@ -113,6 +120,9 @@ pub unsafe fn initialize(magic: u32, address: u64) {
             GOP_FORMAT.store(info.format, Ordering::Relaxed);
             GOP_VALID.store(true, Ordering::Release);
         }
+        if info.rsdp >= 0x1000 && info.rsdp < 0x1_0000_0000 {
+            ACPI_RSDP.store(info.rsdp, Ordering::Release);
+        }
         crate::slog!("EXPOS_UEFI_HANDOFF version=1 boot_services=exited descriptors={} descriptor_size={}\r\n", info.memory_map_size / info.descriptor_size, info.descriptor_size);
         crate::slog!(
             "EXPOS_UEFI_GOP width={} height={} stride={} format={} address={:#x} bytes={}\r\n",
@@ -128,7 +138,36 @@ pub unsafe fn initialize(magic: u32, address: u64) {
     NATIVE_UEFI.store(false, Ordering::Release);
     GOP_VALID.store(false, Ordering::Release);
     assert_eq!(magic, 0x36d7_6289, "unknown firmware handoff");
+    if let Some(rsdp) = multiboot_rsdp(address) {
+        ACPI_RSDP.store(rsdp, Ordering::Release);
+    }
     crate::slog!("EXPOS_BIOS_HANDOFF protocol=multiboot2\r\n");
+}
+
+unsafe fn multiboot_rsdp(address: u64) -> Option<u64> {
+    if !(0x1000..0x1_0000_0000).contains(&address) {
+        return None;
+    }
+    let total = core::ptr::read_unaligned(address as *const u32) as u64;
+    if !(16..=16 * 1024 * 1024).contains(&total) || address.checked_add(total)? > 0x1_0000_0000 {
+        return None;
+    }
+    let mut cursor = address + 8;
+    while cursor + 8 <= address + total {
+        let kind = core::ptr::read_unaligned(cursor as *const u32);
+        let size = core::ptr::read_unaligned((cursor + 4) as *const u32) as u64;
+        if size < 8 || cursor + size > address + total {
+            return None;
+        }
+        if matches!(kind, 14 | 15) && size >= 28 {
+            return Some(cursor + 8);
+        }
+        if kind == 0 {
+            break;
+        }
+        cursor = (cursor + size + 7) & !7;
+    }
+    None
 }
 
 fn valid_framebuffer(info: &NativeInfo) -> bool {
