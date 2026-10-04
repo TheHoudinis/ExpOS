@@ -63,6 +63,12 @@ possible.
 Numbers 9–15, 21–31, 37–47, and 49–255 are reserved. Implementations must not
 assign private meanings in those ranges.
 
+ExpDisplay Portal v3 is an additive service-protocol revision, not a Form ABI
+revision. Its feature negotiation, event coalescing/recovery and presentation
+diagnostics remain behind the same Display/Input Handles and the frozen v1 call
+numbers above; unsupported optional behavior fails without changing request or
+response layouts.
+
 The native call gate consumes this frozen request directly and validates CFC,
 requester, target, Dimension, expiry, revocation and the operation derived from
 the call number before dispatch. Ayo's `PACKAGE_TRANSACTION` is the first live

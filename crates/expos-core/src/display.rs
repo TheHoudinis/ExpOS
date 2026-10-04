@@ -10,9 +10,11 @@ use crate::{Fin, Text};
 const MAX_SURFACES: usize = 16;
 const MAX_DISPLAY_EVENTS: usize = 32;
 
-/// ExpDisplay v2 extends the original protocol without changing Form ABI v1.
-/// Clients can negotiate these capabilities before using optional operations.
-pub const EXPDISPLAY_PROTOCOL_VERSION: u16 = 2;
+/// ExpDisplay Portal v3 extends the original protocol without changing Form
+/// ABI v1. Clients can negotiate these capabilities before using optional
+/// operations. V3 adds observable presentation pressure and bounded input-event
+/// recovery rather than changing the stable surface wire types.
+pub const EXPDISPLAY_PROTOCOL_VERSION: u16 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DisplayFeatures(u32);
@@ -24,6 +26,9 @@ impl DisplayFeatures {
     pub const FRAME_CALLBACKS: Self = Self(1 << 3);
     pub const OUTPUT_DAMAGE: Self = Self(1 << 4);
     pub const ALPHA_BUFFERS: Self = Self(1 << 5);
+    pub const POINTER_EVENT_COALESCING: Self = Self(1 << 6);
+    pub const EVENT_OVERFLOW_RECOVERY: Self = Self(1 << 7);
+    pub const PRESENTATION_DIAGNOSTICS: Self = Self(1 << 8);
 
     pub const fn contains(self, feature: Self) -> bool {
         self.0 & feature.0 == feature.0
@@ -56,8 +61,28 @@ pub const fn protocol_info() -> DisplayProtocolInfo {
             .union(DisplayFeatures::MULTI_REGION_DAMAGE)
             .union(DisplayFeatures::FRAME_CALLBACKS)
             .union(DisplayFeatures::OUTPUT_DAMAGE)
-            .union(DisplayFeatures::ALPHA_BUFFERS),
+            .union(DisplayFeatures::ALPHA_BUFFERS)
+            .union(DisplayFeatures::POINTER_EVENT_COALESCING)
+            .union(DisplayFeatures::EVENT_OVERFLOW_RECOVERY)
+            .union(DisplayFeatures::PRESENTATION_DIAGNOSTICS),
     }
+}
+
+/// Allocation-free v3 health snapshot for portal clients and kernel tools.
+/// Counts are monotonic for one [`DisplayServer`] lifetime.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DisplayDiagnostics {
+    pub surfaces: u16,
+    pub visible_surfaces: u16,
+    pub queued_events: u16,
+    pub pending_frame_callbacks: u16,
+    pub commits: u64,
+    pub frames: u64,
+    pub callbacks: u64,
+    pub coalesced_frame_callbacks: u64,
+    pub coalesced_pointer_motion: u64,
+    pub recovered_event_slots: u64,
+    pub dropped_events: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,6 +218,12 @@ pub struct DisplayServer {
     focused: Option<u32>,
     events: [Option<DisplayEvent>; MAX_DISPLAY_EVENTS],
     next_event_serial: u64,
+    commits: u64,
+    callbacks: u64,
+    coalesced_frame_callbacks: u64,
+    coalesced_pointer_motion: u64,
+    recovered_event_slots: u64,
+    dropped_events: u64,
 }
 
 impl DisplayServer {
@@ -208,6 +239,12 @@ impl DisplayServer {
             focused: None,
             events: [None; MAX_DISPLAY_EVENTS],
             next_event_serial: 1,
+            commits: 0,
+            callbacks: 0,
+            coalesced_frame_callbacks: 0,
+            coalesced_pointer_motion: 0,
+            recovered_event_slots: 0,
+            dropped_events: 0,
         }
     }
 
@@ -382,6 +419,7 @@ impl DisplayServer {
     /// [`Self::complete_frame`] is called after scanout presentation.
     pub fn commit(&mut self, owner: Fin, surface_id: u32) -> Result<u64, DisplayError> {
         let index = self.owned_index(owner, surface_id)?;
+        self.commits = self.commits.saturating_add(1);
         self.commit_sequence = self.commit_sequence.wrapping_add(1).max(1);
         let sequence = self.commit_sequence;
 
@@ -451,6 +489,7 @@ impl DisplayServer {
         // callback delivery. Queue pressure may defer FrameDone, but it must not
         // make the compositor repaint a frame that has already reached scanout.
         self.pending_output_damage.fill(None);
+        self.callbacks = self.callbacks.saturating_add(completed as u64);
 
         completed
     }
@@ -479,6 +518,32 @@ impl DisplayServer {
     /// Monotonic compositor frame sequence, advanced by `complete_frame`.
     pub const fn frame_sequence(&self) -> u64 {
         self.frame_sequence
+    }
+
+    /// Return the current v3 portal health without consuming events or damage.
+    pub fn diagnostics(&self) -> DisplayDiagnostics {
+        DisplayDiagnostics {
+            surfaces: self.surfaces.iter().flatten().count() as u16,
+            visible_surfaces: self
+                .surfaces
+                .iter()
+                .flatten()
+                .filter(|surface| surface.current.visible)
+                .count() as u16,
+            queued_events: self.events.iter().flatten().count() as u16,
+            pending_frame_callbacks: self
+                .pending_frame_commits
+                .iter()
+                .filter(|sequence| **sequence != 0)
+                .count() as u16,
+            commits: self.commits,
+            frames: self.frame_sequence,
+            callbacks: self.callbacks,
+            coalesced_frame_callbacks: self.coalesced_frame_callbacks,
+            coalesced_pointer_motion: self.coalesced_pointer_motion,
+            recovered_event_slots: self.recovered_event_slots,
+            dropped_events: self.dropped_events,
+        }
     }
 
     pub fn focus(&mut self, surface_id: u32) -> Result<(), DisplayError> {
@@ -569,7 +634,7 @@ impl DisplayServer {
             | ((y as u16 as u64) << 16)
             | ((buttons as u64) << 32)
             | ((changed as u64) << 40);
-        self.push_event(owner, surface_id, DisplayEventKind::PointerMotion, value);
+        self.push_pointer_motion(owner, surface_id, value);
         if changed != 0 {
             self.push_event(owner, surface_id, DisplayEventKind::PointerButton, value);
         }
@@ -650,6 +715,7 @@ impl DisplayServer {
                 .expect("matching frame event remains populated");
             event.serial = serial;
             event.value = sequence;
+            self.coalesced_frame_callbacks = self.coalesced_frame_callbacks.saturating_add(1);
             return true;
         }
 
@@ -667,6 +733,33 @@ impl DisplayServer {
         true
     }
 
+    fn push_pointer_motion(&mut self, owner: Fin, surface_id: u32, value: u64) {
+        // Motion can be replaced only when it is the newest queued event for
+        // this surface. A newer key/button edge remains an ordering barrier.
+        let newest = self
+            .events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| {
+                event
+                    .filter(|event| event.owner == owner && event.surface_id == surface_id)
+                    .map(|event| (index, event.serial, event.kind))
+            })
+            .max_by_key(|(_, serial, _)| *serial);
+        if let Some((index, _, DisplayEventKind::PointerMotion)) = newest {
+            let serial = self.next_event_serial;
+            self.next_event_serial = self.next_event_serial.wrapping_add(1).max(1);
+            let event = self.events[index]
+                .as_mut()
+                .expect("newest pointer motion remains queued");
+            event.serial = serial;
+            event.value = value;
+            self.coalesced_pointer_motion = self.coalesced_pointer_motion.saturating_add(1);
+            return;
+        }
+        self.push_event(owner, surface_id, DisplayEventKind::PointerMotion, value);
+    }
+
     fn push_event(&mut self, owner: Fin, surface_id: u32, kind: DisplayEventKind, value: u64) {
         let event = DisplayEvent {
             serial: self.next_event_serial,
@@ -678,7 +771,30 @@ impl DisplayServer {
         self.next_event_serial = self.next_event_serial.wrapping_add(1).max(1);
         if let Some(slot) = self.events.iter_mut().find(|slot| slot.is_none()) {
             *slot = Some(event);
+            return;
         }
+
+        // Key, button, focus, configure and completion edges are more useful
+        // than an obsolete motion sample. Recover one slot deterministically.
+        if kind != DisplayEventKind::PointerMotion {
+            if let Some(index) = self
+                .events
+                .iter()
+                .enumerate()
+                .filter_map(|(index, event)| {
+                    event
+                        .filter(|event| event.kind == DisplayEventKind::PointerMotion)
+                        .map(|event| (index, event.serial))
+                })
+                .min_by_key(|(_, serial)| *serial)
+                .map(|(index, _)| index)
+            {
+                self.events[index] = Some(event);
+                self.recovered_event_slots = self.recovered_event_slots.saturating_add(1);
+                return;
+            }
+        }
+        self.dropped_events = self.dropped_events.saturating_add(1);
     }
 }
 
@@ -1077,15 +1193,24 @@ mod tests {
     }
 
     #[test]
-    fn v2_advertises_only_implemented_features() {
+    fn v3_advertises_only_implemented_features() {
         let info = protocol_info();
-        assert_eq!(info.version, 2);
+        assert_eq!(info.version, 3);
         assert_eq!(info.max_surfaces, MAX_SURFACES as u16);
         assert!(info
             .features
             .contains(DisplayFeatures::ATOMIC_SURFACE_STATE));
         assert!(info.features.contains(DisplayFeatures::MULTI_REGION_DAMAGE));
         assert!(info.features.contains(DisplayFeatures::FRAME_CALLBACKS));
+        assert!(info
+            .features
+            .contains(DisplayFeatures::POINTER_EVENT_COALESCING));
+        assert!(info
+            .features
+            .contains(DisplayFeatures::EVENT_OVERFLOW_RECOVERY));
+        assert!(info
+            .features
+            .contains(DisplayFeatures::PRESENTATION_DIAGNOSTICS));
         assert_ne!(info.features.bits(), 0);
     }
 
@@ -1114,5 +1239,95 @@ mod tests {
             ),
             Err(DisplayError::Invalid)
         );
+    }
+
+    #[test]
+    fn v3_coalesces_motion_without_crossing_button_edges() {
+        let owner = Fin::from_u128(21);
+        let mut display = DisplayServer::new();
+        let surface = display
+            .create_surface(
+                owner,
+                "pointer",
+                SurfaceRole::Window,
+                Rect::new(0, 0, 100, 100),
+            )
+            .unwrap();
+        display.focus(surface).unwrap();
+        while display.poll_event(owner).is_some() {}
+
+        display.route_pointer(10, 11, 0, 0).unwrap();
+        display.route_pointer(20, 21, 0, 0).unwrap();
+        assert_eq!(display.diagnostics().queued_events, 1);
+        assert_eq!(display.diagnostics().coalesced_pointer_motion, 1);
+        let motion = display.poll_event(owner).unwrap();
+        assert_eq!(motion.kind, DisplayEventKind::PointerMotion);
+        assert_eq!(motion.value & 0xFFFF, 20);
+
+        display.route_pointer(30, 31, 1, 1).unwrap();
+        display.route_pointer(40, 41, 1, 0).unwrap();
+        let kinds: std::vec::Vec<_> = core::iter::from_fn(|| display.poll_event(owner))
+            .map(|event| event.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            std::vec![
+                DisplayEventKind::PointerMotion,
+                DisplayEventKind::PointerButton,
+                DisplayEventKind::PointerMotion,
+            ]
+        );
+    }
+
+    #[test]
+    fn v3_recovers_critical_event_space_from_stale_motion() {
+        let owner = Fin::from_u128(22);
+        let mut display = DisplayServer::new();
+        let surface = display
+            .create_surface(
+                owner,
+                "pressure",
+                SurfaceRole::Window,
+                Rect::new(0, 0, 100, 100),
+            )
+            .unwrap();
+        display.focus(surface).unwrap();
+        while display.poll_event(owner).is_some() {}
+
+        // Insert motion events for distinct synthetic surfaces so they cannot
+        // coalesce, then prove a key edge evicts one stale sample instead of
+        // being silently lost.
+        for id in 0..MAX_DISPLAY_EVENTS as u32 {
+            display.push_event(owner, 1000 + id, DisplayEventKind::PointerMotion, id as u64);
+        }
+        display.route_key(b'k').unwrap();
+        let diagnostics = display.diagnostics();
+        assert_eq!(diagnostics.queued_events, MAX_DISPLAY_EVENTS as u16);
+        assert_eq!(diagnostics.recovered_event_slots, 1);
+        assert_eq!(diagnostics.dropped_events, 0);
+        assert!(core::iter::from_fn(|| display.poll_event(owner))
+            .any(|event| event.kind == DisplayEventKind::Key && event.value == b'k' as u64));
+    }
+
+    #[test]
+    fn v3_diagnostics_report_portal_pressure() {
+        let owner = Fin::from_u128(23);
+        let mut display = DisplayServer::new();
+        let surface = display
+            .create_surface(
+                owner,
+                "health",
+                SurfaceRole::Window,
+                Rect::new(0, 0, 64, 64),
+            )
+            .unwrap();
+        display.commit(owner, surface).unwrap();
+        assert_eq!(display.complete_frame(), 1);
+        let diagnostics = display.diagnostics();
+        assert_eq!(diagnostics.surfaces, 1);
+        assert_eq!(diagnostics.visible_surfaces, 1);
+        assert_eq!(diagnostics.commits, 1);
+        assert_eq!(diagnostics.frames, 1);
+        assert_eq!(diagnostics.callbacks, 1);
     }
 }

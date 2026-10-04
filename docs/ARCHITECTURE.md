@@ -227,7 +227,7 @@ either and refuses to run without at least two online CPUs.
   scheduler, an interrupt notification backend or a FreeBSD compatibility
   subsystem. It now uses the ExpBudget name, but remains one runtime-local
   command context rather than scheduler-wide per-Form enforcement.
-- ExpDisplay uses a Wayland-like ownership model without copying Wayland's
+- ExpDisplay Portal v3 uses a Wayland-like ownership model without copying Wayland's
   Unix socket/file-descriptor ABI: clients own surfaces and Buffer Handles,
   mutate pending state, report surface-local damage, and publish atomically
   with `commit`. This is a Form-native compositor protocol, not Wayland
@@ -237,13 +237,20 @@ either and refuses to run without at least two online CPUs.
   Multiple commits before presentation retain their combined damage and
   request one callback carrying the newest commit sequence.
   `FrameDone` is emitted only after the compositor crosses the framebuffer
-  presentation boundary; queue pressure defers rather than drops it. Focus,
+  presentation boundary; repeated callbacks and pure pointer motion coalesce,
+  while a full queue can replace an obsolete motion sample with a key, button,
+  focus or configure edge. Portal health exposes surface/event pressure,
+  commits, frames, callbacks, coalescing, recovery and drop counters. Focus,
   configure, frame-complete, key and pointer events are routed back to the
   owning FIN. Native UEFI output consumes the validated GOP address, size,
   geometry, stride and RGB/BGR order without reprogramming a Bochs device.
   Composition happens in a bounded shadow scanout; only a completed normalized
   damage set is copied to GOP memory, so intermediate clearing and repaint
-  steps cannot flicker on the physical display.
+  steps cannot flicker on the physical display. Portal v3 promotes damage over
+  two thirds of the visible frame to a sequential full copy and reconciles the
+  complete shadow after 120 partial publications. It samples every published
+  region through hardware readback; a mismatch triggers an immediate full
+  shadow-to-scanout recovery instead of leaving corrupted pixels visible.
   BIOS fallback can program 640x480, 1280x720 or 1920x1080 XRGB scanout in
   QEMU standard VGA's 16 MiB linear framebuffer BAR. The bootstrap maps RAM
   and PCI windows below 4 GiB. ExpDisplay checks mapped bounds and geometry
@@ -274,7 +281,9 @@ either and refuses to run without at least two online CPUs.
   contained or move a selected distance beyond the work area while retaining a
   bounded recovery region; optional snapping and three focus policies alter the
   real geometry/input path. `windowreset` in the graphical Terminal restores
-  every application surface to its default geometry. Settings offers 256
+  every application surface to its default geometry. Even with off-screen
+  travel enabled, the compositor retains a useful titlebar grab area so a
+  restored window cannot resemble a clipped or corrupted surface. Settings offers 256
   coordinated theme palettes: six named palettes (including Aurora and Rose)
   plus 250 bounded procedural palettes. It also provides 252 persisted wallpaper
   variants across seven procedural patterns (including Aurora and Mesh), 256
@@ -316,8 +325,9 @@ either and refuses to run without at least two online CPUs.
   Each application receives a child Handle containing
   only Display and Input rights; the compositor checks it before visibility,
   geometry, commit or key routing. Ctrl+Shift+Esc opens a confirmation before
-  focusing the desktop Terminal; plain Esc only cancels an editor or launcher,
-  so GOP is not torn down by an accidental keypress. BIOS-only graphics exits
+  safely leaving graphics and returning to the real command shell; plain Esc
+  only cancels an editor or launcher, so GOP is not torn down by an accidental
+  keypress. BIOS-only graphics exits
   retain a VGA mode 3 recovery path.
 - The PS/2 adapter enables the auxiliary device, validates ACKs and decodes
   synchronized three-byte packets. The compositor clamps a save-under cursor,
@@ -338,7 +348,10 @@ either and refuses to run without at least two online CPUs.
   clock source. `displaydiag` exposes adapter identity, requested/active mode,
   memory bounds, presentation state, normalized-damage counters and flip
   failures; the graphical Terminal's `display` command exposes its active and
-  requested modes, policy, pacing and scanout counters. `stateinfo` reports the persistent
+  requested modes, policy, pacing, portal pressure, copy cost and scanout
+  recovery counters. `displaydebug on` overlays those live counters and
+  `displayrepair` requests a full reconciliation without leaving the desktop.
+  `stateinfo` reports the persistent
   display selection; `diag` combines these with clock and network status.
   Operator-only `safevideo`/`displayreset` persists 480p, 60 Hz and VSync on as
   a console recovery path. A boot/login frame that cannot be confirmed visible
@@ -412,7 +425,13 @@ either and refuses to run without at least two online CPUs.
   unavailable instead of being reported as connected.
 - The Browser is an Interface Form above ExpDisplay. Its current document
   engine accepts local `expos://`, `data:text/html` and bounded `http://` or
-  `https://` resources. The chrome maintains six fixed tab sessions, each with
+  `https://` resources. Its live DOM/style/script arena resides in a heap-backed
+  bounded page container rather than inside the compositor stack. Navigation
+  parses into a staged candidate and swaps it only after complete validation;
+  malformed, over-budget or unsupported documents increment rejection
+  diagnostics and leave the last valid page usable. This prevents parser/data
+  failures from tearing down the desktop, but is not yet a claim that the
+  renderer itself executes in Ring 3. The chrome maintains six fixed tab sessions, each with
   twelve history entries and a scroll position, plus eight in-session
   bookmarks and a case-insensitive find overlay with match highlighting. It
   receives a requester-bound Network Handle only for
@@ -481,9 +500,10 @@ normal case-sensitive text, Notes, a richer graphical Terminal with two-eye
 accent colors, 256 backdrop tones, four cursor themes, five font faces, three
 real weights, all-edge taskbar and bounded
 off-screen window controls, double-buffered presentation
-  with ExpDisplay v2 atomic surface commits, multi-region damage,
-  presentation-bound frame completion, bounded
-damage coalescing and page synchronization, persistent 60/75/120/144 Hz
+  with ExpDisplay Portal v3 atomic surface commits, multi-region damage,
+  presentation-bound frame completion, bounded event/damage coalescing,
+  adaptive GOP synchronization, scanout readback/recovery and live diagnostics,
+  persistent 60/75/120/144 Hz
 software pacing, opt-in responsive damaged commits and optional VSync, a
 bounded native HTML/CSS/JavaScript Browser with
   DuckDuckGo non-JavaScript HTML search and a live Wikipedia summary reader,

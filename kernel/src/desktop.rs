@@ -10,10 +10,11 @@ use crate::{
     locale::{Locale, Text as LocalText},
     network, radio, slog, state,
 };
+use alloc::boxed::Box;
 use expos_core::{
-    AbiCall, AbiRequest, AbiResponse, AbiStatus, Authority, BrowserText, BufferFormat,
-    BufferHandle, CapabilityBroker, CfcFin, DisplayServer, Document, Fin, FormKind, NativeCallGate,
-    NodeKind, Operations, Rect, SurfaceRole, TextAlign, FORM_ABI_VERSION,
+    AbiCall, AbiRequest, AbiResponse, AbiStatus, Authority, BrowserError, BrowserText,
+    BufferFormat, BufferHandle, CapabilityBroker, CfcFin, DisplayServer, Document, Fin, FormKind,
+    NativeCallGate, NodeKind, Operations, Rect, SurfaceRole, TextAlign, FORM_ABI_VERSION,
 };
 use framebuffer::color;
 
@@ -136,6 +137,55 @@ impl BrowserBookmark {
 
     fn title(&self) -> &str {
         core::str::from_utf8(&self.title[..self.title_len as usize]).unwrap_or("Bookmark")
+    }
+}
+
+/// Heap-backed, bounded page container for the native Browser.
+///
+/// The old design embedded the complete DOM/style/script arena directly in
+/// `DesktopState`. Loading a page therefore kept the live arena and a staged
+/// replacement on the already busy kernel stack. The container moves the live
+/// arena out of that stack and swaps it only after a complete parse succeeds;
+/// malformed and over-budget documents leave the last valid page intact.
+struct BrowserContainer {
+    document: Box<Document>,
+    generation: u64,
+    rejected_loads: u64,
+    last_error: Option<BrowserError>,
+}
+
+impl BrowserContainer {
+    fn new(document: Document) -> Self {
+        Self {
+            document: Box::new(document),
+            generation: 1,
+            rejected_loads: 0,
+            last_error: None,
+        }
+    }
+
+    fn replace(&mut self, document: Document) {
+        self.document = Box::new(document);
+        self.generation = self.generation.saturating_add(1);
+    }
+
+    fn reject(&mut self, error: BrowserError) {
+        self.rejected_loads = self.rejected_loads.saturating_add(1);
+        self.last_error = Some(error);
+    }
+}
+
+impl core::ops::Deref for BrowserContainer {
+    type Target = Document;
+
+    fn deref(&self) -> &Self::Target {
+        &self.document
+    }
+}
+
+impl core::ops::DerefMut for BrowserContainer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.document
     }
 }
 
@@ -1780,7 +1830,7 @@ struct DesktopState {
     settings_category: SettingsCategory,
     settings_row: usize,
     settings_notice: &'static str,
-    document: Document,
+    document: BrowserContainer,
     browser_line: [u8; 512],
     browser_len: usize,
     browser_editing: bool,
@@ -1827,6 +1877,7 @@ struct DesktopState {
     pointer_packets_merged: u64,
     deferred_presents: u64,
     full_redraw_requested: bool,
+    display_debug_overlay: bool,
 }
 
 struct PointerCursor {
@@ -2240,7 +2291,9 @@ impl DesktopState {
             settings_category: SettingsCategory::System,
             settings_row: 0,
             settings_notice: "Changes are saved locally.",
-            document: Document::parse("expos://home", HOME).expect("built-in home document"),
+            document: BrowserContainer::new(
+                Document::parse("expos://home", HOME).expect("built-in home document"),
+            ),
             browser_line: [0; 512],
             browser_len: 0,
             browser_editing: false,
@@ -2291,6 +2344,7 @@ impl DesktopState {
             pointer_packets_merged: 0,
             deferred_presents: 0,
             full_redraw_requested: false,
+            display_debug_overlay: false,
         };
         state.terminal_push("ExpOS terminal");
         state.terminal_push("Type help for commands. Up/Down recalls history.");
@@ -2922,8 +2976,12 @@ impl DesktopState {
 
         let min_x = left - horizontal_overflow;
         let max_x = (right - rect.width as i32 + horizontal_overflow).max(min_x);
-        let min_y =
-            top - vertical_overflow.min((self.preferences.titlebar_height() as i32 - 8).max(0));
+        // Keep a useful grab area visible even with the largest off-screen
+        // allowance. Eight visible pixels made a window look corrupted and
+        // left its controls unreachable on compact displays.
+        let titlebar = self.preferences.titlebar_height() as i32;
+        let visible_titlebar = titlebar.min(32);
+        let min_y = top - vertical_overflow.min((titlebar - visible_titlebar).max(0));
         let max_y = (bottom - rect.height as i32 + vertical_overflow).max(min_y);
         (x.clamp(min_x, max_x) as i16, y.clamp(min_y, max_y) as i16)
     }
@@ -2963,9 +3021,20 @@ impl DesktopState {
     }
 
     fn navigate(&mut self, url: &str, source: &str) {
-        if let Ok(document) = Document::parse(url, source) {
-            self.set_document(document);
+        match Document::parse(url, source) {
+            Ok(document) => self.set_document(document),
+            Err(error) => self.reject_browser_candidate(error),
         }
+    }
+
+    fn reject_browser_candidate(&mut self, error: BrowserError) {
+        self.document.reject(error);
+        slog!(
+            "EXPOS_BROWSER_CONTAINER_REJECTED generation={} rejected={} error={:?}\r\n",
+            self.document.generation,
+            self.document.rejected_loads,
+            error
+        );
     }
 
     fn set_document(&mut self, document: Document) {
@@ -3002,7 +3071,7 @@ impl DesktopState {
         };
         self.browser_tabs[active].set_title(title);
         self.browser_tabs[active].scroll = 0;
-        self.document = document;
+        self.document.replace(document);
         self.browser_scroll = 0;
         self.browser_find_match = None;
         self.log_browser_engine();
@@ -3242,13 +3311,15 @@ impl DesktopState {
     fn log_browser_engine(&self) {
         let report = self.document.script_report();
         slog!(
-            "EXPOS_BROWSER_ENGINE nodes={} css_rules={} scripts={} executed={} rejected={} handlers={}\r\n",
+            "EXPOS_BROWSER_ENGINE nodes={} css_rules={} scripts={} executed={} rejected={} handlers={} container_generation={} container_rejected={}\r\n",
             self.document.len(),
             self.document.style_rule_count(),
             report.scripts_seen,
             report.scripts_executed,
             report.scripts_rejected,
-            report.handlers_registered
+            report.handlers_registered,
+            self.document.generation,
+            self.document.rejected_loads
         );
     }
 
@@ -3336,6 +3407,10 @@ impl DesktopState {
                 current_url,
             ) {
                 Ok(response) => {
+                    // Keep the maximum-sized transport response off the
+                    // compositor's stack while the bounded parser stages a
+                    // replacement document.
+                    let response = Box::new(response);
                     if is_http_redirect(response.status) {
                         let Some(location) = response.location() else {
                             self.navigate("expos://error", NETWORK_ERROR);
@@ -3370,7 +3445,7 @@ impl DesktopState {
                         current_len = next_len;
                         continue;
                     }
-                    let mut sanitized = [0_u8; network::HTTP_BODY_CAPACITY];
+                    let mut sanitized = Box::new([0_u8; network::HTTP_BODY_CAPACITY]);
                     for (output, byte) in sanitized.iter_mut().zip(response.body().iter().copied())
                     {
                         *output = if byte.is_ascii_graphic()
@@ -3390,23 +3465,15 @@ impl DesktopState {
                         let original =
                             core::str::from_utf8(&wikipedia_original[..wikipedia_original_len])
                                 .unwrap_or("https://en.wikipedia.org/");
-                        let mut wiki_source = [0_u8; 12 * 1024];
-                        wikipedia_document(response.body(), &mut wiki_source)
+                        let mut wiki_source = Box::new([0_u8; 12 * 1024]);
+                        wikipedia_document(response.body(), &mut *wiki_source)
                             .and_then(|length| core::str::from_utf8(&wiki_source[..length]).ok())
                             .ok_or(expos_core::BrowserError::InvalidDocument)
                             .and_then(|source| Document::parse(original, source))
                     } else if let Some(results) = projected {
                         Ok(results.document)
                     } else {
-                        Document::parse(current_url, source).or_else(|_| {
-                            // Script-first sites may not place any supported
-                            // nodes in the bounded response. The authenticated
-                            // fetch still succeeded, so report that honestly.
-                            Document::parse(
-                                current_url,
-                                "<title>Page loaded</title><h1>Secure response received</h1><p>This page needs external resources, browser APIs, or media features beyond the bounded ExpOS engine.</p>",
-                            )
-                        })
+                        Document::parse(current_url, source)
                     };
                     match document {
                         Ok(document) => {
@@ -3428,8 +3495,12 @@ impl DesktopState {
                             );
                         }
                         Err(error) => {
-                            self.navigate("expos://error", NETWORK_ERROR);
-                            slog!("EXPOS_BROWSER_HTTP_ERROR error={:?}\r\n", error);
+                            self.reject_browser_candidate(error);
+                            slog!(
+                                "EXPOS_BROWSER_HTTP_CONTAINED error={:?} retained_generation={}\r\n",
+                                error,
+                                self.document.generation
+                            );
                         }
                     }
                 }
@@ -4774,7 +4845,7 @@ impl DesktopState {
         );
         self.terminal_push("  users display resolution network netstat storage theme history cpus");
         self.terminal_push("  apps ls ps forms read <name> write <name.txt> <text>");
-        self.terminal_push("  echo <text> windowreset");
+        self.terminal_push("  echo <text> windowreset displaydebug [on|off] displayrepair");
         self.terminal_push("  open <app> close console shutdown reboot");
         self.terminal_push("Use Up/Down for command history.");
     }
@@ -4869,6 +4940,37 @@ impl DesktopState {
         self.terminal_push_number("damage regions copied: ", scanout.copied_regions, "");
         self.terminal_push_number("damage pixels copied: ", scanout.copied_pixels, "");
         self.terminal_push_number("damage collapses: ", scanout.damage_collapses, "");
+        self.terminal_push_number("damage promotions: ", scanout.damage_promotions, "");
+        self.terminal_push_number("empty presents skipped: ", scanout.empty_presents, "");
+        self.terminal_push_number("GOP full publications: ", scanout.gop_full_presents, "");
+        self.terminal_push_number(
+            "GOP partial publications: ",
+            scanout.gop_partial_presents,
+            "",
+        );
+        self.terminal_push_number(
+            "scanout readback failures: ",
+            scanout.gop_readback_failures,
+            "",
+        );
+        self.terminal_push_number("scanout recoveries: ", scanout.gop_recoveries, "");
+        self.terminal_push_number("last copy ticks: ", scanout.last_copy_ticks, "");
+        self.terminal_push_number("maximum copy ticks: ", scanout.max_copy_ticks, "");
+        let portal = self.server.diagnostics();
+        self.terminal_push("ExpDisplay Portal protocol: v3");
+        self.terminal_push_number("portal surfaces: ", portal.surfaces as u64, "");
+        self.terminal_push_number("portal queued events: ", portal.queued_events as u64, "");
+        self.terminal_push_number(
+            "portal motion events coalesced: ",
+            portal.coalesced_pointer_motion,
+            "",
+        );
+        self.terminal_push_number(
+            "portal event slots recovered: ",
+            portal.recovered_event_slots,
+            "",
+        );
+        self.terminal_push_number("portal events dropped: ", portal.dropped_events, "");
     }
 
     fn terminal_print_network(&mut self) {
@@ -5136,6 +5238,32 @@ impl DesktopState {
         {
             self.reset_window_layout();
             self.terminal_push("All application windows returned to their default positions.");
+        } else if name.eq_ignore_ascii_case(b"displaydebug") {
+            self.display_debug_overlay = if arguments.eq_ignore_ascii_case(b"on") {
+                true
+            } else if arguments.eq_ignore_ascii_case(b"off") {
+                false
+            } else {
+                !self.display_debug_overlay
+            };
+            self.full_redraw_requested = true;
+            self.terminal_push_parts(&[
+                "ExpDisplay v3 debug overlay: ",
+                if self.display_debug_overlay {
+                    "on"
+                } else {
+                    "off"
+                },
+            ]);
+            slog!(
+                "EXPOS_DISPLAY_DEBUG_OVERLAY enabled={}\r\n",
+                self.display_debug_overlay
+            );
+        } else if name.eq_ignore_ascii_case(b"displayrepair") {
+            framebuffer::request_full_reconcile();
+            self.full_redraw_requested = true;
+            self.terminal_push("Full shadow-to-scanout reconciliation requested.");
+            slog!("EXPOS_DISPLAY_V3_REPAIR_REQUESTED\r\n");
         } else if name.eq_ignore_ascii_case(b"open") {
             if let Some(app) = parse_app(arguments) {
                 self.terminal_push_parts(&["Opening ", app.localized_label(self.locale()), "."]);
@@ -5312,6 +5440,14 @@ fn run_session(
         return;
     }
     slog!("EXPOS_DISPLAY_READY surfaces=12 commit=12\r\n");
+    let portal = expos_core::display_protocol_info();
+    slog!(
+        "EXPOS_DISPLAY_PORTAL version={} features={:#x} max_surfaces={} max_events={}\r\n",
+        portal.version,
+        portal.features.bits(),
+        portal.max_surfaces,
+        portal.max_events
+    );
     if start_app.is_none() {
         slog!("EXPOS_DESKTOP_EMPTY open_apps=0 pinned_apps=0\r\n");
     }
@@ -5414,7 +5550,8 @@ fn run_session(
                 b'y' | b'\n' => {
                     desktop.shell_confirmation = false;
                     slog!("EXPOS_SHELL_CONFIRMATION state=accepted\r\n");
-                    desktop.switch_to(AppKind::Terminal);
+                    desktop.should_exit = true;
+                    slog!("EXPOS_DESKTOP_SHELL_REQUESTED\r\n");
                 }
                 b'n' | 0x1B | KEY_DESKTOP_SHELL_CONFIRM => {
                     desktop.shell_confirmation = false;
@@ -5585,6 +5722,7 @@ fn run_session(
 
     let pacing = desktop.frame_pacer.stats();
     let presentation = framebuffer::presentation_stats();
+    let portal = desktop.server.diagnostics();
     slog!(
         "EXPOS_PRESENTATION_STATS frames={} missed={} idle={} vblank_timeouts={} responsive_commits={}\r\n",
         presentation.frames,
@@ -5594,7 +5732,7 @@ fn run_session(
         desktop.responsive_commits
     );
     slog!(
-        "EXPOS_RENDER_STATS full={} damaged={} callbacks={} surface_frames={} pointer_merged={} submitted_regions={} copied_regions={} copied_pixels={} collapses={} deferred={}\r\n",
+        "EXPOS_RENDER_STATS full={} damaged={} callbacks={} surface_frames={} pointer_merged={} submitted_regions={} copied_regions={} copied_pixels={} collapses={} promotions={} gop_full={} gop_partial={} readback_failures={} recoveries={} max_copy_ticks={} deferred={}\r\n",
         desktop.full_frame_commits,
         desktop.damaged_frame_commits,
         desktop.frame_callbacks,
@@ -5604,7 +5742,25 @@ fn run_session(
         presentation.copied_regions,
         presentation.copied_pixels,
         presentation.damage_collapses,
+        presentation.damage_promotions,
+        presentation.gop_full_presents,
+        presentation.gop_partial_presents,
+        presentation.gop_readback_failures,
+        presentation.gop_recoveries,
+        presentation.max_copy_ticks,
         desktop.deferred_presents
+    );
+    slog!(
+        "EXPOS_PORTAL_V3_STATS commits={} frames={} callbacks={} queued={} pending={} frame_coalesced={} motion_coalesced={} recovered_slots={} dropped={}\r\n",
+        portal.commits,
+        portal.frames,
+        portal.callbacks,
+        portal.queued_events,
+        portal.pending_frame_callbacks,
+        portal.coalesced_frame_callbacks,
+        portal.coalesced_pointer_motion,
+        portal.recovered_event_slots,
+        portal.dropped_events
     );
     framebuffer::exit();
     crate::clear_console();
@@ -5792,21 +5948,27 @@ fn draw_wallpaper(preferences: DesktopPreferences) {
         }
         WallpaperChoice::Aurora => {
             framebuffer::vertical_gradient(0, 0, width, height, 0x0004_101B, 0x0002_060B);
-            let accent = preferences.wallpaper_color();
-            let band_height = (height / 8).max(24);
-            for band in 0..5 {
-                let y = height / 7 + band * band_height;
-                let inset = band * width / 18;
-                framebuffer::rounded_rect(
-                    inset - width / 5,
+            // V2 used overlapping, fully saturated slabs here. With a bright
+            // custom palette those slabs looked like framebuffer corruption.
+            // V3 keeps separated low-alpha glows over the dark gradient.
+            let accent = blend_color(base, preferences.wallpaper_color(), 72);
+            let secondary = blend_color(base, color::CYAN, 56);
+            let band_height = (height / 12).max(22);
+            let gap = (height / 7).max(band_height + 12);
+            for band in 0..4 {
+                let y = height / 8 + band * gap;
+                let inset = band * width / 20;
+                framebuffer::alpha_rounded_rect(
+                    inset - width / 8,
                     y,
-                    width - inset / 2,
-                    band_height + 18,
+                    width - inset / 3,
+                    band_height,
                     band_height / 2,
-                    if band % 2 == 0 { accent } else { color::CYAN },
+                    if band % 2 == 0 { accent } else { secondary },
+                    88,
                 );
-                framebuffer::alpha_rect(0, y + band_height / 3, width, band_height, base, 205);
             }
+            framebuffer::alpha_rect(0, 0, width, height, base, 70);
         }
         WallpaperChoice::Mesh => {
             framebuffer::vertical_gradient(0, 0, width, height, base, 0x0002_0508);
@@ -5848,6 +6010,9 @@ fn render(desktop: &mut DesktopState) {
     }
     if desktop.shell_confirmation {
         draw_shell_confirmation(desktop);
+    }
+    if desktop.display_debug_overlay {
+        draw_display_debug_overlay(desktop);
     }
     desktop.cursor.draw();
     present_frame(desktop);
@@ -5922,10 +6087,75 @@ fn present_frame(desktop: &mut DesktopState) {
 
 fn present_frame_damage(desktop: &mut DesktopState, damage: &[framebuffer::DamageRegion]) {
     pace_frame(desktop, true);
+    let mut debug_damage = [framebuffer::DamageRegion::new(0, 0, 0, 0); 8];
+    let damage = if desktop.display_debug_overlay && damage.len() < debug_damage.len() {
+        desktop.cursor.restore();
+        draw_display_debug_overlay(desktop);
+        desktop.cursor.draw();
+        debug_damage[..damage.len()].copy_from_slice(damage);
+        debug_damage[damage.len()] = display_debug_region();
+        &debug_damage[..damage.len() + 1]
+    } else {
+        damage
+    };
     let visible = framebuffer::present_damage(desktop.preferences.vsync, damage);
     desktop.damaged_frame_commits = desktop.damaged_frame_commits.saturating_add(1);
     complete_visible_frame(desktop, visible);
     desktop.drain_protocol_events();
+}
+
+fn display_debug_region() -> framebuffer::DamageRegion {
+    let screen_width = framebuffer::width() as i32;
+    let width = (screen_width - 20).clamp(220, 318);
+    framebuffer::DamageRegion::new(screen_width - width - 10, 10, width, 126)
+}
+
+/// Draw a deliberately opaque, self-contained diagnostics surface.
+///
+/// Keeping the overlay independent of the wallpaper and application stack
+/// makes it safe to include in small damage commits. It is intentionally
+/// backed by live compositor, portal and scanout counters rather than static
+/// status text so a corrupted or stalled presentation path is observable from
+/// inside the graphical session.
+fn draw_display_debug_overlay(desktop: &DesktopState) {
+    let region = display_debug_region();
+    let x = region.x;
+    let y = region.y;
+    let width = region.width;
+    let scanout = framebuffer::presentation_stats();
+    let portal = desktop.server.diagnostics();
+    let accent = desktop.preferences.accent.color();
+    let text = color::INK;
+    let muted = color::MUTED;
+
+    framebuffer::rounded_rect(x, y, width, region.height, 8, 0x0008_0c12);
+    framebuffer::rounded_outline(x, y, width, region.height, 8, accent);
+    framebuffer::text(x + 12, y + 10, "EXPDISPLAY PORTAL V3", text, 1);
+
+    framebuffer::text(x + 12, y + 30, "FRAME", muted, 1);
+    draw_number(x + 82, y + 30, scanout.frames, text);
+    framebuffer::text(x + 158, y + 30, "COPY", muted, 1);
+    draw_number(x + 214, y + 30, scanout.last_copy_ticks, text);
+
+    framebuffer::text(x + 12, y + 48, "DAMAGE PX", muted, 1);
+    draw_number(x + 100, y + 48, scanout.last_copied_pixels, text);
+    framebuffer::text(x + 190, y + 48, "REG", muted, 1);
+    draw_number(x + 230, y + 48, scanout.last_copied_regions, text);
+
+    framebuffer::text(x + 12, y + 66, "SURFACES", muted, 1);
+    draw_number(x + 100, y + 66, portal.visible_surfaces as u64, text);
+    framebuffer::text(x + 158, y + 66, "EVENTS", muted, 1);
+    draw_number(x + 222, y + 66, portal.queued_events as u64, text);
+
+    framebuffer::text(x + 12, y + 84, "MERGED", muted, 1);
+    draw_number(x + 82, y + 84, portal.coalesced_pointer_motion, text);
+    framebuffer::text(x + 158, y + 84, "DROPPED", muted, 1);
+    draw_number(x + 230, y + 84, portal.dropped_events, text);
+
+    framebuffer::text(x + 12, y + 102, "RECOVERIES", muted, 1);
+    draw_number(x + 116, y + 102, scanout.gop_recoveries, text);
+    framebuffer::text(x + 190, y + 102, "PROMOTE", muted, 1);
+    draw_number(x + 262, y + 102, scanout.damage_promotions, text);
 }
 
 fn complete_visible_frame(desktop: &mut DesktopState, visible: bool) {
@@ -6847,8 +7077,12 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
         },
         1,
     );
-    if desktop.browser_scroll > 0 {
+    if desktop.document.rejected_loads != 0 {
+        framebuffer::text(x + width - 310, bottom - 18, "BOX RECOVERED", color::RED, 1);
+    } else if desktop.browser_scroll > 0 {
         framebuffer::text(x + width - 270, bottom - 18, "SCROLLED", color::CYAN, 1);
+    } else {
+        framebuffer::text(x + width - 270, bottom - 18, "BOXED PAGE", color::MUTED, 1);
     }
 }
 
@@ -8546,7 +8780,7 @@ fn draw_system(rect: Rect, desktop: &DesktopState) {
         y + 98,
         metric_width,
         "Display",
-        "Protocol v2",
+        "Portal v3",
         color::GREEN,
     );
     metric(
@@ -8964,7 +9198,7 @@ fn draw_shell_confirmation(desktop: &DesktopState) {
     framebuffer::text(
         x + 20,
         y + 56,
-        locale.text(LocalText::DesktopStaysActive),
+        locale.text(LocalText::DesktopWillClose),
         color::MUTED,
         1,
     );
@@ -9562,6 +9796,25 @@ mod tests {
             let length = resolve_browser_link(base, target, &mut output).unwrap();
             assert_eq!(core::str::from_utf8(&output[..length]).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn browser_container_keeps_the_last_valid_document_after_rejection() {
+        let home = Document::parse("expos://home", HOME).expect("home document");
+        let mut container = BrowserContainer::new(home);
+        assert!(core::mem::size_of::<BrowserContainer>() < core::mem::size_of::<Document>());
+
+        container.reject(BrowserError::TooManyNodes);
+        assert_eq!(container.url(), "expos://home");
+        assert_eq!(container.generation, 1);
+        assert_eq!(container.rejected_loads, 1);
+        assert_eq!(container.last_error, Some(BrowserError::TooManyNodes));
+
+        let about = Document::parse("expos://about", ABOUT).expect("about document");
+        container.replace(about);
+        assert_eq!(container.url(), "expos://about");
+        assert_eq!(container.generation, 2);
+        assert_eq!(container.rejected_loads, 1);
     }
 
     #[test]

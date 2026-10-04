@@ -98,7 +98,7 @@ impl Locale {
 pub enum Text {
     Settings,
     OpenShell,
-    DesktopStaysActive,
+    DesktopWillClose,
     Open,
     Cancel,
     Selected,
@@ -123,7 +123,7 @@ pub enum Text {
 const ENGLISH: [&str; 22] = [
     "Settings",
     "Open command shell?",
-    "The desktop stays active.",
+    "The desktop will close safely.",
     "OPEN",
     "CANCEL",
     "Selected",
@@ -147,7 +147,7 @@ const ENGLISH: [&str; 22] = [
 const RUSSIAN: [&str; 22] = [
     "Настройки",
     "Открыть командную оболочку?",
-    "Рабочий стол останется активным.",
+    "Рабочий стол будет безопасно закрыт.",
     "ОТКРЫТЬ",
     "ОТМЕНА",
     "Выбрано",
@@ -171,7 +171,7 @@ const RUSSIAN: [&str; 22] = [
 const HEBREW: [&str; 22] = [
     "הגדרות",
     "לפתוח מעטפת פקודות?",
-    "שולחן העבודה נשאר פעיל.",
+    "שולחן העבודה ייסגר בבטחה.",
     "פתיחה",
     "ביטול",
     "נבחר",
@@ -195,7 +195,7 @@ const HEBREW: [&str; 22] = [
 const GERMAN: [&str; 22] = [
     "Einstellungen",
     "Befehls-Shell öffnen?",
-    "Der Desktop bleibt aktiv.",
+    "Der Desktop wird sicher geschlossen.",
     "ÖFFNEN",
     "ABBRECHEN",
     "Ausgewählt",
@@ -219,7 +219,7 @@ const GERMAN: [&str; 22] = [
 const ESPERANTO: [&str; 22] = [
     "Agordoj",
     "Ĉu malfermi komandŝelon?",
-    "La labortablo restas aktiva.",
+    "La labortablo sekure fermiĝos.",
     "MALFERMI",
     "NULIGI",
     "Elektita",

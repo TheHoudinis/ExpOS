@@ -275,7 +275,7 @@ impl Shell {
         content[1].length = ayo_description.len() as u16;
         seed_content(
             &mut content[2],
-            b"ExpDisplay v2: feature discovery, owned surfaces, atomic commit, multi-region damage, frame callbacks",
+            b"ExpDisplay Portal v3: adaptive damage, atomic surfaces, event coalescing, scanout recovery, live diagnostics",
         );
         seed_content(
             &mut content[3],
@@ -717,7 +717,14 @@ impl Shell {
                 true
             }
             "displayinfo" => {
-                println!("ExpDisplay protocol v1: surfaces attach damage commit focus hit-test");
+                let protocol = expos_core::display_protocol_info();
+                println!(
+                    "ExpDisplay Portal protocol v{}: features={:#x} max-surfaces={} max-events={}",
+                    protocol.version,
+                    protocol.features.bits(),
+                    protocol.max_surfaces,
+                    protocol.max_events
+                );
                 println!(
                     "framebuffer: {}x{} XRGB8888 scanout available={}",
                     crate::framebuffer::width(),
@@ -735,6 +742,13 @@ impl Shell {
                     presentation.page_flip_available,
                     presentation.frames,
                     presentation.vblank_timeouts
+                );
+                println!(
+                    "portal-v3: promotions={} readback-failures={} recoveries={} max-copy-ticks={}",
+                    presentation.damage_promotions,
+                    presentation.gop_readback_failures,
+                    presentation.gop_recoveries,
+                    presentation.max_copy_ticks
                 );
                 println!("Display FIN={}", crate::desktop::DISPLAY_FIN);
                 true

@@ -220,7 +220,7 @@ display-check: $(ISO)
 	rm -f $(BUILD)/display-serial.log
 	rm -f $(BUILD)/display-state.img
 	truncate -s $(STATE_SIZE) $(BUILD)/display-state.img
-	set +e; timeout 90 $(QEMU) -drive file=$(BUILD)/display-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-display-input.txt > $(BUILD)/display-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
+	set +e; timeout 130 $(QEMU) -drive file=$(BUILD)/display-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-display-input.txt > $(BUILD)/display-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
 	grep -Eq "EXPOS_BOOT_SCREEN_PRESENTED preset=480p frames=[1-9][0-9]* pageflip=true y_offset=480 visible=true" $(BUILD)/display-serial.log
 	grep -Eq "EXPOS_LOGIN_SCREEN_PRESENTED preset=480p frames=[1-9][0-9]* pageflip=true y_offset=480 visible=true" $(BUILD)/display-serial.log
 	grep -q "framebuffer: 640x480 XRGB8888 scanout available=true" $(BUILD)/display-serial.log
@@ -230,6 +230,7 @@ display-check: $(ISO)
 	grep -q "EXPOS_PRESENTATION_READY rate=60 Hz vsync=true pageflip=true" $(BUILD)/display-serial.log
 	awk '/EXPOS_RENDER_POLICY/{first=1; if ($$0 ~ /mode=Efficient damage=true shadows=false wallpaper_effects=false/) safe=1; exit} END{exit !(first && safe)}' $(BUILD)/display-serial.log
 	grep -q "EXPOS_DISPLAY_READY surfaces=12 commit=12" $(BUILD)/display-serial.log
+	grep -Eq "EXPOS_DISPLAY_PORTAL version=3 features=0x[0-9a-f]+ max_surfaces=16 max_events=32" $(BUILD)/display-serial.log
 	grep -q "EXPOS_DESKTOP_EMPTY open_apps=0 pinned_apps=0" $(BUILD)/display-serial.log
 	grep -q "EXPOS_MOUSE_READY enabled=true" $(BUILD)/display-serial.log
 	grep -q "EXPOS_APP_OPENED SETTINGS" $(BUILD)/display-serial.log
@@ -276,12 +277,19 @@ display-check: $(ISO)
 	grep -q "EXPOS_TERMINAL_COMMAND name=forms" $(BUILD)/display-serial.log
 	grep -q "EXPOS_TERMINAL_COMMAND name=theme" $(BUILD)/display-serial.log
 	grep -q "EXPOS_TERMINAL_COMMAND name=ps" $(BUILD)/display-serial.log
+	grep -q "EXPOS_TERMINAL_COMMAND name=displaydebug" $(BUILD)/display-serial.log
+	grep -q "EXPOS_DISPLAY_DEBUG_OVERLAY enabled=true" $(BUILD)/display-serial.log
+	grep -q "EXPOS_TERMINAL_COMMAND name=display" $(BUILD)/display-serial.log
+	grep -q "EXPOS_TERMINAL_COMMAND name=displayrepair" $(BUILD)/display-serial.log
+	grep -q "EXPOS_DISPLAY_V3_REPAIR_REQUESTED" $(BUILD)/display-serial.log
+	grep -q "EXPOS_DISPLAY_DEBUG_OVERLAY enabled=false" $(BUILD)/display-serial.log
 	grep -q "EXPOS_TERMINAL_COMMAND name=windowreset" $(BUILD)/display-serial.log
 	grep -q "EXPOS_WINDOW_LAYOUT_RESET count=9" $(BUILD)/display-serial.log
 	grep -q "EXPOS_APP_CLOSED TERMINAL" $(BUILD)/display-serial.log
 	grep -q "EXPOS_APP_REOPENED TERMINAL" $(BUILD)/display-serial.log
 	grep -Eq "EXPOS_PRESENTATION_STATS frames=[1-9][0-9]* missed=[0-9]+ idle=[0-9]+ vblank_timeouts=0 responsive_commits=[1-9][0-9]*" $(BUILD)/display-serial.log
 	grep -Eq "EXPOS_RENDER_STATS full=[1-9][0-9]* damaged=[1-9][0-9]* callbacks=[1-9][0-9]* surface_frames=[1-9][0-9]* pointer_merged=[0-9]+ submitted_regions=[1-9][0-9]* copied_regions=[1-9][0-9]* copied_pixels=[1-9][0-9]* collapses=[0-9]+" $(BUILD)/display-serial.log
+	grep -Eq "EXPOS_PORTAL_V3_STATS commits=[1-9][0-9]* frames=[1-9][0-9]* callbacks=[1-9][0-9]* queued=[0-9]+ pending=[0-9]+ frame_coalesced=[0-9]+ motion_coalesced=[0-9]+ recovered_slots=[0-9]+ dropped=[0-9]+" $(BUILD)/display-serial.log
 	grep -Eq "damage: submitted-regions=[1-9][0-9]* submitted-pixels=[1-9][0-9]* copied-regions=[1-9][0-9]* copied-pixels=[1-9][0-9]* collapses=[0-9]+" $(BUILD)/display-serial.log
 	grep -q "EXPOS_DISPLAY_CLOSED" $(BUILD)/display-serial.log
 	grep -q "ExpOS Form ABI v1" $(BUILD)/display-serial.log
@@ -321,6 +329,9 @@ network-check: $(ISO)
 	grep -q "ExpOS native TCP and HTTP are online." $(BUILD)/network-serial.log
 	grep -q "EXPOS_BROWSER_ENGINE nodes=4 css_rules=5 scripts=1 executed=1 rejected=0 handlers=1" $(BUILD)/network-serial.log
 	grep -q "EXPOS_BROWSER_HTTP_OK status=200 bytes=786 peer=10.0.2.2" $(BUILD)/network-serial.log
+	grep -q "EXPOS_BROWSER_CONTAINER_REJECTED generation=2 rejected=1 error=TooManyNodes" $(BUILD)/network-serial.log
+	grep -q "EXPOS_BROWSER_HTTP_CONTAINED error=TooManyNodes retained_generation=2" $(BUILD)/network-serial.log
+	grep -q "EXPOS_BROWSER_HTTP_OK status=200 bytes=.* peer=10.0.2.2" $(BUILD)/network-serial.log
 	grep -q "EXPOS_BROWSER_REDIRECT status=301 hop=1" $(BUILD)/network-serial.log
 	grep -q "EXPOS_BROWSER_HTTP_OK status=200 bytes=134 peer=10.0.2.2" $(BUILD)/network-serial.log
 	grep -q "EXPOS_PING_REPLY address=10.0.2.2 sequence=1" $(BUILD)/network-serial.log

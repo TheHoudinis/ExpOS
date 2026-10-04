@@ -51,6 +51,10 @@ forms
 theme
 ps
 echo terminal works
+displaydebug on
+display
+displayrepair
+displaydebug off
 windowreset
 close
 ~

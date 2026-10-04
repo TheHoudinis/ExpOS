@@ -29,13 +29,13 @@ ExpOS is the Form-native operating system described by
 - bounded Form-native kernel controls: typed tunables, signal/timer/resource
   readiness watches, and shell-runtime-local resource accounting with DIESE-gated
   mutation;
-- ExpDisplay, a runtime-selectable 640x480, 1280x720 or 1920x1080 software
-  compositor whose additive v2 protocol advertises Form-owned surfaces, atomic
-  commits, multi-region damage, presentation-complete frame events and alpha
-  buffers; native UEFI uses validated GOP scanout directly, while BIOS/QEMU
-  retains bounded double-buffered Bochs output and selectable pacing; GOP also
-  composes into a shadow scanout and copies only completed damage, so partially
-  redrawn widgets never become visible;
+- ExpDisplay Portal v3, a runtime-selectable 640x480, 1280x720 or 1920x1080
+  software compositor with Form-owned surfaces, atomic commits, multi-region
+  damage, presentation-complete frame events and alpha buffers; v3 adds stale
+  pointer-event coalescing, event-overflow recovery, adaptive GOP publication,
+  periodic full reconciliation, scanout readback/self-healing and live portal
+  diagnostics; native UEFI uses a validated shadow-backed GOP scanout, while
+  BIOS/QEMU retains bounded double-buffered Bochs output and selectable pacing;
 - a flat dark desktop with list, grid, compact-grid and dashboard application
   menu layouts, direct entries for
   installed Ayo apps, menu density/content/category/motion controls, and a
@@ -249,7 +249,7 @@ Super+Arrow           Move the active window
 Super+Alt+Left/Right  Tile left or right
 Super+Alt+Up          Maximize or restore
 Super+Alt+Down        Minimize
-Ctrl+Shift+Esc        Ask before opening the desktop Terminal
+Ctrl+Shift+Esc        Confirm, close the desktop safely, and enter the command shell
 Esc                   Cancel editing or close the application menu
 ```
 
@@ -329,14 +329,18 @@ wallpaper effects off, so the desktop begins with the least expensive renderer
 path. These choices persist. With the keyboard, `6` selects Performance, `j`/`k`
 select a row, Enter or Space activates it, and `+`/`-` move choices.
 
-ExpDisplay adopts compositor concepts also used by Wayland—client-owned
+ExpDisplay Portal adopts compositor concepts also used by Wayland—client-owned
 surfaces, pending state published by an atomic commit, explicit surface damage
 and frame completion after presentation—but it is a Form-native protocol, not
-a Wayland wire protocol or `libwayland` compatibility layer. ExpDisplay v2 adds
-feature discovery and atomically validated multi-region damage while preserving
-the frozen Form ABI v1 boundary. Consecutive pure
-mouse-motion packets are combined into a bounded compositor update; keyboard
-input and mouse-button transitions are retained in order.
+a Wayland wire protocol or `libwayland` compatibility layer. Portal v3 keeps
+the frozen Form ABI v1 boundary and adds negotiated event coalescing/recovery,
+presentation diagnostics and GOP scanout repair. Large or periodically aged
+GOP damage is promoted to one sequential full publication; every publication
+is sampled through hardware readback and a mismatch triggers a complete
+shadow-to-scanout recovery. `displaydebug on` shows live portal/scanout counters
+inside the graphical Terminal, `displayrepair` requests reconciliation, and the
+console `displaydiag` prints the same cost and recovery data. Keyboard input and
+mouse-button transitions remain ordered while obsolete pure motion is merged.
 
 ## Network and Browser
 
@@ -358,6 +362,9 @@ The native stack supports:
 - a fixed-capacity HTML document model with semantic text elements, decoded
   common entities and unloaded image placeholders; CSS tag/class/id and inline
   rules; and deterministic title/text/style/click-handler JavaScript operations;
+- a heap-backed bounded page container that stages parsing before atomically
+  replacing the visible document, retains the last valid page after a malformed
+  or over-budget response, and reports container generations/rejections;
 - six bounded tab sessions with twelve history entries and preserved scroll per
   tab, eight in-session bookmarks, and case-insensitive find-in-page;
 - address-bar search through the canonical
@@ -380,7 +387,11 @@ does not claim a connection when an adapter or driver is unavailable.
 
 The browser engine is deliberately bounded: the parser accepts at most 16 KiB
 per document, while native HTTP/HTTPS fetches retain at most the first 14 KiB of
-the response body. A document contains at most 48 parsed nodes, 32 CSS rules,
+the response body. The live DOM/style/script arena and maximum-sized staging
+buffers are heap-backed instead of sharing the compositor stack. A candidate
+page is committed only after its full bounded parse succeeds, so a rejected page
+cannot replace the last valid document or close the desktop. A document contains
+at most 48 parsed nodes, 32 CSS rules,
 16 scripts and 12 click handlers. Its CSS subset covers colors, background,
 border and radius, font size/weight, line height, display, visibility, margin,
 padding, maximum width and text alignment with tag/class/id specificity and

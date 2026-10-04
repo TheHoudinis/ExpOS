@@ -65,6 +65,14 @@ const VBLANK_POLL_LIMIT: usize = 250_000;
 /// exceeds this bound, normalization safely collapses all damage into one
 /// bounding rectangle instead of allocating or losing pixels.
 const MAX_DAMAGE_REGIONS: usize = 32;
+/// A partial GOP stream is periodically reconciled from the complete shadow
+/// image. This bounds the lifetime of any caller-side missing damage without
+/// turning normal cursor motion into full-screen traffic.
+const GOP_RECONCILE_INTERVAL: u64 = 120;
+/// Above this visible-pixel ratio one sequential full publication is cheaper
+/// and simpler than many row fragments.
+const FULL_DAMAGE_PROMOTION_NUMERATOR: u64 = 2;
+const FULL_DAMAGE_PROMOTION_DENOMINATOR: u64 = 3;
 
 const FONT_FACE_MASK: u8 = 0b0000_0111;
 const FONT_WEIGHT_SHIFT: u8 = 3;
@@ -275,6 +283,18 @@ static SUBMITTED_DAMAGE_PIXELS: AtomicU64 = AtomicU64::new(0);
 static COPIED_DAMAGE_REGIONS: AtomicU64 = AtomicU64::new(0);
 static COPIED_DAMAGE_PIXELS: AtomicU64 = AtomicU64::new(0);
 static DAMAGE_COLLAPSES: AtomicU64 = AtomicU64::new(0);
+static DAMAGE_PROMOTIONS: AtomicU64 = AtomicU64::new(0);
+static EMPTY_PRESENTS: AtomicU64 = AtomicU64::new(0);
+static GOP_FULL_PRESENTS: AtomicU64 = AtomicU64::new(0);
+static GOP_PARTIAL_PRESENTS: AtomicU64 = AtomicU64::new(0);
+static GOP_READBACK_FAILURES: AtomicU64 = AtomicU64::new(0);
+static GOP_RECOVERIES: AtomicU64 = AtomicU64::new(0);
+static GOP_PARTIAL_SINCE_FULL: AtomicU64 = AtomicU64::new(0);
+static FORCE_FULL_RECONCILE: AtomicBool = AtomicBool::new(false);
+static LAST_COPY_TICKS: AtomicU64 = AtomicU64::new(0);
+static MAX_COPY_TICKS: AtomicU64 = AtomicU64::new(0);
+static LAST_COPIED_REGIONS: AtomicU64 = AtomicU64::new(0);
+static LAST_COPIED_PIXELS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Mode {
@@ -321,6 +341,18 @@ pub struct PresentationStats {
     /// Frames whose damage exceeded the bounded region set and was collapsed
     /// into one safe bounding rectangle.
     pub damage_collapses: u64,
+    /// Partial damage promoted to a full publication by the v3 cost model or
+    /// periodic reconciliation policy.
+    pub damage_promotions: u64,
+    pub empty_presents: u64,
+    pub gop_full_presents: u64,
+    pub gop_partial_presents: u64,
+    pub gop_readback_failures: u64,
+    pub gop_recoveries: u64,
+    pub last_copy_ticks: u64,
+    pub max_copy_ticks: u64,
+    pub last_copied_regions: u64,
+    pub last_copied_pixels: u64,
 }
 
 /// A clipped scanout area that must be copied to the newly hidden page after
@@ -780,7 +812,23 @@ pub fn presentation_stats() -> PresentationStats {
         copied_regions: COPIED_DAMAGE_REGIONS.load(Ordering::Acquire),
         copied_pixels: COPIED_DAMAGE_PIXELS.load(Ordering::Acquire),
         damage_collapses: DAMAGE_COLLAPSES.load(Ordering::Acquire),
+        damage_promotions: DAMAGE_PROMOTIONS.load(Ordering::Acquire),
+        empty_presents: EMPTY_PRESENTS.load(Ordering::Acquire),
+        gop_full_presents: GOP_FULL_PRESENTS.load(Ordering::Acquire),
+        gop_partial_presents: GOP_PARTIAL_PRESENTS.load(Ordering::Acquire),
+        gop_readback_failures: GOP_READBACK_FAILURES.load(Ordering::Acquire),
+        gop_recoveries: GOP_RECOVERIES.load(Ordering::Acquire),
+        last_copy_ticks: LAST_COPY_TICKS.load(Ordering::Acquire),
+        max_copy_ticks: MAX_COPY_TICKS.load(Ordering::Acquire),
+        last_copied_regions: LAST_COPIED_REGIONS.load(Ordering::Acquire),
+        last_copied_pixels: LAST_COPIED_PIXELS.load(Ordering::Acquire),
     }
+}
+
+/// Ask the next GOP presentation to reconcile the complete shadow image.
+/// Used by the v3 debug portal and safe recovery command.
+pub fn request_full_reconcile() {
+    FORCE_FULL_RECONCILE.store(true, Ordering::Release);
 }
 
 /// Return the raw geometry reported by the adapter while graphics are enabled.
@@ -867,6 +915,22 @@ pub fn print_diagnostics() {
         presentation.damage_collapses
     );
     crate::println!(
+        "portal-v3: promotions={} empty={} gop-full={} gop-partial={} readback-failures={} recoveries={}",
+        presentation.damage_promotions,
+        presentation.empty_presents,
+        presentation.gop_full_presents,
+        presentation.gop_partial_presents,
+        presentation.gop_readback_failures,
+        presentation.gop_recoveries
+    );
+    crate::println!(
+        "copy-cost: last-ticks={} max-ticks={} last-regions={} last-pixels={}",
+        presentation.last_copy_ticks,
+        presentation.max_copy_ticks,
+        presentation.last_copied_regions,
+        presentation.last_copied_pixels
+    );
+    crate::println!(
         "aperture: address={:#x} device={} bytes driver-limit={} bytes",
         LFB_ADDRESS.load(Ordering::Acquire),
         LFB_DEVICE_BYTES.load(Ordering::Acquire),
@@ -876,20 +940,7 @@ pub fn print_diagnostics() {
 
 fn program_mode(requested: DisplayMode) -> bool {
     GOP_ACTIVE.store(false, Ordering::Release);
-    ACTIVE_DISPLAY_MODE.store(NO_ACTIVE_MODE, Ordering::Release);
-    PAGE_FLIP_AVAILABLE.store(false, Ordering::Release);
-    DRAW_Y.store(0, Ordering::Release);
-    FRONT_Y.store(0, Ordering::Release);
-    HARDWARE_Y_OFFSET.store(0, Ordering::Release);
-    FRONT_CONTENT_VISIBLE.store(false, Ordering::Release);
-    PRESENTED_FRAMES.store(0, Ordering::Release);
-    VBLANK_TIMEOUTS.store(0, Ordering::Release);
-    PAGE_FLIP_FAILURES.store(0, Ordering::Release);
-    SUBMITTED_DAMAGE_REGIONS.store(0, Ordering::Release);
-    SUBMITTED_DAMAGE_PIXELS.store(0, Ordering::Release);
-    COPIED_DAMAGE_REGIONS.store(0, Ordering::Release);
-    COPIED_DAMAGE_PIXELS.store(0, Ordering::Release);
-    DAMAGE_COLLAPSES.store(0, Ordering::Release);
+    reset_presentation_state();
     if !available() || !discover_aperture() {
         return false;
     }
@@ -1043,6 +1094,18 @@ fn reset_presentation_state() {
     COPIED_DAMAGE_REGIONS.store(0, Ordering::Release);
     COPIED_DAMAGE_PIXELS.store(0, Ordering::Release);
     DAMAGE_COLLAPSES.store(0, Ordering::Release);
+    DAMAGE_PROMOTIONS.store(0, Ordering::Release);
+    EMPTY_PRESENTS.store(0, Ordering::Release);
+    GOP_FULL_PRESENTS.store(0, Ordering::Release);
+    GOP_PARTIAL_PRESENTS.store(0, Ordering::Release);
+    GOP_READBACK_FAILURES.store(0, Ordering::Release);
+    GOP_RECOVERIES.store(0, Ordering::Release);
+    GOP_PARTIAL_SINCE_FULL.store(0, Ordering::Release);
+    FORCE_FULL_RECONCILE.store(false, Ordering::Release);
+    LAST_COPY_TICKS.store(0, Ordering::Release);
+    MAX_COPY_TICKS.store(0, Ordering::Release);
+    LAST_COPIED_REGIONS.store(0, Ordering::Release);
+    LAST_COPIED_PIXELS.store(0, Ordering::Release);
 }
 
 fn mode_fits_aperture(requested: DisplayMode, mode: Mode, aperture_bytes: usize) -> bool {
@@ -1107,11 +1170,21 @@ pub fn present_damage(vsync: bool, damage: &[DamageRegion]) -> bool {
     if active_display_mode().is_none() {
         return false;
     }
-    let normalized = normalize_damage(damage, width() as i32, height() as i32);
+    let mut normalized = normalize_damage(damage, width() as i32, height() as i32);
     SUBMITTED_DAMAGE_REGIONS.fetch_add(normalized.submitted_regions, Ordering::AcqRel);
     SUBMITTED_DAMAGE_PIXELS.fetch_add(normalized.submitted_pixels, Ordering::AcqRel);
     if normalized.collapsed {
         DAMAGE_COLLAPSES.fetch_add(1, Ordering::AcqRel);
+    }
+    if normalized.len == 0 {
+        EMPTY_PRESENTS.fetch_add(1, Ordering::AcqRel);
+        LAST_COPIED_REGIONS.store(0, Ordering::Release);
+        LAST_COPIED_PIXELS.store(0, Ordering::Release);
+        return FRONT_CONTENT_VISIBLE.load(Ordering::Acquire);
+    }
+    if GOP_ACTIVE.load(Ordering::Acquire) && should_promote_gop_damage(&normalized) {
+        promote_to_full_damage(&mut normalized);
+        DAMAGE_PROMOTIONS.fetch_add(1, Ordering::AcqRel);
     }
     let page_flip = PAGE_FLIP_AVAILABLE.load(Ordering::Acquire);
     if vsync && page_flip && !wait_for_vertical_retrace() {
@@ -1159,7 +1232,11 @@ pub fn present_damage(vsync: bool, damage: &[DamageRegion]) -> bool {
         }
     } else {
         if GOP_ACTIVE.load(Ordering::Acquire) {
+            let started = crate::hardware::timestamp();
             let visible = copy_gop_damage(&normalized);
+            let elapsed = crate::hardware::timestamp().saturating_sub(started);
+            LAST_COPY_TICKS.store(elapsed, Ordering::Release);
+            MAX_COPY_TICKS.fetch_max(elapsed, Ordering::AcqRel);
             FRONT_CONTENT_VISIBLE.store(visible, Ordering::Release);
             if visible {
                 PRESENTED_FRAMES.fetch_add(1, Ordering::AcqRel);
@@ -1347,9 +1424,119 @@ fn copy_gop_damage(damage: &NormalizedDamage) -> bool {
             }
         }
     }
+    scanout_fence();
     COPIED_DAMAGE_REGIONS.fetch_add(damage.copied_regions(), Ordering::AcqRel);
     COPIED_DAMAGE_PIXELS.fetch_add(damage.copied_pixels(), Ordering::AcqRel);
+    LAST_COPIED_REGIONS.store(damage.copied_regions(), Ordering::Release);
+    LAST_COPIED_PIXELS.store(damage.copied_pixels(), Ordering::Release);
+    let full = is_full_damage(damage);
+    if full {
+        GOP_FULL_PRESENTS.fetch_add(1, Ordering::AcqRel);
+        GOP_PARTIAL_SINCE_FULL.store(0, Ordering::Release);
+    } else {
+        GOP_PARTIAL_PRESENTS.fetch_add(1, Ordering::AcqRel);
+        GOP_PARTIAL_SINCE_FULL.fetch_add(1, Ordering::AcqRel);
+    }
+    if verify_gop_damage(shadow, scanout, damage) {
+        return true;
+    }
+
+    GOP_READBACK_FAILURES.fetch_add(1, Ordering::AcqRel);
+    crate::slog!(
+        "EXPOS_DISPLAY_V3_READBACK_MISMATCH regions={} pixels={} recovery=full\r\n",
+        damage.copied_regions(),
+        damage.copied_pixels()
+    );
+    let pixels = scanout_bytes() / BYTES_PER_PIXEL;
+    // SAFETY: validated firmware geometry bounds both complete surfaces.
+    unsafe { copy_dwords(shadow, scanout, pixels) };
+    scanout_fence();
+    GOP_RECOVERIES.fetch_add(1, Ordering::AcqRel);
+    GOP_PARTIAL_SINCE_FULL.store(0, Ordering::Release);
+    verify_gop_samples(shadow, scanout)
+}
+
+fn should_promote_gop_damage(damage: &NormalizedDamage) -> bool {
+    let forced = FORCE_FULL_RECONCILE.swap(false, Ordering::AcqRel);
+    if is_full_damage(damage) {
+        return false;
+    }
+    if forced || GOP_PARTIAL_SINCE_FULL.load(Ordering::Acquire) >= GOP_RECONCILE_INTERVAL {
+        return true;
+    }
+    let visible_pixels = width() as u64 * height() as u64;
+    damage
+        .copied_pixels()
+        .saturating_mul(FULL_DAMAGE_PROMOTION_DENOMINATOR)
+        >= visible_pixels.saturating_mul(FULL_DAMAGE_PROMOTION_NUMERATOR)
+}
+
+fn promote_to_full_damage(damage: &mut NormalizedDamage) {
+    damage.regions = [ClippedRegion::EMPTY; MAX_DAMAGE_REGIONS];
+    damage.regions[0] = ClippedRegion {
+        left: 0,
+        top: 0,
+        right: width(),
+        bottom: height(),
+    };
+    damage.len = 1;
+}
+
+fn is_full_damage(damage: &NormalizedDamage) -> bool {
+    damage.len == 1
+        && damage.regions[0]
+            == (ClippedRegion {
+                left: 0,
+                top: 0,
+                right: width(),
+                bottom: height(),
+            })
+}
+
+fn verify_gop_damage(shadow: *const u32, scanout: *const u32, damage: &NormalizedDamage) -> bool {
+    let stride = stride_bytes() / BYTES_PER_PIXEL;
+    for region in &damage.regions[..damage.len] {
+        let first = region.top * stride + region.left;
+        let last = (region.bottom - 1) * stride + region.right - 1;
+        let middle =
+            ((region.top + region.bottom - 1) / 2) * stride + (region.left + region.right - 1) / 2;
+        for offset in [first, middle, last] {
+            // SAFETY: every sample belongs to a clipped visible region.
+            let source = unsafe { core::ptr::read_volatile(shadow.add(offset)) };
+            let target = unsafe { core::ptr::read_volatile(scanout.add(offset)) };
+            if source != target {
+                return false;
+            }
+        }
+    }
     true
+}
+
+fn verify_gop_samples(shadow: *const u32, scanout: *const u32) -> bool {
+    let pixels = scanout_bytes() / BYTES_PER_PIXEL;
+    verify_samples(shadow, scanout, pixels)
+}
+
+fn verify_samples(shadow: *const u32, scanout: *const u32, pixels: usize) -> bool {
+    if pixels == 0 {
+        return false;
+    }
+    for offset in [0, pixels / 2, pixels.saturating_sub(1)] {
+        // SAFETY: active scanout contains at least one validated pixel.
+        let source = unsafe { core::ptr::read_volatile(shadow.add(offset)) };
+        let target = unsafe { core::ptr::read_volatile(scanout.add(offset)) };
+        if source != target {
+            return false;
+        }
+    }
+    true
+}
+
+#[inline(always)]
+fn scanout_fence() {
+    // Framebuffer apertures can be write-combined. Complete every published
+    // row before readback or returning control to the compositor.
+    unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
 }
 
 fn copy_clipped_region(source_y: u16, target_y: u16, clipped: ClippedRegion) {
@@ -2571,6 +2758,39 @@ mod tests {
     }
 
     #[test]
+    fn v3_full_damage_promotion_preserves_submission_diagnostics() {
+        let mut normalized = normalize_damage(&[DamageRegion::new(10, 20, 30, 40)], 640, 480);
+        let submitted_regions = normalized.submitted_regions;
+        let submitted_pixels = normalized.submitted_pixels;
+        promote_to_full_damage(&mut normalized);
+        assert!(is_full_damage(&normalized));
+        assert_eq!(normalized.copied_pixels(), 640 * 480);
+        assert_eq!(normalized.submitted_regions, submitted_regions);
+        assert_eq!(normalized.submitted_pixels, submitted_pixels);
+    }
+
+    #[test]
+    fn v3_readback_sampling_detects_and_accepts_scanout_content() {
+        let mut shadow = [0_u32; 64];
+        let mut scanout = [0_u32; 64];
+        for (index, pixel) in shadow.iter_mut().enumerate() {
+            *pixel = index as u32 * 17;
+        }
+        scanout.copy_from_slice(&shadow);
+        assert!(verify_samples(
+            shadow.as_ptr(),
+            scanout.as_ptr(),
+            shadow.len()
+        ));
+        scanout[32] ^= 1;
+        assert!(!verify_samples(
+            shadow.as_ptr(),
+            scanout.as_ptr(),
+            shadow.len()
+        ));
+    }
+
+    #[test]
     fn string_fill_writes_exactly_the_requested_dwords() {
         let mut pixels = [0x1111_1111_u32; 12];
         // SAFETY: indices 2..10 are a writable range inside `pixels`.
@@ -2602,7 +2822,7 @@ mod tests {
             let samples = [
                 locale.name(),
                 locale.text(Text::OpenShell),
-                locale.text(Text::DesktopStaysActive),
+                locale.text(Text::DesktopWillClose),
                 locale.category(1),
                 locale.category(15),
                 locale.app(0),

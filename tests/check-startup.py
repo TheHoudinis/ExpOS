@@ -63,7 +63,18 @@ def check_picture(path, graphical, previous=None):
         # workspace, so require a strong quarter-frame replacement instead.
         assert nonblack > total // 4, f"Blank/stale GUI scanout: {nonblack}/{total} lit pixels"
         assert len(colors) >= 8, f"GUI lacks rendered content: {len(colors)} colors"
+        # A former Aurora renderer failure produced huge pure-blue slabs with
+        # scattered green blocks. Normal accents may be vivid, but a primary-
+        # like color must never consume a large part of a fresh system frame.
+        primary_like = sum(
+            count for rgb, count in colors.items()
+            if max(rgb) >= 176 and sorted(rgb)[1] <= 48
+        )
+        assert primary_like < total // 5, (
+            f"Suspicious saturated scanout slab: {primary_like}/{total} pixels"
+        )
     else:
+        primary_like = 0
         assert (width, height) in ((640, 400), (720, 400)), "VGA text mode was not restored"
         assert nonblack >= 200 and len(colors) >= 2, "Console text is invisible"
     if previous is not None and len(previous) == len(pixels):
@@ -71,7 +82,7 @@ def check_picture(path, graphical, previous=None):
                       for index in range(0, len(pixels), 3))
         assert changed >= 500, f"Scanout did not change between screens ({changed} pixels)"
     return pixels, {"width": width, "height": height, "lit_pixels": nonblack,
-                    "colors": len(colors)}
+                    "colors": len(colors), "primary_like_pixels": primary_like}
 
 
 class Startup:
@@ -180,6 +191,7 @@ class Startup:
         login = self.picture("graphical-login", previous=chooser)
         self.type("operator\nexpos\n")
         self.wait_for("EXPOS_DESKTOP_EMPTY")
+        self.wait_for("EXPOS_DISPLAY_PORTAL version=3")
         desktop = self.picture("desktop", previous=login)
         self.keys("meta_l", "spc")
         self.type("\n")
@@ -189,8 +201,7 @@ class Startup:
         self.wait_for("EXPOS_SHELL_CONFIRMATION state=open")
         self.type("y")
         self.wait_for("EXPOS_SHELL_CONFIRMATION state=accepted")
-        self.wait_for("EXPOS_APP_OPENED TERMINAL")
-        self.type("console\n")
+        self.wait_for("EXPOS_DESKTOP_SHELL_REQUESTED")
         self.wait_for("EXPOS_SHELL_READY")
         # UEFI keeps a GOP-backed text renderer active because VGA text memory
         # is not scanout on modern firmware. BIOS restores hardware text mode.
