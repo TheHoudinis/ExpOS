@@ -24,10 +24,11 @@ Utilities, and Graphics. Schema v3 package entries include:
 - immutable artifact URL, format, and SHA-256;
 - a checksum over the complete package metadata.
 
-The catalog as a whole may carry an Ed25519 signature. For a public registry,
-clients should pin a release public key with `--registry-key`; Ayo reports
-whether that verification actually happened. Checksums detect accidental
-damage but are never described as signatures.
+The catalog as a whole may carry an Ed25519 signature. HTTPS registries now
+require a pinned release public key with `--registry-key`; Ayo refuses a remote
+catalog when the key is absent. Local/offline catalogs may remain checksum-only
+for development, and Ayo reports the actual trust state. Checksums detect
+accidental damage but are never described as signatures.
 
 Installation follows one fail-closed path:
 

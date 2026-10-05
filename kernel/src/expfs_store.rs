@@ -287,12 +287,99 @@ pub fn loaded_snapshot(cfc: CfcFin) -> Option<Snapshot> {
         .filter(|snapshot| snapshot.form_graph_present)
 }
 
+/// Return the durable CFC state even before the interactive shell has
+/// committed its complete Form graph. Genesis uses this phase to seed only
+/// installation policy, dimensions and package selections.
+pub fn current_snapshot(cfc: CfcFin) -> Option<Snapshot> {
+    let store = STORE.lock();
+    (store.cfc == cfc).then_some(store.snapshot).flatten()
+}
+
+/// Seed a newly installed CFC from its authenticated Genesis plan.
+///
+/// This is deliberately one-shot: an existing ExpFS snapshot is authoritative
+/// so a later boot cannot reinstall packages or recreate dimensions the user
+/// removed after installation.
+pub fn seed_genesis_plan(
+    primary_name: Text,
+    plan: crate::genesis::GenesisPlan,
+) -> Result<u64, StoreError> {
+    const PLAN_FIN: Fin = Fin::from_u128(0x4745_4E45_5349_5350_4C41_4E00_0000_0001);
+    const APPS_FIN: Fin = Fin::from_u128(0x4159_4F41_5050_5353_5441_5445_0000_0001);
+
+    let mut store = STORE.lock();
+    if store.device.is_none() || store.cfc.is_zero() || store.primary_dimension.is_zero() {
+        return Err(StoreError::Unavailable);
+    }
+    if store.snapshot.is_some() {
+        return Ok(store.generation);
+    }
+
+    let mut snapshot = Snapshot::empty(store.cfc, store.cfc_name, store.primary_dimension);
+    snapshot.dimensions[0] = Some(Dimension::new(
+        store.primary_dimension,
+        primary_name.as_str(),
+        true,
+    ));
+    for (target, dimension) in snapshot
+        .dimensions
+        .iter_mut()
+        .skip(1)
+        .zip(plan.secondary_dimensions.into_iter().flatten())
+    {
+        *target = Some(Dimension::new(dimension.fin, dimension.name.as_str(), true));
+    }
+    snapshot.network_policy = if plan.network_allowed() {
+        NetworkPolicy::Restricted
+    } else {
+        NetworkPolicy::Disabled
+    };
+
+    let mut plan_bytes = [0_u8; FORM_CONTENT_CAPACITY];
+    plan_bytes[..4].copy_from_slice(b"GNP2");
+    plan_bytes[4] = plan.components;
+    plan_bytes[5] = plan.sdks;
+    plan_bytes[6] = plan.drivers;
+    plan_bytes[7] = plan.encryption.persisted();
+    plan_bytes[8..12].copy_from_slice(&plan.initial_apps.to_le_bytes());
+    let mut plan_form = Form::new(PLAN_FIN, "GenesisPlan.state", FormKind::Policy);
+    plan_form.revision = 1;
+    snapshot.forms[0] = Some(StoredForm {
+        form: plan_form,
+        content: plan_bytes,
+        content_len: 12,
+    });
+
+    let mut app_bytes = [0_u8; FORM_CONTENT_CAPACITY];
+    app_bytes[..4].copy_from_slice(b"AYO1");
+    app_bytes[4..8].copy_from_slice(&plan.initial_apps.to_le_bytes());
+    app_bytes[8] = plan.initial_apps.trailing_zeros().min(19) as u8;
+    let mut apps_form = Form::new(APPS_FIN, "AyoApps.state", FormKind::Data);
+    apps_form.revision = 1;
+    snapshot.forms[1] = Some(StoredForm {
+        form: apps_form,
+        content: app_bytes,
+        content_len: 22,
+    });
+    snapshot.journal_sequence = 2;
+    validate_snapshot(&snapshot)?;
+    let generation = commit_locked(&mut store, snapshot)?;
+    slog!(
+        "EXPOS_GENESIS_PLAN_SEEDED generation={} dimensions={} apps={} components={:#04x}\r\n",
+        generation,
+        snapshot.dimensions.iter().flatten().count(),
+        plan.initial_apps.count_ones(),
+        plan.components
+    );
+    Ok(generation)
+}
+
 /// Load the first active Data Form whose name ends in `.txt`.
 ///
 /// Notes uses the same generic Form records as the shell rather than a private
 /// side file, so saved text remains visible to every ExpFS-aware tool.
 pub fn load_text_form(cfc: CfcFin) -> Option<(Text, [u8; FORM_CONTENT_CAPACITY], usize)> {
-    let snapshot = loaded_snapshot(cfc)?;
+    let snapshot = current_snapshot(cfc)?;
     snapshot.forms.iter().flatten().find_map(|stored| {
         (stored.form.kind == FormKind::Data
             && stored.form.lifecycle == Lifecycle::Active
@@ -306,7 +393,7 @@ pub fn load_text_form(cfc: CfcFin) -> Option<(Text, [u8; FORM_CONTENT_CAPACITY],
 }
 
 pub fn load_data_form(cfc: CfcFin, name: &str) -> Option<([u8; FORM_CONTENT_CAPACITY], usize)> {
-    let snapshot = loaded_snapshot(cfc)?;
+    let snapshot = current_snapshot(cfc)?;
     snapshot.forms.iter().flatten().find_map(|stored| {
         (stored.form.kind == FormKind::Data
             && stored.form.lifecycle == Lifecycle::Active
@@ -382,7 +469,6 @@ pub fn save_data_form(cfc: CfcFin, name: &str, bytes: &[u8]) -> Result<(Fin, u32
         }
     }
     snapshot.journal_sequence = snapshot.journal_sequence.wrapping_add(1).max(1);
-    snapshot.form_graph_present = true;
     validate_snapshot(&snapshot)?;
     commit_locked(&mut store, snapshot)?;
     Ok((fin, revision))

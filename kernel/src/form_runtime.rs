@@ -591,9 +591,12 @@ pub fn prepare(
     space.pml4.0[pml4_index] = physical(&space.user_pdpt) | page_table_flags();
     space.user_pdpt.0[0] = physical(&space.user_pd) | page_table_flags();
     space.user_pd.0[0] = physical(&space.user_pt) | page_table_flags();
+    // W^X: executable Form code is read-only; writable data and stack are NX.
+    let no_execute = crate::security::nx_page_flag();
     space.user_pt.0[0] = physical(&space.code) | PAGE_PRESENT | PAGE_USER;
-    space.user_pt.0[1] = physical(&space.data) | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
-    space.user_pt.0[2] = physical(&space.stack) | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
+    space.user_pt.0[1] = physical(&space.data) | PAGE_PRESENT | PAGE_WRITE | PAGE_USER | no_execute;
+    space.user_pt.0[2] =
+        physical(&space.stack) | PAGE_PRESENT | PAGE_WRITE | PAGE_USER | no_execute;
 
     let payload = native_payload(content);
     let payload_len = payload.len().min(PAGE_BYTES - ABI_PAYLOAD_OFFSET);

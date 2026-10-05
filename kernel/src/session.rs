@@ -97,6 +97,12 @@ pub struct LoginResult {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StoredGenesisAccount(pub(crate) state::StoredAccount);
 
+impl StoredGenesisAccount {
+    pub fn name(&self) -> &str {
+        core::str::from_utf8(&self.0.name[..self.0.name_len as usize]).unwrap_or("invalid")
+    }
+}
+
 impl Session {
     pub fn name(&self) -> &str {
         self.name.as_str()
@@ -273,13 +279,19 @@ static ACCOUNTS: crate::sync::SpinMutex<AccountStore> =
 /// Initialize accounts, using the Operator credential prepared by Genesis
 /// only when the ExpFS account record is still blank. Once journaled, ExpFS is
 /// authoritative and the seed is ignored on every later boot.
-pub fn initialize_with_seed(operator: Option<state::StoredAccount>) {
+pub fn initialize_with_seeds(
+    operator: Option<state::StoredAccount>,
+    secondary: [Option<StoredGenesisAccount>; crate::genesis::MAX_GENESIS_USERS],
+) {
     let loaded = state::load_accounts().and_then(AccountStore::from_persistent);
     let (accounts, source) = match loaded {
         Some(accounts) => (accounts, "disk"),
         None => match operator.and_then(|record| {
             let mut stored = [state::StoredAccount::EMPTY; MAX_ACCOUNTS];
             stored[0] = record;
+            for (index, account) in secondary.into_iter().flatten().enumerate() {
+                stored[index + 1] = account.0;
+            }
             AccountStore::from_persistent(stored)
         }) {
             Some(accounts) => (accounts, "genesis"),
@@ -314,6 +326,27 @@ pub fn genesis_operator(password: &[u8]) -> Result<state::StoredAccount, Account
         Authority::Operator,
     )
     .stored())
+}
+
+#[cfg(any(test, feature = "genesis-installer"))]
+pub fn genesis_account(
+    name: &str,
+    password: &[u8],
+    authority: Authority,
+) -> Result<StoredGenesisAccount, AccountError> {
+    if authority == Authority::Operator || !valid_name(name.as_bytes()) {
+        return Err(AccountError::InvalidName);
+    }
+    if !valid_password(password) {
+        return Err(AccountError::InvalidPassword);
+    }
+    let normalized = Field::from_input(name.as_bytes(), true);
+    if normalized.as_bytes() == b"operator" {
+        return Err(AccountError::Protected);
+    }
+    Ok(StoredGenesisAccount(
+        Account::with_password(normalized, password, authority).stored(),
+    ))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -600,6 +633,7 @@ fn login_once(input: &mut Input, mode: BootMode) -> LoginAttempt {
     let mut password_len = 0;
     let mut password_field = false;
     let mut denied = false;
+    let mut failed_attempts = 0_u8;
     let mut pointer_x = (framebuffer::width() / 2) as i16;
     let mut pointer_y = (framebuffer::height() / 2) as i16;
     slog!("EXPOS_LOGIN_READY\r\n");
@@ -673,6 +707,8 @@ fn login_once(input: &mut Input, mode: BootMode) -> LoginAttempt {
                         if let Some(session) = authenticated {
                             return LoginAttempt::Authenticated(complete_login(session, true));
                         }
+                        failed_attempts = failed_attempts.saturating_add(1);
+                        login_backoff(failed_attempts);
                         denied = true;
                         username_len = 0;
                         password_len = 0;
@@ -744,12 +780,14 @@ fn login_once(input: &mut Input, mode: BootMode) -> LoginAttempt {
                 if let Some(session) = authenticated {
                     return LoginAttempt::Authenticated(complete_login(session, graphical));
                 }
+                failed_attempts = failed_attempts.saturating_add(1);
+                login_backoff(failed_attempts);
                 denied = true;
                 username_len = 0;
                 password_len = 0;
                 password_field = false;
                 if !graphical {
-                    println!("\nLogin denied. Try operator / expos.");
+                    println!("\nLogin denied.");
                     print!("user: ");
                 }
             }
@@ -788,6 +826,22 @@ fn login_once(input: &mut Input, mode: BootMode) -> LoginAttempt {
             }
         }
     }
+}
+
+fn login_backoff(failed_attempts: u8) {
+    let shift = failed_attempts.saturating_sub(1).min(3) as u32;
+    let milliseconds = 250_u64 << shift;
+    let frequency = crate::hardware::clock_info().tsc_hz.max(1_000);
+    let ticks = frequency.saturating_div(1_000).saturating_mul(milliseconds);
+    let started = crate::hardware::timestamp();
+    while crate::hardware::timestamp().wrapping_sub(started) < ticks {
+        core::hint::spin_loop();
+    }
+    slog!(
+        "EXPOS_LOGIN_BACKOFF attempt={} milliseconds={}\r\n",
+        failed_attempts,
+        milliseconds
+    );
 }
 
 fn render_boot_mode(selected: BootMode) {

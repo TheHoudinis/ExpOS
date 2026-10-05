@@ -47,7 +47,11 @@ checkpoint slots use authenticated encryption with nonce domains bound to CFC,
 generation and disk slot. A separately domained protected installation
 baseline is established after the first durable account/settings transaction;
 the console can inspect or restore it with `baseline` and `restorebaseline`.
-A graphical recovery selector remains implementation work.
+Encrypted manifest-v4 installs also authenticate the complete redundant Genesis
+plan as key-envelope associated data. Removable Genesis media detects installed
+metadata and offers read-only diagnosis, verified metadata repair, authenticated
+baseline restore, or double-confirmed annihilation. The recovery UI is a
+keyboard-driven framebuffer console; a mouse-first widget UI remains open.
 
 Build dependencies include Clang, GNU PE-capable ld, NASM, GCC, Rust, Make,
 QEMU, and OVMF. Override `OVMF_CODE` and `OVMF_VARS` for another firmware path.
@@ -76,16 +80,16 @@ physical-page allocation, complete exception coverage and interrupt-driven
 device drivers retain their current limitations. This build is unsigned and
 does not implement Secure Boot.
 
-Genesis now has a separate native-UEFI installation build. It offers encrypted
-Basic and explicitly unencrypted Architect whole-disk choices. It writes
+Genesis now has a separate native-UEFI installation build. It offers Easy and
+Paranoid encrypted Basic profiles plus explicitly unencrypted Architect. It writes
 primary/backup GPT structures, a FAT32 EFI System Partition, the runtime at
-`EFI/BOOT/BOOTX64.EFI`, and redundant checksummed manifests with independently
-generated CFC and Primary Dimension identities plus a salted Operator password
-verifier. It confirms the Operator password and final installation plan before
-the destructive gate, then reads back the GPT, FAT32 metadata, both manifests
-and complete UEFI runtime. On first
-installed boot those identities drive core bootstrap and the Operator becomes
-an ExpFS account record and the first durable state becomes the protected
+`EFI/BOOT/BOOTX64.EFI`, redundant checksummed manifest-v4 and plan copies with
+independently generated CFC/Dimension identities, and salted initial-account
+password verifiers. The plan records package, SDK, driver, optional component,
+secondary Dimension and secondary user selections. It confirms the Operator
+password and final plan before the destructive gate, then reads back GPT,
+FAT32, both metadata pairs and the complete UEFI runtime. On first installed
+boot those selections seed real ExpFS records once, and the first durable state becomes the protected
 installation baseline. `make genesis-check` proves ISO install, redundant
 metadata, baseline creation, ISO-free disk boot, Operator login, and shutdown.
 Boot recovers from a valid backup manifest, but conflicting or wholly damaged
@@ -106,6 +110,8 @@ database is authenticated-encrypted and boot performs password-driven key
 unwrap before decoding ExpFS. Its protected immutable baseline is encrypted in
 an independent disk/nonce domain and cannot be replaced by normal checkpoint
 rotation or restore.
+Paranoid doubles the Argon2id pass count, requires active NX and SMEP, and
+prevents network, Browser and ExpPython initialization for the entire boot.
 The installer can use NVMe, AHCI SATA or the ATA primary master, but selects by
 probe order and does not enumerate model, serial or stable identities. It is
 therefore not approved for physical-disk use. The automated Genesis check

@@ -12,7 +12,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 pub const PASSWORD_HASH_LEN: usize = 32;
 pub const PASSWORD_SALT_LEN: usize = 16;
-pub const PASSWORD_KDF_ROUNDS: u32 = 25_000;
+pub const PASSWORD_KDF_ROUNDS: u32 = 100_000;
 pub const STORAGE_KEY_LEN: usize = 32;
 pub const STORAGE_SALT_LEN: usize = 16;
 pub const STORAGE_NONCE_LEN: usize = 24;
@@ -20,6 +20,7 @@ pub const STORAGE_TAG_LEN: usize = 16;
 pub const STORAGE_ARGON2_MEMORY_KIB: u32 = 65_536;
 pub const STORAGE_ARGON2_PASSES: u32 = 3;
 pub const STORAGE_ARGON2_LANES: u32 = 1;
+pub const STORAGE_PARANOID_ARGON2_PASSES: u32 = 6;
 
 const SHA256_INITIAL: [u32; 8] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
@@ -255,22 +256,29 @@ pub fn password_salt(context: &[u8]) -> ([u8; PASSWORD_SALT_LEN], SaltEntropy) {
 }
 
 /// Derive the key-encryption key used only to wrap a CFC's random storage key.
-/// Account verification remains a separate PBKDF2 record; changing an account
-/// password rewraps this key rather than re-encrypting every ExpFS record.
-pub fn storage_kek(
+/// Manifest-controlled cost parameters are accepted only for audited profiles.
+pub fn storage_kek_with_params(
     password: &[u8],
     salt: &[u8; STORAGE_SALT_LEN],
+    memory_kib: u32,
+    passes: u32,
+    lanes: u32,
 ) -> Result<[u8; STORAGE_KEY_LEN], ()> {
-    storage_kek_with_params(
-        password,
-        salt,
-        STORAGE_ARGON2_MEMORY_KIB,
-        STORAGE_ARGON2_PASSES,
-        STORAGE_ARGON2_LANES,
-    )
+    // Manifest-controlled values must never drive an unbounded allocation.
+    // Genesis currently recognizes only the audited Easy and Paranoid profiles.
+    if memory_kib != STORAGE_ARGON2_MEMORY_KIB
+        || !matches!(
+            passes,
+            STORAGE_ARGON2_PASSES | STORAGE_PARANOID_ARGON2_PASSES
+        )
+        || lanes != STORAGE_ARGON2_LANES
+    {
+        return Err(());
+    }
+    storage_kek_with_params_unchecked(password, salt, memory_kib, passes, lanes)
 }
 
-fn storage_kek_with_params(
+fn storage_kek_with_params_unchecked(
     password: &[u8],
     salt: &[u8; STORAGE_SALT_LEN],
     memory_kib: u32,
@@ -387,6 +395,11 @@ fn hardware_random() -> Option<u64> {
     None
 }
 
+#[cfg(feature = "genesis-installer")]
+pub fn hardware_entropy_available() -> bool {
+    hardware_random().is_some()
+}
+
 /// Best-effort clearing for transient plaintext and key-derived buffers.
 pub fn wipe(bytes: &mut [u8]) {
     for byte in bytes {
@@ -464,8 +477,9 @@ mod tests {
     #[test]
     fn argon2id_kek_uses_password_and_salt() {
         let salt = [3_u8; STORAGE_SALT_LEN];
-        let first = storage_kek_with_params(b"correct horse", &salt, 32, 2, 1).unwrap();
-        let second = storage_kek_with_params(b"wrong horse", &salt, 32, 2, 1).unwrap();
+        let first = storage_kek_with_params_unchecked(b"correct horse", &salt, 32, 2, 1).unwrap();
+        let second = storage_kek_with_params_unchecked(b"wrong horse", &salt, 32, 2, 1).unwrap();
         assert_ne!(first, second);
+        assert!(storage_kek_with_params(b"password", &salt, 32, 2, 1).is_err());
     }
 }

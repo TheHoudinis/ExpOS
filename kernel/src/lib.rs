@@ -33,6 +33,7 @@ mod pci;
 mod port;
 mod python;
 mod radio;
+mod security;
 mod serial;
 mod session;
 mod shell;
@@ -143,6 +144,8 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
     println!("============================================");
 
     unsafe { boot::initialize(magic, mbi_phys) };
+    security::enable_cpu_hardening();
+    security::log_cpu_hardening();
     form_runtime::initialize();
     let interrupt_platform = interrupts::initialize();
     let online_cpus = smp::initialize(interrupt_platform);
@@ -193,6 +196,25 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
         if let Some(config) = genesis_config {
             locale::set_active(config.locale);
         }
+        let runtime_plan = genesis_config
+            .map(|config| config.plan)
+            .unwrap_or_else(|| genesis::GenesisPlan::standard(genesis::EncryptionProfile::Easy));
+        security::configure(
+            runtime_plan.network_allowed(),
+            runtime_plan.python_allowed(),
+            runtime_plan.browser_allowed(),
+        );
+        if runtime_plan.encryption == genesis::EncryptionProfile::Paranoid
+            && !security::paranoid_cpu_ready()
+        {
+            println!("[fatal] Paranoid policy requires CPU NX and SMEP support");
+            slog!(
+                "EXPOS_PARANOID_CPU_REJECTED nx={} smep={}\r\n",
+                security::nx_active(),
+                security::smep_active()
+            );
+            port::shutdown();
+        }
         let report = match genesis_config {
             Some(config) => expos_core::bootstrap_with_identity(
                 config.cfc_fin,
@@ -220,12 +242,32 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
             report.stable_fin,
             genesis_config.and_then(|config| config.storage_key),
         );
+        if let Some(config) = genesis_config {
+            match expfs_store::seed_genesis_plan(config.primary_name, config.plan) {
+                Ok(generation) => slog!(
+                    "EXPOS_GENESIS_PLAN_READY generation={} dimensions={} users={} apps={}\r\n",
+                    generation,
+                    config.plan.secondary_dimensions.iter().flatten().count() + 1,
+                    config.plan.secondary_accounts.iter().flatten().count() + 1,
+                    config.plan.initial_apps.count_ones()
+                ),
+                Err(error) => println!(
+                    "[warn] Genesis plan persistence failed: {}",
+                    error.message()
+                ),
+            }
+        }
         state::initialize();
         let preferences = state::preferences();
         if let Some(mode) = framebuffer::DisplayMode::from_persisted(preferences.display_mode) {
             let _ = framebuffer::request_mode(mode);
         }
-        session::initialize_with_seed(genesis_config.map(|config| config.operator.0));
+        session::initialize_with_seeds(
+            genesis_config.map(|config| config.operator.0),
+            genesis_config
+                .map(|config| config.plan.secondary_accounts)
+                .unwrap_or([None; genesis::MAX_GENESIS_USERS]),
+        );
         match expfs_store::establish_baseline() {
             Ok(info) => println!(
                 "[ok] protected installation baseline generation {} (journal {})",
@@ -239,10 +281,14 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
         println!();
         println!("Core architecture online. Starting session manager.");
         graphics_console::disable();
+        input.reinitialize_ps2_keyboard();
         let requested_mode = session::choose_boot_mode(&mut input);
         boot::set_single_user(requested_mode == session::BootMode::SingleUser);
         if boot::single_user() {
             slog!("EXPOS_SERVICE_MODE single-user network=disabled desktop=disabled operator-only=true\r\n");
+            radio::initialize(false, false);
+        } else if !security::network_allowed() {
+            slog!("EXPOS_SERVICE_MODE multi-user network=disabled genesis-policy=true\r\n");
             radio::initialize(false, false);
         } else {
             let ethernet_ready = network::initialize();
@@ -256,7 +302,13 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
         }
         let login = session::login(&mut input, requested_mode);
         if login.mode == session::BootMode::Graphical {
-            desktop::run(&mut input, false, login.session, report.cfc_fin);
+            desktop::run_with_network(
+                &mut input,
+                false,
+                login.session,
+                security::network_allowed(),
+                report.cfc_fin,
+            );
         }
         if boot::native_uefi() {
             let _ = graphics_console::enable_console();

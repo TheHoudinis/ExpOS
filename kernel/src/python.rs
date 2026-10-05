@@ -12,6 +12,15 @@ extern "C" {
 
 #[cfg(not(test))]
 pub fn execute(source: &str) -> bool {
+    if !crate::security::python_allowed() {
+        crate::println!("ExpPython is disabled by the immutable Genesis security policy.");
+        crate::slog!("EXPOS_PYTHON_DENIED policy=genesis\r\n");
+        return false;
+    }
+    if source.len() > 4096 {
+        crate::println!("ExpPython: source exceeds the 4096-byte boundary.");
+        return false;
+    }
     if ACTIVE.swap(true, Ordering::AcqRel) {
         crate::println!("ExpPython is already executing.");
         return false;
@@ -40,6 +49,11 @@ pub fn execute(_source: &str) -> bool {
 #[no_mangle]
 extern "C" fn expos_python_output(data: *const u8, length: usize) {
     // Pointer and length are supplied synchronously by the trusted C port.
+    // Reject impossible callback metadata before constructing a Rust slice;
+    // the C runtime independently maintains the same 16 KiB output ceiling.
+    if data.is_null() || length > 16 * 1024 {
+        expos_python_fatal();
+    }
     let bytes = unsafe { core::slice::from_raw_parts(data, length) };
     for &byte in bytes {
         crate::print!("{}", if byte.is_ascii() { byte as char } else { '?' });

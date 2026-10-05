@@ -47,8 +47,9 @@ Select a local JSON catalog or an HTTPS registry:
 Schema v3 catalogs carry category and target-architecture metadata, so `glance`
 can search Editors, Developer tools, Games, Networking, Languages, Utilities,
 and Graphics without flattening everything into a path list. Remote catalogs
-are size-bounded and package metadata is checksummed. The
-optional registry key requires a valid Ed25519 signature. Ayo v3 catalog
+are size-bounded, package metadata is checksummed, and a pinned registry key is
+mandatory: the complete catalog must carry a valid Ed25519 signature. Local
+catalog files may remain checksummed-only for offline development. Ayo v3 catalog
 entries include an artifact source, SHA-256 digest, format and optional raw-file
 target. Sources may be HTTPS, `file://`, local files or `builtin://`; supported
 formats are raw, tar and tar.gz.

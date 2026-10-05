@@ -155,14 +155,30 @@ impl CapabilityBroker {
         {
             return Err(CapabilityError::Duplicate);
         }
-        if handle.parent_id != 0
-            && !self
+        if handle.parent_id != 0 {
+            let parent = self
                 .handles
                 .iter()
                 .flatten()
-                .any(|entry| entry.id == handle.parent_id)
-        {
-            return Err(CapabilityError::NotFound);
+                .find(|entry| entry.id == handle.parent_id)
+                .ok_or(CapabilityError::NotFound)?;
+            // Persisted children are untrusted until the complete attenuation
+            // rule is re-proved. Authentication protects bytes at rest; it is
+            // not a substitute for capability semantics.
+            if parent.cfc != handle.cfc
+                || parent.target != handle.target
+                || parent.dimension != handle.dimension
+                || parent.revoked
+                || !parent.operations.contains(handle.operations)
+                || handle.valid_until_tick > parent.valid_until_tick
+            {
+                return Err(CapabilityError::Amplification);
+            }
+            if handle.operations == parent.operations
+                && handle.valid_until_tick == parent.valid_until_tick
+            {
+                return Err(CapabilityError::Amplification);
+            }
         }
         let slot = self
             .handles
@@ -170,7 +186,11 @@ impl CapabilityBroker {
             .find(|slot| slot.is_none())
             .ok_or(CapabilityError::Full)?;
         *slot = Some(handle);
-        self.next_id = self.next_id.max(handle.id.wrapping_add(1).max(1));
+        self.next_id = if handle.id == u32::MAX {
+            self.next_id.max(1)
+        } else {
+            self.next_id.max(handle.id + 1)
+        };
         Ok(())
     }
 
@@ -202,13 +222,14 @@ impl CapabilityBroker {
         {
             return Err(CapabilityError::Denied);
         }
-        let slot = self
+        let slot_index = self
             .handles
-            .iter_mut()
-            .find(|slot| slot.is_none())
+            .iter()
+            .position(Option::is_none)
             .ok_or(CapabilityError::Full)?;
+        let id = self.allocate_id()?;
         let handle = FormHandle {
-            id: self.next_id,
+            id,
             parent_id: 0,
             cfc: self.cfc,
             requester,
@@ -218,8 +239,7 @@ impl CapabilityBroker {
             valid_until_tick,
             revoked: false,
         };
-        self.next_id = self.next_id.wrapping_add(1).max(1);
-        *slot = Some(handle);
+        self.handles[slot_index] = Some(handle);
         Ok(handle)
     }
 
@@ -295,13 +315,14 @@ impl CapabilityBroker {
         {
             return Err(CapabilityError::Amplification);
         }
-        let slot = self
+        let slot_index = self
             .handles
-            .iter_mut()
-            .find(|slot| slot.is_none())
+            .iter()
+            .position(Option::is_none)
             .ok_or(CapabilityError::Full)?;
+        let id = self.allocate_id()?;
         let handle = FormHandle {
-            id: self.next_id,
+            id,
             parent_id: parent.id,
             cfc: self.cfc,
             requester,
@@ -311,9 +332,24 @@ impl CapabilityBroker {
             valid_until_tick,
             revoked: false,
         };
-        self.next_id = self.next_id.wrapping_add(1).max(1);
-        *slot = Some(handle);
+        self.handles[slot_index] = Some(handle);
         Ok(handle)
+    }
+
+    fn allocate_id(&mut self) -> Result<u32, CapabilityError> {
+        for _ in 0..=MAX_HANDLES {
+            let candidate = self.next_id.max(1);
+            self.next_id = candidate.wrapping_add(1).max(1);
+            if !self
+                .handles
+                .iter()
+                .flatten()
+                .any(|handle| handle.id == candidate)
+            {
+                return Ok(candidate);
+            }
+        }
+        Err(CapabilityError::Full)
     }
 
     pub fn authorize(

@@ -319,6 +319,27 @@ impl Shell {
                 forms.iter().flatten().count(),
                 journal_sequence
             );
+        } else if let Some(snapshot) = crate::expfs_store::current_snapshot(report.cfc_fin) {
+            dimensions = snapshot.dimensions;
+            next_fin = snapshot.next_fin;
+            next_dimension_fin = snapshot.next_dimension_fin;
+            journal_sequence = snapshot.journal_sequence;
+            network_policy = snapshot.network_policy;
+            for stored in snapshot.forms.into_iter().flatten() {
+                let Some(index) = forms.iter().position(Option::is_none) else {
+                    println!("[warn] Genesis policy Form could not fit in the shell registry");
+                    break;
+                };
+                forms[index] = Some(stored.form);
+                content[index].bytes = stored.content;
+                content[index].length = stored.content_len;
+            }
+            slog!(
+                "EXPOS_GENESIS_FORMS_MERGED count={} dimensions={} sequence={}\r\n",
+                forms.iter().flatten().count(),
+                dimensions.iter().flatten().count(),
+                journal_sequence
+            );
         }
         let mut kernel_controls = KernelControls::new();
         kernel_controls
@@ -806,6 +827,11 @@ impl Shell {
                 true
             }
             "browser" => {
+                if !crate::security::browser_allowed() {
+                    println!("Browser is not installed by the Genesis policy.");
+                    slog!("EXPOS_BROWSER_DENIED genesis-policy\r\n");
+                    return;
+                }
                 crate::desktop::run_with_network(
                     input,
                     true,
@@ -1580,6 +1606,11 @@ impl Shell {
     }
 
     fn network_handle(&self, command: &str) -> Option<u32> {
+        if !crate::security::network_allowed() {
+            println!("{}: disabled by the immutable Genesis policy", command);
+            slog!("EXPOS_NET_DENIED command={} genesis-policy\r\n", command);
+            return None;
+        }
         if !self
             .find_form("Network")
             .is_some_and(|form| form.lifecycle == Lifecycle::Active)
@@ -1617,7 +1648,8 @@ impl Shell {
     }
 
     fn desktop_network_allowed(&self) -> bool {
-        self.network_policy != NetworkPolicy::Disabled
+        crate::security::network_allowed()
+            && self.network_policy != NetworkPolicy::Disabled
             && self
                 .find_form("Network")
                 .is_some_and(|form| form.lifecycle == Lifecycle::Active)
@@ -1990,8 +2022,9 @@ impl Shell {
         };
         if self
             .broker
-            .authorize(
+            .authorize_requester(
                 handle.id,
+                handle.requester,
                 form.fin,
                 self.report.stable_fin,
                 Operations::EXECUTE,
@@ -2287,8 +2320,9 @@ impl Shell {
         let now = crate::hardware::timestamp();
         if self
             .broker
-            .authorize(
+            .authorize_requester(
                 parent.id,
+                parent.requester,
                 form.fin,
                 self.report.stable_fin,
                 Operations::EXECUTE,

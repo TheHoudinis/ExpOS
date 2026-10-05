@@ -51,6 +51,10 @@ authenticated by its storage protection. Normal writes, rotation, and restore
 may not replace that baseline. The implemented suite is XChaCha20-Poly1305;
 Basic uses Argon2id v1.3 with 64 MiB, three passes and one lane to wrap a random
 32-byte key. Nonces bind that key to CFC identity, generation and slot domain.
+Genesis v2 Paranoid uses six passes, requires active NX and SMEP, and omits the
+network, Browser and ExpPython runtime surfaces. Encrypted manifest-v4 key
+envelopes authenticate the complete redundant installation plan as associated
+data, so offline policy expansion prevents successful key unwrap.
 Alternating current-state commits and the eight-slot checkpoint ring are
 authenticated-encrypted whenever the CFC has a storage key. The immutable
 installation baseline uses the same snapshot schema in a separate, non-rotating

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"expos.dev/ayo/internal/model"
@@ -103,5 +104,24 @@ func TestCatalogEd25519Signature(t *testing.T) {
 	catalog.Name = "tampered"
 	if err := verifySignature(catalog, base64.StdEncoding.EncodeToString(publicKey)); err == nil {
 		t.Fatal("tampered signed catalog was accepted")
+	}
+}
+
+func TestRemoteCatalogRequiresPinnedKey(t *testing.T) {
+	if err := requirePinnedRegistryKey(true, ""); err == nil {
+		t.Fatal("remote catalog without a pinned key was accepted")
+	}
+	if err := requirePinnedRegistryKey(true, "  "); err == nil {
+		t.Fatal("remote catalog with a blank pinned key was accepted")
+	}
+	if err := requirePinnedRegistryKey(true, "pinned-key"); err != nil {
+		t.Fatalf("remote catalog with a key was rejected: %v", err)
+	}
+	if err := requirePinnedRegistryKey(false, ""); err != nil {
+		t.Fatalf("local development catalog unexpectedly requires a key: %v", err)
+	}
+	if _, err := Load(context.Background(), "https://127.0.0.1:1/catalog.json", ""); err == nil ||
+		!strings.Contains(err.Error(), "pinned Ed25519") {
+		t.Fatalf("HTTPS source was contacted or accepted before key validation: %v", err)
 	}
 }

@@ -117,6 +117,11 @@ func Load(ctx context.Context, source, publicKey string) (Catalog, error) {
 	if strings.TrimSpace(source) == "" {
 		return Builtin(), nil
 	}
+	if parsed, err := url.Parse(source); err == nil && parsed.Scheme == "https" {
+		if err := requirePinnedRegistryKey(true, publicKey); err != nil {
+			return Catalog{}, err
+		}
+	}
 	raw, remote, err := readSource(ctx, source)
 	if err != nil {
 		return Catalog{}, err
@@ -126,6 +131,9 @@ func Load(ctx context.Context, source, publicKey string) (Catalog, error) {
 		return Catalog{}, fmt.Errorf("registry catalog is not valid JSON: %w", err)
 	}
 	if err := catalog.Validate(remote); err != nil {
+		return Catalog{}, err
+	}
+	if err := requirePinnedRegistryKey(remote, publicKey); err != nil {
 		return Catalog{}, err
 	}
 	if publicKey != "" {
@@ -143,6 +151,13 @@ func Load(ctx context.Context, source, publicKey string) (Catalog, error) {
 		return Catalog{}, err
 	}
 	return catalog, nil
+}
+
+func requirePinnedRegistryKey(remote bool, publicKey string) error {
+	if remote && strings.TrimSpace(publicKey) == "" {
+		return errors.New("remote ayo registries require a pinned Ed25519 public key")
+	}
+	return nil
 }
 
 func allChecksummed(packages []Package) bool {

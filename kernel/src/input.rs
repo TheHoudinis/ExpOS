@@ -51,12 +51,14 @@ pub struct Input {
     mouse_index: usize,
     mouse_buttons: u8,
     mouse_enabled: bool,
+    ps2_keyboard_ready: bool,
     pending_event: Option<InputEvent>,
 }
 
 impl Input {
-    pub const fn new() -> Self {
-        Self {
+    pub fn new() -> Self {
+        #[allow(unused_mut)]
+        let mut input = Self {
             shift: false,
             control: false,
             alt: false,
@@ -69,8 +71,45 @@ impl Input {
             mouse_index: 0,
             mouse_buttons: 0,
             mouse_enabled: false,
+            ps2_keyboard_ready: false,
             pending_event: None,
+        };
+        #[cfg(not(test))]
+        {
+            input.reinitialize_ps2_keyboard();
         }
+        input
+    }
+
+    /// Reclaim the keyboard after firmware handoff or a long pre-session
+    /// unlock operation. Decoder state and stale controller bytes must not
+    /// cross that boundary.
+    pub fn reinitialize_ps2_keyboard(&mut self) -> bool {
+        self.shift = false;
+        self.control = false;
+        self.alt = false;
+        self.caps_lock = false;
+        self.extended = false;
+        self.super_key = false;
+        self.pending_event = None;
+        #[cfg(not(test))]
+        {
+            self.ps2_keyboard_ready = initialize_ps2_keyboard();
+            crate::slog!(
+                "EXPOS_PS2_KEYBOARD initialized={} scan_set=1 translation=true polling=true\r\n",
+                self.ps2_keyboard_ready
+            );
+        }
+        #[cfg(test)]
+        {
+            self.ps2_keyboard_ready = false;
+        }
+        self.ps2_keyboard_ready
+    }
+
+    #[cfg(feature = "genesis-installer")]
+    pub const fn ps2_keyboard_ready(&self) -> bool {
+        self.ps2_keyboard_ready
     }
 
     pub fn enable_mouse(&mut self) -> bool {
@@ -479,6 +518,51 @@ fn mouse_command(command: u8) -> bool {
     controller_write_command(0xD4)
         && controller_write_data(command)
         && controller_read(true) == Some(0xFA)
+}
+
+/// Reclaim the 8042 keyboard path from firmware after a warm Genesis reboot.
+///
+/// UEFI is allowed to leave translation disabled or scanning stopped. The
+/// decoder below consumes set-1 bytes, so explicitly selecting set 2 at the
+/// device and enabling controller translation makes the post-reboot state
+/// deterministic. USB-only machines simply fail this bounded probe and keep
+/// using xHCI HID.
+#[cfg(not(test))]
+fn initialize_ps2_keyboard() -> bool {
+    if !controller_write_command(0xAD) || !controller_write_command(0xA7) {
+        return false;
+    }
+    for _ in 0..32 {
+        let status = unsafe { port::inb(PS2_STATUS) };
+        if status & 0x01 == 0 {
+            break;
+        }
+        let _ = unsafe { port::inb(PS2_DATA) };
+    }
+    if !controller_write_command(0x20) {
+        return false;
+    }
+    let Some(mut command_byte) = controller_read(false) else {
+        return false;
+    };
+    command_byte |= 1 << 6; // translate device set 2 into host set 1
+    command_byte &= !(1 << 4); // enable the first PS/2 port clock
+    command_byte &= !(1 << 0); // polling owns delivery; keep IRQ1 masked
+    if !controller_write_command(0x60)
+        || !controller_write_data(command_byte)
+        || !controller_write_command(0xAE)
+    {
+        return false;
+    }
+    keyboard_command(0xF5)
+        && keyboard_command(0xF0)
+        && keyboard_command(0x02)
+        && keyboard_command(0xF4)
+}
+
+#[cfg(not(test))]
+fn keyboard_command(command: u8) -> bool {
+    controller_write_data(command) && controller_read(false) == Some(0xFA)
 }
 
 pub(crate) fn super_binding(key: u8) -> Option<u8> {

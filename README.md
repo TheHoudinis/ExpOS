@@ -92,6 +92,10 @@ with 64 MiB, three passes and one lane. Current state and all eight rotating
 checkpoint slots plus the non-rotating installation baseline are
 authenticated-encrypted. `baseline` inspects it and the Operator-only
 `restorebaseline` command restores it without modifying the protected copy.
+Genesis v2 also offers a six-pass Paranoid profile that requires NX+SMEP and
+omits network, Browser and ExpPython runtime surfaces. The encrypted key
+envelope authenticates the complete versioned installation plan, not only the
+CFC identity.
 
 Native UEFI is the default Genesis and normal boot path; BIOS remains a
 compatibility, recovery, and development fallback. **Architect** is the official
@@ -105,10 +109,13 @@ genesis-iso` builds `build/ExpOS-v9-x86_64.iso`, a native-UEFI hybrid image.
 Its Architect path requires exact `ERASE` confirmation, constructs primary and
 backup GPT metadata, creates a FAT32 EFI System Partition, installs the runtime
 at `EFI/BOOT/BOOTX64.EFI`, mints and persists CFC/Primary Dimension identities,
-and stores only a salted password verifier for the initial Operator. Genesis
+and stores only salted password verifiers for the initial accounts. Genesis
 confirms the password, shows the final whole-disk plan before `ERASE`, writes
-redundant checksummed manifests, then reads back and verifies GPT, FAT32, both
-manifests and the complete UEFI payload. `make genesis-check` installs to a
+redundant checksummed manifest-v4 and plan copies, then reads back and verifies
+GPT, FAT32, both metadata pairs and the complete UEFI payload. The plan can add
+five secondary Dimensions, two Power/Guest accounts, package presets or a
+per-app Custom selection, SDK contracts and an optional detected network
+driver. `make genesis-check` installs to a
 blank disk, verifies the protected baseline, reboots without the ISO, logs in
 with that Operator, and shuts down. Installed boot requires matching valid
 manifest copies, can recover through the backup when the primary is damaged,
@@ -130,7 +137,10 @@ unlock and fail-closed manifest errors before handing off to the normal chooser.
 automatically ejects the installer media before reboot, and directly boots an
 image that already contains a Genesis manifest. Safe physical-disk identity
 selection, VirtIO-block, USB mass storage, BIOS installation, Secure Boot, and
-a mouse-first graphical wizard remain open.
+a mouse-first graphical wizard remain open. Removable Genesis media now detects
+installed ExpOS metadata and offers read-only diagnostics, verified redundant
+metadata repair, authenticated protected-baseline restore, or double-confirmed
+annihilation. See `docs/GENESIS_V2.md` and `docs/SECURITY.md`.
 
 The bounded `Cfc`/`CfcCatalog` model enforces exclusive ownership of registered
 Form and Dimension FINs. ExpScope snapshots that ownership, recovery artifacts
@@ -527,6 +537,8 @@ The feature pass described above does not modify `legacy/alpha32/`.
 | `sdk/` | Rust, Go, C, and Python Form ABI clients plus the `expos` project tool |
 | `docs/FORM_ABI_V1.md` | frozen language-neutral Form ABI v1 contract |
 | `docs/ASL_V1.md` | initial ASL v1 inventory, ownership and interrupt contract |
+| `docs/GENESIS_V2.md` | installer choices, recovery flow and current UI/hardware limits |
+| `docs/SECURITY.md` | implemented hardening, threat coverage and residual trust boundaries |
 | `docs/PACKAGE_ECOSYSTEM.md` | signed registry design and 50-package acceptance bar |
 | `docs/PHILOSOPHY.txt` | source architecture specification |
 | `docs/ARCHITECTURE.md` | implementation and trust boundaries |

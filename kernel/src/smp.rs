@@ -100,6 +100,7 @@ pub fn initialize(platform: Platform) -> usize {
 
 extern "C" fn ap_entry(slot: u64) -> ! {
     let slot = slot as usize;
+    crate::security::enable_cpu_hardening();
     crate::form_runtime::initialize_ap(slot);
     ONLINE.fetch_or(1_u64 << slot, Ordering::Release);
     crate::slog!(

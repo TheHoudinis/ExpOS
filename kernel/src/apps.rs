@@ -143,6 +143,11 @@ const APPS: [PackageApp; PACKAGE_COUNT] = [
     },
 ];
 
+#[cfg(any(test, feature = "genesis-installer"))]
+pub fn package_name(index: usize) -> Option<&'static str> {
+    APPS.get(index).map(|package| package.name)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ManagerAction {
     Changed,
@@ -965,9 +970,11 @@ mod tests {
         assert_eq!(APPS.len(), 20);
         for (index, app) in APPS.iter().enumerate() {
             assert!(!app.name.is_empty());
+            assert_eq!(package_name(index), Some(app.name));
             assert!(!app.summary.is_empty());
             assert!(!APPS[..index].iter().any(|other| other.name == app.name));
         }
+        assert_eq!(package_name(PACKAGE_COUNT), None);
     }
 
     #[test]

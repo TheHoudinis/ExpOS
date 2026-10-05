@@ -32,3 +32,9 @@ order and does not show a model, serial number or stable device identity before
 the whole-disk `ERASE` gate. Do not run the destructive installer against a
 physical machine until identity-based disk selection and physical-hardware
 validation land. VirtIO-block is not implemented.
+
+Genesis v2 prints a preflight overview for x86-64, NX, SMEP, RDRAND, storage,
+GOP and detected PS/2/xHCI keyboard paths. The installed runtime explicitly
+reinitializes the 8042 keyboard controller after a warm Genesis reboot instead
+of assuming firmware left scanning and translation enabled. QEMU coverage is
+not evidence that the same path works on the untested physical systems above.

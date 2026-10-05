@@ -28,6 +28,9 @@ claim that a checkpoint equals a CPU instruction or a fixed number of seconds.
 Loop and iterator exhaustion use a VM abort that Python `try/except` cannot
 swallow. C iterator loops, including `sum(range(...))`, are also charged.
 Exceeding a limit returns to the shell; subsequent scripts get a fresh VM.
+Genesis Minimal and Essentials installations omit this runtime. Everything
+enables it, while Custom can explicitly include or omit it. Paranoid always
+disables it and cannot re-enable it during the boot.
 
 This is an in-kernel interpreter without separate address-space isolation.
 It exposes no raw memory/device/network primitives to scripts; it is not a

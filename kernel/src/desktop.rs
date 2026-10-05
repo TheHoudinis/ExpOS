@@ -629,6 +629,9 @@ fn launcher_item(desktop: &DesktopState, ordinal: usize) -> Option<LauncherItem>
             if app == AppKind::Apps {
                 continue;
             }
+            if !desktop.app_enabled(app) {
+                continue;
+            }
             if cursor == ordinal {
                 return Some(LauncherItem::BuiltIn(app));
             }
@@ -647,7 +650,11 @@ fn launcher_item(desktop: &DesktopState, ordinal: usize) -> Option<LauncherItem>
 
 fn launcher_item_count(desktop: &DesktopState) -> usize {
     let builtins = if desktop.preferences.menu_show_builtins {
-        APP_COUNT - 1
+        AppKind::ALL
+            .iter()
+            .copied()
+            .filter(|app| *app != AppKind::Apps && desktop.app_enabled(*app))
+            .count()
     } else {
         0
     };
@@ -2070,6 +2077,10 @@ impl PointerCursor {
 }
 
 impl DesktopState {
+    fn app_enabled(&self, app: AppKind) -> bool {
+        app != AppKind::Browser || crate::security::browser_allowed()
+    }
+
     const fn locale(&self) -> Locale {
         Locale::from_persisted(self.preferences.locale)
     }
@@ -2080,6 +2091,8 @@ impl DesktopState {
         allow_network: bool,
         cfc: CfcFin,
     ) -> Self {
+        let start_app =
+            start_app.filter(|app| *app != AppKind::Browser || crate::security::browser_allowed());
         let active = start_app.unwrap_or(AppKind::Terminal);
         let preferences =
             DesktopPreferences::from_persistent(state::preferences()).load_ui_extension(cfc);
@@ -2707,6 +2720,11 @@ impl DesktopState {
     }
 
     fn switch_to(&mut self, next: AppKind) {
+        if !self.app_enabled(next) {
+            self.terminal_push("That component is not installed by Genesis.");
+            slog!("EXPOS_APP_DENIED app={} genesis-policy\r\n", next.title());
+            return;
+        }
         self.normalize_fullscreen();
         let was_closed = !self.app_open[next.index()];
         self.app_open[next.index()] = true;
@@ -5381,10 +5399,6 @@ impl DesktopState {
         let count = self.terminal_output_len[index] as usize;
         core::str::from_utf8(&self.terminal_output[index][..count]).ok()
     }
-}
-
-pub fn run(input: &mut Input, start_browser: bool, session: crate::session::Session, cfc: CfcFin) {
-    run_with_network(input, start_browser, session, true, cfc);
 }
 
 pub fn run_with_network(
