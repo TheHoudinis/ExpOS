@@ -59,6 +59,7 @@ impl TrustAnchor {
 fn trust_anchor_for(hostname: &str) -> TrustAnchor {
     const DUCKDUCKGO: &[u8] = b"duckduckgo.com";
     const WIKIPEDIA: &[u8] = b"wikipedia.org";
+    const OPEN_METEO: &[u8] = b"open-meteo.com";
 
     let mut host = hostname.as_bytes();
     if host.last() == Some(&b'.') {
@@ -73,7 +74,7 @@ fn trust_anchor_for(hostname: &str) -> TrustAnchor {
     let is_duckduckgo = in_domain(DUCKDUCKGO);
     if is_duckduckgo {
         TrustAnchor::DigiCertGlobalRootG2
-    } else if in_domain(WIKIPEDIA) {
+    } else if in_domain(WIKIPEDIA) || in_domain(OPEN_METEO) {
         TrustAnchor::IsrgRootX1
     } else {
         TrustAnchor::GlobalSignRootR1
@@ -414,11 +415,21 @@ mod tests {
 
     #[test]
     fn selects_isrg_for_wikipedia_without_trusting_deceptive_suffixes() {
-        for hostname in ["wikipedia.org", "en.wikipedia.org", "EN.WIKIPEDIA.ORG."] {
+        for hostname in [
+            "wikipedia.org",
+            "en.wikipedia.org",
+            "EN.WIKIPEDIA.ORG.",
+            "api.open-meteo.com",
+            "geocoding-api.open-meteo.com",
+        ] {
             assert_eq!(trust_anchor_for(hostname), TrustAnchor::IsrgRootX1);
         }
         assert_eq!(
             trust_anchor_for("wikipedia.org.example.net"),
+            TrustAnchor::GlobalSignRootR1
+        );
+        assert_eq!(
+            trust_anchor_for("open-meteo.com.example.net"),
             TrustAnchor::GlobalSignRootR1
         );
     }

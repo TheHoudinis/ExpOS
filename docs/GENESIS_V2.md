@@ -8,7 +8,7 @@ plan as mandatory, so damaged or disagreeing copies fail closed.
 
 - protection: Easy encrypted, Paranoid encrypted, or Architect-only
   unencrypted development mode;
-- packages: Minimal, Essentials, all twenty built-in Ayo apps, or Custom with
+- packages: Minimal, Essentials, all thirty optional Ayo apps, or Custom with
   independent Browser, ExpPython and per-app selection;
 - optional runtime components: Browser and ExpPython according to the selected
   package/security profile;

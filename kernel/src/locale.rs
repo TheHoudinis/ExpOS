@@ -241,7 +241,7 @@ const ESPERANTO: [&str; 22] = [
     "Instalado finiĝis",
 ];
 
-const CATEGORIES_EN: [&str; 16] = [
+const CATEGORIES_EN: [&str; 17] = [
     "System",
     "Appearance",
     "Network & Wi-Fi",
@@ -258,8 +258,9 @@ const CATEGORIES_EN: [&str; 16] = [
     "About",
     "Command shell",
     "Language & region",
+    "Date & time",
 ];
-const CATEGORIES_RU: [&str; 16] = [
+const CATEGORIES_RU: [&str; 17] = [
     "Система",
     "Внешний вид",
     "Сеть и Wi-Fi",
@@ -276,8 +277,9 @@ const CATEGORIES_RU: [&str; 16] = [
     "О системе",
     "Командная оболочка",
     "Язык и регион",
+    "Дата и время",
 ];
-const CATEGORIES_HE: [&str; 16] = [
+const CATEGORIES_HE: [&str; 17] = [
     "מערכת",
     "מראה",
     "רשת ו-Wi-Fi",
@@ -294,8 +296,9 @@ const CATEGORIES_HE: [&str; 16] = [
     "אודות",
     "מעטפת פקודות",
     "שפה ואזור",
+    "תאריך ושעה",
 ];
-const CATEGORIES_DE: [&str; 16] = [
+const CATEGORIES_DE: [&str; 17] = [
     "System",
     "Darstellung",
     "Netzwerk & Wi-Fi",
@@ -312,8 +315,9 @@ const CATEGORIES_DE: [&str; 16] = [
     "Info",
     "Befehls-Shell",
     "Sprache & Region",
+    "Datum & Uhrzeit",
 ];
-const CATEGORIES_EO: [&str; 16] = [
+const CATEGORIES_EO: [&str; 17] = [
     "Sistemo",
     "Aspekto",
     "Reto kaj Wi-Fi",
@@ -330,6 +334,7 @@ const CATEGORIES_EO: [&str; 16] = [
     "Pri",
     "Komandŝelo",
     "Lingvo kaj regiono",
+    "Dato kaj horo",
 ];
 
 const APPS_EN: [&str; 9] = [

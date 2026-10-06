@@ -219,7 +219,6 @@ pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 }
 
 static SALT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-#[cfg(feature = "genesis-installer")]
 static STORAGE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -334,7 +333,6 @@ pub fn open_storage(
 
 /// Mint independent key, salt or nonce material. RDRAND is mixed when present;
 /// TSC, an atomic sequence and a caller context prevent reuse on small VMs.
-#[cfg(feature = "genesis-installer")]
 pub fn random_material<const N: usize>(context: &[u8]) -> [u8; N] {
     let mut output = [0_u8; N];
     let mut offset = 0;
@@ -395,7 +393,7 @@ fn hardware_random() -> Option<u64> {
     None
 }
 
-#[cfg(feature = "genesis-installer")]
+#[cfg_attr(not(feature = "genesis-installer"), allow(dead_code))]
 pub fn hardware_entropy_available() -> bool {
     hardware_random().is_some()
 }

@@ -21,7 +21,7 @@ GENESIS_ISO := $(BUILD)/ExpOS-v9-x86_64.iso
 OVMF_CODE  ?= /usr/share/edk2/x64/OVMF_CODE.4m.fd
 OVMF_VARS  ?= /usr/share/edk2/x64/OVMF_VARS.4m.fd
 
-.PHONY: all iso genesis-iso genesis-check genesis-display-check run-genesis test check display-check session-check network-check internet-check https-check search-check wikipedia-check persistence-check modern-hardware-check ring3-check run debug clean legacy-alpha-check run-alpha ayo sdk rust-sdk go-sdk c-sdk python-sdk sdk-cli-check kernel-build genesis-kernel-build
+.PHONY: all iso genesis-iso genesis-check genesis-display-check run-genesis test check display-check session-check network-check internet-check https-check weather-check search-check wikipedia-check persistence-check modern-hardware-check ring3-check run debug clean legacy-alpha-check run-alpha ayo sdk rust-sdk go-sdk c-sdk python-sdk sdk-cli-check kernel-build genesis-kernel-build
 
 all: test check display-check session-check network-check persistence-check modern-hardware-check ayo sdk python-runtime-check python-check budget-check ring3-check uefi-check bootmode-check startup-check
 
@@ -364,6 +364,20 @@ https-check: $(ISO)
 	! grep -q "EXPOS_HTTP_ERROR" $(BUILD)/https-serial.log
 	! grep -q "EXPOS_BROWSER_HTTP_ERROR" $(BUILD)/https-serial.log
 	@echo ">>> EXPOS VERIFIED HTTPS TEST PASSED <<<"
+
+weather-check: $(ISO)
+	rm -f $(BUILD)/weather-serial.log
+	rm -f $(BUILD)/weather-state.img
+	truncate -s $(STATE_SIZE) $(BUILD)/weather-state.img
+	set +e; timeout 90 $(QEMU) -drive file=$(BUILD)/weather-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-weather-input.txt > $(BUILD)/weather-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
+	grep -q "\[ok\] Timer installed" $(BUILD)/weather-serial.log
+	grep -q "EXPOS_ABI_CALL call=PACKAGE_TRANSACTION status=ok operation=1 package=20" $(BUILD)/weather-serial.log
+	grep -q "EXPOS_TLS_VERIFIED host=geocoding-api.open-meteo.com version=1.3" $(BUILD)/weather-serial.log
+	grep -q "EXPOS_TLS_VERIFIED host=api.open-meteo.com version=1.3" $(BUILD)/weather-serial.log
+	grep -q "EXPOS_WEATHER_READY bytes=.* provider=open-meteo condition=.* days=5" $(BUILD)/weather-serial.log
+	! grep -q "EXPOS_WEATHER_ERROR" $(BUILD)/weather-serial.log
+	grep -q "EXPOS_COMMAND_OK shutdown" $(BUILD)/weather-serial.log
+	@echo ">>> EXPOS LIVE WEATHER TEST PASSED <<<"
 
 search-check: $(ISO)
 	rm -f $(BUILD)/search-serial.log

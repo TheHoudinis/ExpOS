@@ -302,12 +302,13 @@ either and refuses to run without at least two online CPUs.
   taskbar can occupy any edge, use
   one of nine thicknesses, align running apps at start/center/end, auto-hide and
   reveal at that edge, blend translucently, show horizontal labels, and include
-  RTC seconds. The sixteen-category Settings UI adds coordinated whole-desktop
+  RTC seconds plus date, active-app, Weather and presentation-rate widgets. The
+  seventeen-category Settings UI adds coordinated whole-desktop
   Profiles, dedicated Accessibility, Terminal and Language pages, and a Menu
   page for list, grid, compact-grid and dashboard layout, density, scale,
   content visibility, categories and motion, and computes compact category/row
   viewports so the selected item remains visible at 480p. Appearance, Windows
-  Taskbar, Menu and Profiles expose 1,141 directly working selectable values.
+  Taskbar, Menu, Date & time and Profiles expose 1,172 directly working selectable values.
   Profiles atomically apply Balanced, Compact, Focus, Accessible, Showcase or
   Touch-friendly combinations through the same persisted preference path. Its
   Display page also selects a 60, 75, 120 or 144 Hz compositor presentation
@@ -318,6 +319,10 @@ either and refuses to run without at least two online CPUs.
   only for damaged commits, while full redraws stay paced and VSync remains an
   independent presentation constraint. All three optional features persist and
   default off or Efficient so a fresh state starts on the least expensive path.
+  Weather animation is capped at four damaged frames per second, and repeat
+  refreshes reuse persisted coordinates instead of repeating geocoding.
+  Weather network calls use an exact-host HTTPS allowlist, a requester-bound
+  Handle, three-second refresh throttling and cached geocoding coordinates.
   The graphical Terminal keeps bounded scrollback and command history, exposes
   identity, system, display, network, CPU, application and ExpFS Form
   list/read/write commands, draws the same minimal two-eye `neofetch` art as the

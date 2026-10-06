@@ -1068,11 +1068,7 @@ impl Shell {
                 true
             }
             "ayo" => {
-                println!("ayo v3 is registered as Package Form {}.", AYO_FIN);
-                println!("Commands: install slap yeet files recover glance chill fix ghost");
-                println!("          manifest highfive dodge vibecheck flex");
-                println!("Host TUI: ./ayo/bin/ayo --authority operator");
-                println!("CLI:      ./ayo/bin/ayo --authority operator install <package>");
+                self.ayo(args);
                 true
             }
             "games" | "arcade" => {
@@ -1103,6 +1099,100 @@ impl Shell {
         } else {
             println!("Unknown command '{}'. Type 'help'.", command);
             slog!("EXPOS_COMMAND_ERROR {}\r\n", command);
+        }
+    }
+
+    fn ayo(&mut self, arguments: &str) {
+        let mut words = arguments.split_ascii_whitespace();
+        let operation = words.next().unwrap_or("help");
+        if matches!(operation, "help" | "glance") {
+            println!("ayo v3 Package Form {}", AYO_FIN);
+            println!("ayo list | ayo install/slap <app> | ayo remove/yeet <app>");
+            println!("Thirty desktop apps are available and remain uninstalled until selected.");
+            return;
+        }
+        let mut apps = crate::expfs_store::load_data_form(self.report.cfc_fin, "AyoApps.state")
+            .map(|(bytes, length)| crate::apps::NativeApps::restore_state(&bytes[..length]))
+            .unwrap_or_else(crate::apps::NativeApps::new);
+        if operation == "list" {
+            for index in 0..crate::apps::PACKAGE_COUNT {
+                println!(
+                    "{:>2}. {:<16} {:<16} {}",
+                    index + 1,
+                    crate::apps::package_name(index).unwrap_or("App"),
+                    crate::apps::package_category(index).unwrap_or("Other"),
+                    if apps.installed(index) {
+                        "installed"
+                    } else {
+                        "available"
+                    }
+                );
+            }
+            return;
+        }
+        if self.session.authority() == Authority::Guest {
+            println!("DIESE denied package changes for Guest authority.");
+            slog!(
+                "EXPOS_PACKAGE_AUDIT result=denied authority=Guest operation={}\r\n",
+                operation
+            );
+            return;
+        }
+        let Some(name) = words.next() else {
+            println!("usage: ayo <install|remove> <app>");
+            return;
+        };
+        let Some(index) = crate::apps::NativeApps::find_package(name) else {
+            println!("ayo: package '{}' was not found; run 'ayo list'.", name);
+            return;
+        };
+        let changed = match operation {
+            "install" | "slap" => apps.install(index),
+            "remove" | "yeet" => apps.uninstall(index),
+            _ => {
+                println!("usage: ayo <list|install|remove> [app]");
+                return;
+            }
+        };
+        let mut state = [0_u8; crate::apps::NativeApps::STATE_CAPACITY];
+        let length = apps.encode_state(&mut state);
+        match crate::expfs_store::save_data_form(
+            self.report.cfc_fin,
+            "AyoApps.state",
+            &state[..length],
+        ) {
+            Ok((_fin, revision)) => {
+                println!(
+                    "[ok] {} {} (ExpFS revision {}, {}).",
+                    crate::apps::package_name(index).unwrap_or("App"),
+                    if operation == "install" || operation == "slap" {
+                        if changed {
+                            "installed"
+                        } else {
+                            "already installed"
+                        }
+                    } else if changed {
+                        "removed"
+                    } else {
+                        "was not installed"
+                    },
+                    revision,
+                    if changed {
+                        "state changed"
+                    } else {
+                        "state unchanged"
+                    }
+                );
+                slog!(
+                    "EXPOS_PACKAGE_AUDIT result=ok authority={:?} operation={} package={} changed={} revision={}\r\n",
+                    self.session.authority(),
+                    operation,
+                    crate::apps::package_name(index).unwrap_or("App"),
+                    changed,
+                    revision
+                );
+            }
+            Err(error) => println!("ayo: {}", error.message()),
         }
     }
 

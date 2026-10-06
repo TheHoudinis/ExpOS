@@ -1,4 +1,9 @@
-# ExpOS v9
+# ExpOS v9.1 “Acopolis”
+
+**Acopolis** is the v9.1 feature and hardening update: thirty functional,
+optional Ayo-installed desktop apps; expanded persisted time, regional and
+taskbar customization; a live five-day Open-Meteo Weather experience; tighter
+network/package boundaries; and lower-cost cached weather rendering.
 
 ExpOS is the Form-native operating system described by
 [`docs/PHILOSOPHY.txt`](docs/PHILOSOPHY.txt). The current image contains:
@@ -39,10 +44,13 @@ ExpOS is the Form-native operating system described by
 - a flat dark desktop with list, grid, compact-grid and dashboard application
   menu layouts, direct entries for
   installed Ayo apps, menu density/content/category/motion controls, and a
-  taskbar with movable, closable, minimizable and maximizable windows;
+  taskbar with movable, closable, minimizable and maximizable windows plus
+  optional date, active-app, weather and compositor-rate widgets;
+- a five-day Weather forecast with live conditions, precipitation chances,
+  Celsius/Fahrenheit switching, persisted last results and cached coordinates;
 - an interactive Settings control center for profiles, accessibility,
   appearance, windows, taskbar, display, performance, input, network, Wi-Fi,
-  Bluetooth, privacy, system, terminal, language and menu behavior, including six coordinated
+  Bluetooth, privacy, system, terminal, language, time zone, date/time and menu behavior, including six coordinated
   desktop profiles, 256 coordinated theme palettes, 252 wallpaper variants,
   256 accent colors, 256 backdrop tones, four cursor themes, five font faces
   and three real font weights;
@@ -50,7 +58,7 @@ ExpOS is the Form-native operating system described by
   rasterization, an expanded 8x16 VGA console font, and persisted English,
   Russian, Hebrew, German and Esperanto UI/Genesis locales;
 - Ayo v3 package installation, verification, ownership, rollback and recovery,
-  with a categorized 25-package built-in catalog;
+  with a categorized 57-package built-in catalog;
 - a frozen language-neutral Form ABI v1 plus Rust, Go, C, and Python SDK
   contracts and an `expos build/run/test/package` host-development workflow;
 - a capability-gated RTL8139 network path with Ethernet, ARP, DHCP IPv4,
@@ -182,6 +190,7 @@ make iso            # build the fallback build/expos.iso
 make check          # boot and exercise the command environment
 make display-check  # verify desktop and window lifecycle
 make network-check  # verify ICMP, TCP, HTTP and Browser against a local fixture
+make weather-check  # test shell/GUI Ayo installs and live Open-Meteo weather
 make internet-check # verify live DNS and public HTTP (requires Internet access)
 make https-check    # verify TLS and fetch youtube.com HTML (requires Internet)
 make search-check   # verify DuckDuckGo HTML address-bar search (requires Internet)
@@ -300,7 +309,9 @@ click/sloppy/pointer focus. Off-screen travel is configurable from contained to
 256 px; movement remains bounded so a recovery strip or titlebar stays
 reachable. The Taskbar page controls bottom/top/left/right placement, nine
 panel sizes, start/center/end app alignment, edge-reveal auto-hide,
-translucency, horizontal app labels and hardware-RTC seconds. The cursor shadow
+translucency, horizontal app labels, hardware-RTC seconds and four small widgets.
+The Date & time page adds 16 time zones, 12/24-hour display, a persisted
+15-minute manual correction, regional date formats and week start. The cursor shadow
 is independently switchable. The Menu page controls list/grid layout, density,
 icon scale, built-in and installed-app visibility, categories, motion and hints;
 installed Ayo apps open directly from this launcher rather than a nested Apps
@@ -308,7 +319,7 @@ list. The Profiles page applies Balanced, Compact, Focus, Accessible, Showcase
 or Touch-friendly settings as one persistent transaction while preserving the
 chosen display timing and system visibility. Accessibility gathers contrast,
 font, drag-target, taskbar-target, pointer, motion and hint controls in one
-place. Across the customization pages, 1,141 selectable values are directly
+place. Across the customization pages, 1,172 selectable values are directly
 wired to rendering, geometry or interaction. That includes six named plus 250
 procedural theme palettes, 256 persisted accent colors, 252 wallpaper variants
 across seven procedural patterns, and three named plus 253 procedural backdrop
@@ -317,6 +328,13 @@ total; the schema and desktop counts overlap and are not additive. All palette
 bytes now survive sanitization and reboot instead of collapsing to the legacy
 named subset. Appearance shows an exact palette ID and live color swatch;
 `+`/`-` steps one value and `.`/`,` jumps sixteen for fast exploration.
+
+Weather uses separate requester-bound network authority restricted to the exact
+Open-Meteo geocoding and forecast HTTPS hosts. It validates city input,
+coordinates and observation ranges, rate-limits refreshes before DNS/TCP work,
+caches coordinates for faster repeat forecasts, and exposes a Privacy action to
+erase the saved location and forecast. `Tab` switches Celsius/Fahrenheit and
+Left/Right selects one of five forecast days.
 
 Resolution can be selected as 480p (640x480), 720p (1280x720) or 1080p
 (1920x1080); it is saved immediately and applied when the desktop is reopened.
@@ -336,7 +354,9 @@ frame; **Responsive** permits only partial damaged commits to bypass that
 cadence, while full repaints remain paced and the separate VSync preference is
 still honored. Fresh state uses Efficient presentation with shadows and
 wallpaper effects off, so the desktop begins with the least expensive renderer
-path. These choices persist. With the keyboard, `6` selects Performance, `j`/`k`
+path. Weather refreshes reuse persisted coordinates to skip redundant geocoding,
+and its animation is capped at four damage-only frames per second. These choices
+persist. With the keyboard, `6` selects Performance, `j`/`k`
 select a row, Enter or Space activates it, and `+`/`-` move choices.
 
 ExpDisplay Portal adopts compositor concepts also used by Wayland—client-owned

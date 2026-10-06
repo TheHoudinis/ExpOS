@@ -14,7 +14,7 @@ make build
 ./bin/ayo --authority operator
 ```
 
-The built-in 25-package catalog works offline and every package installs a real
+The built-in 57-package catalog works offline and every package installs a real
 owned `.form` artifact. The TUI accepts a package number or name, `/text` to
 search, `d NAME` for details, `i` for installed packages, and `x NAME` to
 remove one.

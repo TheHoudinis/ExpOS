@@ -51,10 +51,10 @@ func TestBuiltinCatalogHasEcosystemMetadataAndSearch(t *testing.T) {
 	if catalog.Schema != 3 || catalog.Trust != "built-in" {
 		t.Fatalf("unexpected catalog identity: schema=%d trust=%q", catalog.Schema, catalog.Trust)
 	}
-	if len(catalog.Packages) < 45 {
+	if len(catalog.Packages) < 57 {
 		t.Fatalf("native ecosystem regressed to %d packages", len(catalog.Packages))
 	}
-	for _, name := range []string{"Calculator", "PixelPad", "NetScope", "MarkdownPad", "Breakout", "Memory"} {
+	for _, name := range []string{"Calculator", "PixelPad", "NetScope", "MarkdownPad", "Weather", "Timer", "UUIDGen", "Breakout", "Memory"} {
 		pkg, ok := catalog.Find(name)
 		if !ok || len(pkg.ProvidedForms) == 0 || pkg.Artifact == nil {
 			t.Fatalf("%s is not an installable Package Form: %#v", name, pkg)

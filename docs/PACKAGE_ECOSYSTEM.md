@@ -1,8 +1,8 @@
 # Ayo package ecosystem
 
 Ayo v3 is the package trust and transaction layer for ExpOS. The repository
-ships a 25-package seed catalog today. The next ecosystem milestone is **50
-reviewed, working packages**, not 50 placeholder names.
+ships a 57-package seed catalog today, including thirty installable desktop
+tools. The milestone remains reviewed, working packages rather than placeholder names.
 
 The intended public service is `packages.expos.org`; that hostname is a target,
 not a claim that a production service is live. A production deployment should

@@ -32,7 +32,8 @@ pub const AYO_FIN: Fin = Fin::from_u128(0x4159_4F00_0000_0000_0000_0000_0000_000
 
 const APP_COUNT: usize = 9;
 const DESKTOP_UI_STATE: &str = "DesktopUI.state";
-const DESKTOP_UI_MAGIC: [u8; 4] = *b"DUI1";
+const DESKTOP_UI_MAGIC_V1: [u8; 4] = *b"DUI1";
+const DESKTOP_UI_MAGIC_V2: [u8; 4] = *b"DUI2";
 const TERMINAL_HISTORY: usize = 24;
 const TERMINAL_CAPACITY: usize = 96;
 const TERMINAL_SCROLLBACK: usize = 40;
@@ -49,6 +50,8 @@ const LAUNCHER_WIDTH: u16 = 250;
 const LAUNCHER_GRID_WIDTH: u16 = 430;
 const LAUNCHER_HEIGHT: u16 = 410;
 const STABLE_FIN: Fin = Fin::from_u128(0x4449_4D00_0000_0000_0000_0000_0000_0001);
+const WEATHER_ALLOWED_HOSTS: [&str; 2] = ["geocoding-api.open-meteo.com", "api.open-meteo.com"];
+const WEATHER_REQUEST_COOLDOWN_SECONDS: u64 = 3;
 
 #[derive(Clone, Copy)]
 struct BrowserTab {
@@ -165,7 +168,7 @@ impl BrowserContainer {
     }
 
     fn replace(&mut self, document: Document) {
-        self.document = Box::new(document);
+        *self.document = document;
         self.generation = self.generation.saturating_add(1);
     }
 
@@ -191,6 +194,17 @@ impl core::ops::DerefMut for BrowserContainer {
 
 fn taskbar_thickness(preferences: DesktopPreferences) -> i16 {
     state::TASKBAR_SIZES_PX[preferences.taskbar_size.min(8) as usize] as i16
+}
+
+fn taskbar_widget_width(preferences: DesktopPreferences) -> i32 {
+    if preferences.taskbar_placement.vertical() {
+        return 0;
+    }
+    let flags = preferences.taskbar_widgets;
+    i32::from(flags & TASKBAR_WIDGET_DATE != 0) * 66
+        + i32::from(flags & TASKBAR_WIDGET_ACTIVE_APP != 0) * 86
+        + i32::from(flags & TASKBAR_WIDGET_WEATHER != 0) * 68
+        + i32::from(flags & TASKBAR_WIDGET_PERFORMANCE != 0) * 58
 }
 
 fn taskbar_rect(preferences: DesktopPreferences) -> Rect {
@@ -294,7 +308,7 @@ fn taskbar_app_rect(preferences: DesktopPreferences, ordinal: usize, running_cou
     } else {
         dock.width as i32
     };
-    let trailing_reserve = if !preferences.status_visible {
+    let trailing_reserve = (if !preferences.status_visible {
         12
     } else if vertical {
         if preferences.clock_seconds {
@@ -303,10 +317,10 @@ fn taskbar_app_rect(preferences: DesktopPreferences, ordinal: usize, running_cou
             66
         }
     } else if preferences.clock_seconds {
-        80
+        80 + if preferences.clock_24h { 0 } else { 18 }
     } else {
-        62
-    };
+        62 + if preferences.clock_24h { 0 } else { 18 }
+    }) + taskbar_widget_width(preferences);
     let available = (axis_length - 46 - trailing_reserve).max(32);
     let item_extent =
         desired_extent.min((available / running_count.max(1) as i32 - 4).clamp(24, desired_extent));
@@ -693,7 +707,7 @@ fn launcher_capacity(preferences: DesktopPreferences) -> usize {
     launcher_visible_rows(preferences) * launcher_columns(preferences)
 }
 
-const SETTINGS_CATEGORY_COUNT: usize = 16;
+const SETTINGS_CATEGORY_COUNT: usize = 17;
 const CUSTOMIZATION_VALUE_COUNT: usize = state::THEME_PALETTE_CHOICES
     + state::WALLPAPER_VARIANT_CHOICES
     + state::ACCENT_COLOR_CHOICES
@@ -726,7 +740,39 @@ const CUSTOMIZATION_VALUE_COUNT: usize = state::THEME_PALETTE_CHOICES
     + 2 // category labels
     + 2 // tooltips
     + 2 // install feedback
+    + TIMEZONE_LABELS.len()
+    + 2 // 12 / 24 hour clock
+    + DATE_FORMAT_LABELS.len()
+    + 2 // week start
+    + 8 // four taskbar widgets, each on/off
     + CustomizationProfile::ALL.len(); // coordinated whole-desktop profiles
+
+const TASKBAR_WIDGET_DATE: u8 = 1 << 0;
+const TASKBAR_WIDGET_ACTIVE_APP: u8 = 1 << 1;
+const TASKBAR_WIDGET_WEATHER: u8 = 1 << 2;
+const TASKBAR_WIDGET_PERFORMANCE: u8 = 1 << 3;
+const TIMEZONE_LABELS: [&str; 16] = [
+    "UTC-12",
+    "Pacific UTC-8",
+    "Eastern UTC-5",
+    "UTC",
+    "Central Europe UTC+1",
+    "Eastern Europe UTC+2",
+    "Moscow UTC+3",
+    "Gulf UTC+4",
+    "India UTC+5:30",
+    "Bishkek UTC+6",
+    "Bangkok UTC+7",
+    "China UTC+8",
+    "Japan UTC+9",
+    "Sydney UTC+10",
+    "Auckland UTC+12",
+    "Line Islands UTC+14",
+];
+const TIMEZONE_OFFSETS_MINUTES: [i16; 16] = [
+    -720, -480, -300, 0, 60, 120, 180, 240, 330, 360, 420, 480, 540, 600, 720, 840,
+];
+const DATE_FORMAT_LABELS: [&str; 3] = ["YYYY-MM-DD", "DD/MM/YYYY", "MM/DD/YYYY"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsCategory {
@@ -746,6 +792,7 @@ enum SettingsCategory {
     About,
     Terminal,
     Language,
+    Time,
 }
 
 impl SettingsCategory {
@@ -766,6 +813,7 @@ impl SettingsCategory {
         Self::About,
         Self::Terminal,
         Self::Language,
+        Self::Time,
     ];
 
     const fn index(self) -> usize {
@@ -786,6 +834,7 @@ impl SettingsCategory {
             Self::About => 13,
             Self::Terminal => 14,
             Self::Language => 15,
+            Self::Time => 16,
         }
     }
 
@@ -807,6 +856,7 @@ impl SettingsCategory {
             Self::About => "ExpOS system information",
             Self::Terminal => "Font, size, color, and spacing",
             Self::Language => "System and Genesis language",
+            Self::Time => "Clock, time zone, region, and panel widgets",
         }
     }
 
@@ -822,12 +872,13 @@ impl SettingsCategory {
             Self::Performance => 4,
             Self::Input => 5,
             Self::Windows => 8,
-            Self::Taskbar => 7,
+            Self::Taskbar => 11,
             Self::Menu => 9,
-            Self::Privacy => 2,
+            Self::Privacy => 5,
             Self::About => 4,
             Self::Terminal => 5,
             Self::Language => 5,
+            Self::Time => 7,
         }
     }
 
@@ -1388,6 +1439,12 @@ struct DesktopPreferences {
     terminal_foreground: u8,
     terminal_background: u8,
     locale: u8,
+    timezone: u8,
+    clock_24h: bool,
+    clock_offset_quarters: i8,
+    date_format: u8,
+    week_starts_monday: bool,
+    taskbar_widgets: u8,
 }
 
 impl DesktopPreferences {
@@ -1539,6 +1596,12 @@ impl DesktopPreferences {
             terminal_foreground: 0,
             terminal_background: 0,
             locale: crate::locale::active().persisted(),
+            timezone: 3,
+            clock_24h: true,
+            clock_offset_quarters: 0,
+            date_format: 0,
+            week_starts_monday: true,
+            taskbar_widgets: 0,
         }
     }
 
@@ -1547,7 +1610,7 @@ impl DesktopPreferences {
         else {
             return self;
         };
-        if length < 11 || bytes[..4] != DESKTOP_UI_MAGIC {
+        if length < 11 || (bytes[..4] != DESKTOP_UI_MAGIC_V1 && bytes[..4] != DESKTOP_UI_MAGIC_V2) {
             return self;
         }
         self.locale = bytes[4].min(4);
@@ -1560,15 +1623,27 @@ impl DesktopPreferences {
         self.terminal_scale = bytes[8].min(2);
         self.terminal_foreground = bytes[9].min(7);
         self.terminal_background = bytes[10].min(7);
+        if bytes[..4] == DESKTOP_UI_MAGIC_V2 && length >= 17 {
+            self.timezone = bytes[11].min((TIMEZONE_LABELS.len() - 1) as u8);
+            self.clock_24h = bytes[12] != 0;
+            self.clock_offset_quarters = (bytes[13] as i8).clamp(-48, 48);
+            self.date_format = bytes[14].min((DATE_FORMAT_LABELS.len() - 1) as u8);
+            self.week_starts_monday = bytes[15] != 0;
+            self.taskbar_widgets = bytes[16]
+                & (TASKBAR_WIDGET_DATE
+                    | TASKBAR_WIDGET_ACTIVE_APP
+                    | TASKBAR_WIDGET_WEATHER
+                    | TASKBAR_WIDGET_PERFORMANCE);
+        }
         self
     }
 
-    fn encode_ui_extension(self) -> [u8; 11] {
+    fn encode_ui_extension(self) -> [u8; 17] {
         [
-            DESKTOP_UI_MAGIC[0],
-            DESKTOP_UI_MAGIC[1],
-            DESKTOP_UI_MAGIC[2],
-            DESKTOP_UI_MAGIC[3],
+            DESKTOP_UI_MAGIC_V2[0],
+            DESKTOP_UI_MAGIC_V2[1],
+            DESKTOP_UI_MAGIC_V2[2],
+            DESKTOP_UI_MAGIC_V2[3],
             self.locale,
             self.menu_layout,
             self.terminal_font_face.persisted(),
@@ -1576,6 +1651,12 @@ impl DesktopPreferences {
             self.terminal_scale,
             self.terminal_foreground,
             self.terminal_background,
+            self.timezone,
+            u8::from(self.clock_24h),
+            self.clock_offset_quarters as u8,
+            self.date_format,
+            u8::from(self.week_starts_monday),
+            self.taskbar_widgets,
         ]
     }
 
@@ -1598,6 +1679,12 @@ impl DesktopPreferences {
         next.terminal_foreground = self.terminal_foreground;
         next.terminal_background = self.terminal_background;
         next.locale = self.locale;
+        next.timezone = self.timezone;
+        next.clock_24h = self.clock_24h;
+        next.clock_offset_quarters = self.clock_offset_quarters;
+        next.date_format = self.date_format;
+        next.week_starts_monday = self.week_starts_monday;
+        next.taskbar_widgets = self.taskbar_widgets;
 
         match profile {
             CustomizationProfile::Balanced => {}
@@ -1821,6 +1908,7 @@ struct DesktopState {
     app_handles: [u32; APP_COUNT],
     ayo_transaction_handle: Option<u32>,
     browser_network_handle: Option<u32>,
+    apps_network_handle: Option<u32>,
     settings_radio_handle: Option<u32>,
     app_open: [bool; APP_COUNT],
     app_ever_opened: [bool; APP_COUNT],
@@ -1852,6 +1940,7 @@ struct DesktopState {
     browser_find_len: usize,
     browser_find_editing: bool,
     browser_find_match: Option<usize>,
+    last_weather_request_ticks: u64,
     terminal_line: [u8; TERMINAL_CAPACITY],
     terminal_len: usize,
     terminal_output: [[u8; TERMINAL_OUTPUT_CAPACITY]; TERMINAL_SCROLLBACK],
@@ -2178,6 +2267,21 @@ impl DesktopState {
         } else {
             None
         };
+        let apps_network_handle = if allow_network && network::available() {
+            broker
+                .issue_for(
+                    APPS_FIN,
+                    session.authority(),
+                    network::NETWORK_FIN,
+                    STABLE_FIN,
+                    Operations::NETWORK,
+                    u64::MAX,
+                )
+                .ok()
+                .map(|handle| handle.id)
+        } else {
+            None
+        };
         let settings_radio_handle = broker
             .issue_for(
                 SETTINGS_FIN,
@@ -2288,6 +2392,7 @@ impl DesktopState {
             app_handles,
             ayo_transaction_handle,
             browser_network_handle,
+            apps_network_handle,
             settings_radio_handle,
             app_open: core::array::from_fn(|index| start_app == Some(AppKind::ALL[index])),
             app_ever_opened: core::array::from_fn(|index| start_app == Some(AppKind::ALL[index])),
@@ -2321,6 +2426,7 @@ impl DesktopState {
             browser_find_len: 0,
             browser_find_editing: false,
             browser_find_match: None,
+            last_weather_request_ticks: 0,
             terminal_line: [0; TERMINAL_CAPACITY],
             terminal_len: 0,
             terminal_output: [[0; TERMINAL_OUTPUT_CAPACITY]; TERMINAL_SCROLLBACK],
@@ -4430,6 +4536,31 @@ impl DesktopState {
                 );
                 self.settings_notice = "Taskbar clock precision updated.";
             }
+            (SettingsCategory::Taskbar, row @ 7..=10) => {
+                if self.preferences.taskbar_placement.vertical() {
+                    self.settings_notice = "Small widgets are shown on horizontal taskbars.";
+                    self.save_preferences();
+                    return;
+                }
+                let flag = match row {
+                    7 => TASKBAR_WIDGET_DATE,
+                    8 => TASKBAR_WIDGET_ACTIVE_APP,
+                    9 => TASKBAR_WIDGET_WEATHER,
+                    _ => TASKBAR_WIDGET_PERFORMANCE,
+                };
+                self.preferences.taskbar_widgets ^= flag;
+                self.full_redraw_requested = true;
+                self.settings_notice = "Taskbar widget visibility updated.";
+                slog!(
+                    "EXPOS_SETTING_CHANGED key=taskbar-widget-{} value={}\r\n",
+                    row - 7,
+                    if self.preferences.taskbar_widgets & flag != 0 {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                );
+            }
             (SettingsCategory::Menu, 0) => {
                 self.preferences.menu_layout = shift_index(
                     self.preferences.menu_layout,
@@ -4541,6 +4672,57 @@ impl DesktopState {
                     Locale::ALL[row].name()
                 );
             }
+            (SettingsCategory::Time, 0) => {
+                self.preferences.timezone = shift_index(
+                    self.preferences.timezone,
+                    TIMEZONE_LABELS.len() as u8,
+                    direction,
+                );
+                self.full_redraw_requested = true;
+                self.settings_notice = "Time zone and regional clock updated.";
+                slog!(
+                    "EXPOS_SETTING_CHANGED key=timezone value={}\r\n",
+                    TIMEZONE_LABELS[self.preferences.timezone as usize]
+                );
+            }
+            (SettingsCategory::Time, 1) => {
+                self.preferences.clock_24h = !self.preferences.clock_24h;
+                self.full_redraw_requested = true;
+                self.settings_notice = "Clock format updated across the taskbar.";
+            }
+            (SettingsCategory::Time, 2) => {
+                self.preferences.clock_offset_quarters = if direction < 0 {
+                    self.preferences
+                        .clock_offset_quarters
+                        .saturating_sub(1)
+                        .max(-48)
+                } else {
+                    self.preferences
+                        .clock_offset_quarters
+                        .saturating_add(1)
+                        .min(48)
+                };
+                self.full_redraw_requested = true;
+                self.settings_notice = "Manual displayed-time correction updated by 15 minutes.";
+            }
+            (SettingsCategory::Time, 3) => {
+                self.preferences.date_format = shift_index(
+                    self.preferences.date_format,
+                    DATE_FORMAT_LABELS.len() as u8,
+                    direction,
+                );
+                self.full_redraw_requested = true;
+                self.settings_notice = "Regional date format updated.";
+            }
+            (SettingsCategory::Time, 4) => {
+                self.preferences.week_starts_monday = !self.preferences.week_starts_monday;
+                self.settings_notice = "Calendar week start updated.";
+            }
+            (SettingsCategory::Time, 5) => {
+                self.preferences.clock_offset_quarters = 0;
+                self.full_redraw_requested = true;
+                self.settings_notice = "Manual clock correction reset to zero.";
+            }
             (SettingsCategory::Privacy, 0) => {
                 self.browser_line.fill(0);
                 self.browser_len = 0;
@@ -4559,6 +4741,12 @@ impl DesktopState {
                 self.navigate("expos://home", HOME);
                 slog!("EXPOS_SETTING_CHANGED key=browser-data value=cleared\r\n");
                 self.settings_notice = "Browser session data cleared.";
+            }
+            (SettingsCategory::Privacy, 1) => {
+                self.native_apps.clear_weather_data();
+                self.persist_native_apps();
+                slog!("EXPOS_SETTING_CHANGED key=weather-data value=cleared\r\n");
+                self.settings_notice = "Saved weather location and forecast cleared.";
             }
             _ => {}
         }
@@ -4734,7 +4922,7 @@ impl DesktopState {
     }
 
     fn persist_native_apps(&mut self) {
-        let mut state = [0_u8; 32];
+        let mut state = [0_u8; crate::apps::NativeApps::STATE_CAPACITY];
         let length = self.native_apps.encode_state(&mut state);
         match crate::expfs_store::save_data_form(
             self.broker.cfc(),
@@ -4757,46 +4945,179 @@ impl DesktopState {
             crate::apps::ManagerAction::Changed => {}
             crate::apps::ManagerAction::Open => self.switch_to(AppKind::Apps),
             crate::apps::ManagerAction::InstallRequested => {
-                let Some(handle_id) = self.ayo_transaction_handle else {
-                    slog!("EXPOS_ABI_CALL call=PACKAGE_TRANSACTION status=denied reason=no-handle\r\n");
-                    return;
-                };
                 let package = self.native_apps.selected_index();
-                let request = AbiRequest {
-                    version: FORM_ABI_VERSION,
-                    call: AbiCall::PackageTransaction as u16,
-                    caller: PACKAGES_FIN,
-                    handle_id,
-                    // operation=1 installs a signed catalog package; the
-                    // package ordinal is stable inside the built-in catalog.
-                    arguments: [1, package as u64, 0, 0, 0, 0],
-                };
-                let response =
-                    NativeCallGate::new(&self.broker, self.broker.cfc(), AYO_FIN, STABLE_FIN)
-                        .dispatch(request, crate::hardware::timestamp(), |call, arguments| {
-                            if call != AbiCall::PackageTransaction || arguments[0] != 1 {
-                                AbiResponse::status(AbiStatus::Unsupported)
-                            } else {
-                                AbiResponse::ok([arguments[1], 1, 0, 0])
-                            }
-                        });
-                if AbiStatus::from_raw(response.status) == Some(AbiStatus::Ok) {
-                    self.native_apps.commit_install_selected();
-                    self.persist_native_apps();
-                    slog!(
-                        "EXPOS_ABI_CALL call=PACKAGE_TRANSACTION status=ok package={} handle={}\r\n",
-                        package,
-                        handle_id
-                    );
-                } else {
-                    slog!(
-                        "EXPOS_ABI_CALL call=PACKAGE_TRANSACTION status={} package={} handle={}\r\n",
-                        response.status,
-                        package,
-                        handle_id
-                    );
-                }
+                self.transact_native_package(package, true);
             }
+        }
+    }
+
+    fn transact_native_package(&mut self, package: usize, install: bool) -> bool {
+        let Some(handle_id) = self.ayo_transaction_handle else {
+            slog!("EXPOS_ABI_CALL call=PACKAGE_TRANSACTION status=denied reason=no-handle\r\n");
+            return false;
+        };
+        let operation = if install { 1 } else { 2 };
+        let request = AbiRequest {
+            version: FORM_ABI_VERSION,
+            call: AbiCall::PackageTransaction as u16,
+            caller: PACKAGES_FIN,
+            handle_id,
+            arguments: [operation, package as u64, 0, 0, 0, 0],
+        };
+        let response = NativeCallGate::new(&self.broker, self.broker.cfc(), AYO_FIN, STABLE_FIN)
+            .dispatch(request, crate::hardware::timestamp(), |call, arguments| {
+                if call != AbiCall::PackageTransaction
+                    || !matches!(arguments[0], 1 | 2)
+                    || arguments[1] >= crate::apps::PACKAGE_COUNT as u64
+                {
+                    AbiResponse::status(AbiStatus::Unsupported)
+                } else {
+                    AbiResponse::ok([arguments[1], arguments[0], 0, 0])
+                }
+            });
+        if AbiStatus::from_raw(response.status) != Some(AbiStatus::Ok) {
+            slog!(
+                "EXPOS_ABI_CALL call=PACKAGE_TRANSACTION status={} package={} handle={}\r\n",
+                response.status,
+                package,
+                handle_id
+            );
+            return false;
+        }
+        if install {
+            self.native_apps.select_package(package);
+            self.native_apps.commit_install_selected();
+        } else {
+            self.native_apps.uninstall(package);
+        }
+        self.persist_native_apps();
+        slog!(
+            "EXPOS_ABI_CALL call=PACKAGE_TRANSACTION status=ok operation={} package={} name={} handle={}\r\n",
+            operation,
+            package,
+            crate::apps::package_name(package).unwrap_or("invalid"),
+            handle_id
+        );
+        true
+    }
+
+    fn complete_native_app_action(&mut self, action: crate::apps::AppAction) {
+        match action {
+            crate::apps::AppAction::Changed => {}
+            crate::apps::AppAction::WeatherRefresh => self.refresh_weather(),
+        }
+    }
+
+    fn refresh_weather(&mut self) {
+        render_active_window(self);
+        if !radio::snapshot().network_enabled {
+            self.native_apps
+                .weather_failed("Enable Network in Settings, then press Enter again.");
+            slog!("EXPOS_WEATHER_ERROR error=PolicyDisabled\r\n");
+            return;
+        }
+        let Some(handle_id) = self.apps_network_handle else {
+            self.native_apps
+                .weather_failed("Weather did not receive a Network Handle.");
+            slog!("EXPOS_WEATHER_ERROR error=CapabilityDenied\r\n");
+            return;
+        };
+        let now = crate::hardware::timestamp();
+        let cooldown = crate::hardware::clock_info()
+            .tsc_hz
+            .max(1)
+            .saturating_mul(WEATHER_REQUEST_COOLDOWN_SECONDS);
+        if self.last_weather_request_ticks != 0
+            && now.saturating_sub(self.last_weather_request_ticks) < cooldown
+        {
+            self.native_apps
+                .weather_failed("Refresh is limited to one request every three seconds.");
+            slog!("EXPOS_WEATHER_ERROR error=RateLimited\r\n");
+            return;
+        }
+        self.last_weather_request_ticks = now;
+        if self.native_apps.weather_needs_location() {
+            let mut search_url = [0_u8; 512];
+            let Some(search_length) = self.native_apps.weather_search_url(&mut search_url) else {
+                self.native_apps
+                    .weather_failed("The city name is too long.");
+                return;
+            };
+            let search_url = core::str::from_utf8(&search_url[..search_length]).unwrap_or("");
+            let search = match network::https_get_allowlisted(
+                &self.broker,
+                handle_id,
+                APPS_FIN,
+                STABLE_FIN,
+                search_url,
+                &WEATHER_ALLOWED_HOSTS,
+            ) {
+                Ok(response) if (200..300).contains(&response.status) => Box::new(response),
+                Ok(response) => {
+                    self.native_apps
+                        .weather_failed("The Open-Meteo city search returned an error.");
+                    slog!(
+                        "EXPOS_WEATHER_ERROR stage=geocoding status={}\r\n",
+                        response.status
+                    );
+                    return;
+                }
+                Err(error) => {
+                    self.native_apps.weather_failed(error.message());
+                    slog!("EXPOS_WEATHER_ERROR stage=geocoding error={:?}\r\n", error);
+                    return;
+                }
+            };
+            if !self.native_apps.apply_weather_location(search.body()) {
+                slog!("EXPOS_WEATHER_ERROR stage=geocoding error=InvalidResponse\r\n");
+                return;
+            }
+            slog!("EXPOS_WEATHER_LOCATION source=open-meteo\r\n");
+        } else {
+            slog!("EXPOS_WEATHER_LOCATION source=cache\r\n");
+        }
+        render_active_window(self);
+        let mut forecast_url = [0_u8; 512];
+        let Some(forecast_length) = self.native_apps.weather_forecast_url(&mut forecast_url) else {
+            self.native_apps
+                .weather_failed("The forecast request was too long.");
+            return;
+        };
+        let forecast_url = core::str::from_utf8(&forecast_url[..forecast_length]).unwrap_or("");
+        let forecast = match network::https_get_allowlisted(
+            &self.broker,
+            handle_id,
+            APPS_FIN,
+            STABLE_FIN,
+            forecast_url,
+            &WEATHER_ALLOWED_HOSTS,
+        ) {
+            Ok(response) if (200..300).contains(&response.status) => Box::new(response),
+            Ok(response) => {
+                self.native_apps
+                    .weather_failed("The Open-Meteo forecast returned an error.");
+                slog!(
+                    "EXPOS_WEATHER_ERROR stage=forecast status={}\r\n",
+                    response.status
+                );
+                return;
+            }
+            Err(error) => {
+                self.native_apps.weather_failed(error.message());
+                slog!("EXPOS_WEATHER_ERROR stage=forecast error={:?}\r\n", error);
+                return;
+            }
+        };
+        if self.native_apps.apply_weather_forecast(forecast.body()) {
+            self.persist_native_apps();
+            slog!(
+                "EXPOS_WEATHER_READY bytes={} provider=open-meteo condition={} days={}\r\n",
+                forecast.body_len,
+                self.native_apps.weather_condition(),
+                self.native_apps.weather_forecast_days()
+            );
+        } else {
+            slog!("EXPOS_WEATHER_ERROR stage=forecast error=InvalidResponse\r\n");
         }
     }
 
@@ -4863,6 +5184,7 @@ impl DesktopState {
         );
         self.terminal_push("  users display resolution network netstat storage theme history cpus");
         self.terminal_push("  apps ls ps forms read <name> write <name.txt> <text>");
+        self.terminal_push("  ayo list | ayo install <app> | ayo remove <app>");
         self.terminal_push("  echo <text> windowreset displaydebug [on|off] displayrepair");
         self.terminal_push("  open <app> close console shutdown reboot");
         self.terminal_push("Use Up/Down for command history.");
@@ -5188,6 +5510,80 @@ impl DesktopState {
         }
     }
 
+    fn terminal_ayo(&mut self, arguments: &[u8]) {
+        let (operation, package) = split_command(arguments);
+        if operation.is_empty()
+            || operation.eq_ignore_ascii_case(b"help")
+            || operation.eq_ignore_ascii_case(b"glance")
+        {
+            self.terminal_push("Ayo: list, install/slap <app>, remove/yeet <app>, open <app>");
+            self.terminal_push("Apps are not installed until you choose them.");
+            return;
+        }
+        if operation.eq_ignore_ascii_case(b"list") {
+            self.terminal_push("Ayo catalog:");
+            for index in 0..crate::apps::PACKAGE_COUNT {
+                let installed = if self.native_apps.installed(index) {
+                    " [installed]"
+                } else {
+                    ""
+                };
+                self.terminal_push_parts(&[
+                    "  ",
+                    crate::apps::package_name(index).unwrap_or("App"),
+                    " / ",
+                    crate::apps::package_category(index).unwrap_or("Other"),
+                    installed,
+                ]);
+            }
+            return;
+        }
+        let Ok(package) = core::str::from_utf8(trim_ascii(package)) else {
+            self.terminal_push("Package name must be UTF-8.");
+            return;
+        };
+        let Some(index) = crate::apps::NativeApps::find_package(package) else {
+            self.terminal_push("Package not found. Run: ayo list");
+            return;
+        };
+        if operation.eq_ignore_ascii_case(b"install") || operation.eq_ignore_ascii_case(b"slap") {
+            if self.transact_native_package(index, true) {
+                self.terminal_push_parts(&[
+                    "Installed ",
+                    crate::apps::package_name(index).unwrap_or("App"),
+                    ".",
+                ]);
+            } else {
+                self.terminal_push("Ayo install was denied by the package Handle.");
+            }
+        } else if operation.eq_ignore_ascii_case(b"remove")
+            || operation.eq_ignore_ascii_case(b"yeet")
+        {
+            if !self.native_apps.installed(index) {
+                self.terminal_push("That app is not installed.");
+            } else if self.transact_native_package(index, false) {
+                self.terminal_push_parts(&[
+                    "Removed ",
+                    crate::apps::package_name(index).unwrap_or("App"),
+                    ".",
+                ]);
+            }
+        } else if operation.eq_ignore_ascii_case(b"open") {
+            if self.native_apps.activate_installed(index) {
+                self.terminal_push_parts(&[
+                    "Opening ",
+                    crate::apps::package_name(index).unwrap_or("App"),
+                    ".",
+                ]);
+                self.switch_to(AppKind::Apps);
+            } else {
+                self.terminal_push("Install that app first with: ayo install <app>");
+            }
+        } else {
+            self.terminal_push("usage: ayo <list|install|remove|open> [app]");
+        }
+    }
+
     fn execute_terminal_command(&mut self, command: &[u8]) {
         let (name, arguments) = split_command(command);
         if let Ok(name) = core::str::from_utf8(name) {
@@ -5245,6 +5641,8 @@ impl DesktopState {
             self.terminal_read_form(arguments);
         } else if name.eq_ignore_ascii_case(b"write") {
             self.terminal_write_form(arguments);
+        } else if name.eq_ignore_ascii_case(b"ayo") {
+            self.terminal_ayo(arguments);
         } else if name.eq_ignore_ascii_case(b"apps") || name.eq_ignore_ascii_case(b"ls") {
             self.terminal_push("browser terminal forms packages settings system games notes");
         } else if name.eq_ignore_ascii_case(b"ps") {
@@ -5286,10 +5684,23 @@ impl DesktopState {
             if let Some(app) = parse_app(arguments) {
                 self.terminal_push_parts(&["Opening ", app.localized_label(self.locale()), "."]);
                 self.switch_to(app);
+            } else if let Ok(name) = core::str::from_utf8(trim_ascii(arguments)) {
+                if let Some(index) = crate::apps::NativeApps::find_package(name) {
+                    if self.native_apps.activate_installed(index) {
+                        self.terminal_push_parts(&[
+                            "Opening ",
+                            crate::apps::package_name(index).unwrap_or("App"),
+                            ".",
+                        ]);
+                        self.switch_to(AppKind::Apps);
+                    } else {
+                        self.terminal_push("That Ayo app is not installed.");
+                    }
+                } else {
+                    self.terminal_push("usage: open <built-in or installed Ayo app>");
+                }
             } else {
-                self.terminal_push(
-                    "usage: open <browser|forms|packages|settings|system|games|notes>",
-                );
+                self.terminal_push("usage: open <built-in or installed Ayo app>");
             }
         } else if name.eq_ignore_ascii_case(b"close") || name.eq_ignore_ascii_case(b"exit") {
             self.close_active();
@@ -5511,6 +5922,9 @@ fn run_session(
     let mut rendered_clock = crate::hardware::rtc_time();
     let clock_poll_ticks = clock.tsc_hz.max(1);
     let mut next_clock_poll = crate::hardware::timestamp().saturating_add(clock_poll_ticks);
+    let weather_animation_ticks = (clock.tsc_hz / 4).max(1);
+    let mut next_weather_animation =
+        crate::hardware::timestamp().saturating_add(weather_animation_ticks);
 
     while !desktop.should_exit {
         let Some(event) = input.poll_event() else {
@@ -5537,10 +5951,18 @@ fn run_session(
                 && desktop.games.tick(now)
             {
                 render_active_window(&mut desktop);
+            } else if now >= next_weather_animation
+                && desktop.preferences.animation_level != 0
+                && desktop.active == AppKind::Apps
+                && desktop.app_is_visible(AppKind::Apps)
+                && desktop.native_apps.weather_animating()
+            {
+                next_weather_animation = now.saturating_add(weather_animation_ticks);
+                render_active_window(&mut desktop);
             } else {
                 let _ = desktop.frame_pacer.decide(now, false);
+                core::hint::spin_loop();
             }
-            core::hint::spin_loop();
             continue;
         };
         let key = match event {
@@ -5660,10 +6082,11 @@ fn run_session(
         }
         if desktop.active == AppKind::Apps && desktop.app_is_visible(AppKind::Apps) {
             let generation = desktop.native_apps.persistence_generation();
-            if desktop.native_apps.handle_app_key(key) {
+            if let Some(action) = desktop.native_apps.handle_app_key(key) {
                 if desktop.native_apps.persistence_generation() != generation {
                     desktop.persist_native_apps();
                 }
+                desktop.complete_native_app_action(action);
                 render_active_window(&mut desktop);
                 continue;
             }
@@ -8255,6 +8678,51 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                     available: true,
                 },
             );
+            for (row, label, description, flag) in [
+                (
+                    7,
+                    "Date widget",
+                    "Show the selected regional date beside the clock",
+                    TASKBAR_WIDGET_DATE,
+                ),
+                (
+                    8,
+                    "Active app widget",
+                    "Show the focused application name",
+                    TASKBAR_WIDGET_ACTIVE_APP,
+                ),
+                (
+                    9,
+                    "Weather widget",
+                    "Show the latest Weather app temperature",
+                    TASKBAR_WIDGET_WEATHER,
+                ),
+                (
+                    10,
+                    "Performance widget",
+                    "Show the selected compositor frame target",
+                    TASKBAR_WIDGET_PERFORMANCE,
+                ),
+            ] {
+                settings_row(
+                    desktop,
+                    content_x,
+                    y,
+                    content_width,
+                    row,
+                    label,
+                    description,
+                    if desktop.preferences.taskbar_widgets & flag != 0 {
+                        "On"
+                    } else {
+                        "Off"
+                    },
+                    SettingControl::Toggle {
+                        on: desktop.preferences.taskbar_widgets & flag != 0,
+                        available: !desktop.preferences.taskbar_placement.vertical(),
+                    },
+                );
+            }
         }
         SettingsCategory::Menu => {
             settings_row(
@@ -8473,6 +8941,98 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 );
             }
         }
+        SettingsCategory::Time => {
+            let mut offset_buffer = [0_u8; 16];
+            let offset_label = format_signed_minutes(
+                desktop.preferences.clock_offset_quarters as i16 * 15,
+                &mut offset_buffer,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                0,
+                "Time zone",
+                "Apply a real regional UTC offset to the hardware clock",
+                TIMEZONE_LABELS[desktop.preferences.timezone as usize],
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                1,
+                "Clock format",
+                "Use a 12-hour clock with AM/PM or a 24-hour clock",
+                if desktop.preferences.clock_24h {
+                    "24 hour"
+                } else {
+                    "12 hour"
+                },
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                2,
+                "Manual time correction",
+                "Adjust displayed local time in 15-minute steps",
+                offset_label,
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                3,
+                "Date format",
+                "Choose international, day-first, or month-first dates",
+                DATE_FORMAT_LABELS[desktop.preferences.date_format as usize],
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                4,
+                "Week starts",
+                "Choose the first day used by calendars",
+                if desktop.preferences.week_starts_monday {
+                    "Monday"
+                } else {
+                    "Sunday"
+                },
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                5,
+                "Reset correction",
+                "Return the manual display correction to zero",
+                "Reset",
+                SettingControl::Action { available: true },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                6,
+                "Hardware clock",
+                "CMOS remains the trusted base; regional changes are non-destructive",
+                "Ready",
+                SettingControl::Status { ready: true },
+            );
+        }
         SettingsCategory::Privacy => {
             settings_row(
                 desktop,
@@ -8491,6 +9051,39 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 y,
                 content_width,
                 1,
+                "Clear weather data",
+                "Remove the saved city, coordinates, and cached forecast",
+                "Clear",
+                SettingControl::Action { available: true },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                2,
+                "App network isolation",
+                "Weather is restricted to two exact HTTPS provider hosts",
+                "Enforced",
+                SettingControl::Status { ready: true },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                3,
+                "Request throttling",
+                "Weather refreshes are rate-limited before any DNS or TCP work",
+                "3 seconds",
+                SettingControl::Status { ready: true },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                4,
                 "Telemetry",
                 "ExpOS does not send usage or settings data",
                 "Off",
@@ -8969,7 +9562,7 @@ fn draw_dock(desktop: &DesktopState) {
         } else {
             color::MUTED
         };
-        let clock = crate::hardware::rtc_time();
+        let clock = adjusted_time(desktop.preferences);
         if desktop.preferences.taskbar_placement.vertical() {
             let clock_y = y + height
                 - if desktop.preferences.clock_seconds {
@@ -8977,7 +9570,14 @@ fn draw_dock(desktop: &DesktopState) {
                 } else {
                     46
                 };
-            draw_two_digits(x + (width - 12) / 2, clock_y, clock.hour, color::INK);
+            let mut hour = clock.hour;
+            if !desktop.preferences.clock_24h {
+                hour %= 12;
+                if hour == 0 {
+                    hour = 12;
+                }
+            }
+            draw_two_digits(x + (width - 12) / 2, clock_y, hour, color::INK);
             draw_two_digits(x + (width - 12) / 2, clock_y + 16, clock.minute, color::INK);
             if desktop.preferences.clock_seconds {
                 draw_two_digits(
@@ -8987,19 +9587,98 @@ fn draw_dock(desktop: &DesktopState) {
                     color::MUTED,
                 );
             }
+            if !desktop.preferences.clock_24h {
+                framebuffer::text(
+                    x + (width - 6) / 2,
+                    clock_y
+                        + if desktop.preferences.clock_seconds {
+                            46
+                        } else {
+                            32
+                        },
+                    if clock.hour >= 12 { "P" } else { "A" },
+                    color::MUTED,
+                    1,
+                );
+            }
             framebuffer::rect(x + (width - 7) / 2, clock_y - 13, 7, 7, status_color);
         } else {
             let clock_width = if desktop.preferences.clock_seconds {
                 48
             } else {
                 30
-            };
+            } + if desktop.preferences.clock_24h { 0 } else { 18 };
             let clock_x = x + width - clock_width - 12;
             let clock_y = y + (height - 8) / 2;
-            draw_clock(clock_x, clock_y, clock, desktop.preferences.clock_seconds);
+            draw_clock(
+                clock_x,
+                clock_y,
+                clock,
+                desktop.preferences.clock_seconds,
+                desktop.preferences.clock_24h,
+            );
             framebuffer::rect(clock_x - 15, clock_y, 7, 7, status_color);
+            let mut widget_right = clock_x - 22;
+            if desktop.preferences.taskbar_widgets & TASKBAR_WIDGET_DATE != 0 {
+                widget_right -= 66;
+                draw_short_date(
+                    widget_right + 4,
+                    clock_y,
+                    clock,
+                    desktop.preferences.date_format,
+                    color::MUTED,
+                );
+            }
+            if desktop.preferences.taskbar_widgets & TASKBAR_WIDGET_ACTIVE_APP != 0 {
+                widget_right -= 86;
+                let label = desktop.active.localized_label(desktop.locale());
+                framebuffer::text(
+                    widget_right + 4,
+                    clock_y,
+                    browser_text_prefix(label, 12),
+                    desktop.active.accent(),
+                    1,
+                );
+            }
+            if desktop.preferences.taskbar_widgets & TASKBAR_WIDGET_WEATHER != 0 {
+                widget_right -= 68;
+                if let Some(temperature) = desktop.native_apps.weather_temperature_display() {
+                    draw_compact_temperature(
+                        widget_right + 4,
+                        clock_y,
+                        temperature,
+                        desktop.native_apps.weather_unit_label(),
+                        color::CYAN,
+                    );
+                } else {
+                    framebuffer::text(widget_right + 4, clock_y, "WEATHER --", color::MUTED, 1);
+                }
+            }
+            if desktop.preferences.taskbar_widgets & TASKBAR_WIDGET_PERFORMANCE != 0 {
+                widget_right -= 58;
+                framebuffer::text(widget_right + 4, clock_y, "FPS", color::MUTED, 1);
+                draw_number(
+                    widget_right + 30,
+                    clock_y,
+                    desktop.preferences.refresh_rate.hz() as u64,
+                    color::GREEN,
+                );
+            }
         }
     }
+}
+
+fn draw_compact_temperature(x: i32, y: i32, value: i16, unit: &str, ink: u32) {
+    if value < 0 {
+        framebuffer::text(x, y, "-", ink, 1);
+    }
+    draw_number(
+        x + if value < 0 { 6 } else { 0 },
+        y,
+        (value.unsigned_abs() / 10) as u64,
+        ink,
+    );
+    framebuffer::text(x + 28, y, unit, ink, 1);
 }
 
 fn draw_two_digits(x: i32, y: i32, value: u8, color: u32) {
@@ -9008,14 +9687,70 @@ fn draw_two_digits(x: i32, y: i32, value: u8, color: u32) {
     framebuffer::text(x, y, text, color, 1);
 }
 
-fn draw_clock(x: i32, y: i32, time: crate::hardware::RtcTime, seconds: bool) {
-    let mut bytes = [b'0'; 8];
-    bytes[0] = b'0' + time.hour / 10;
-    bytes[1] = b'0' + time.hour % 10;
+fn days_in_desktop_month(year: u16, month: u8) -> u8 {
+    match month {
+        2 if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) => {
+            29
+        }
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+fn adjusted_time(preferences: DesktopPreferences) -> crate::hardware::RtcTime {
+    let mut time = crate::hardware::rtc_time();
+    let timezone = TIMEZONE_OFFSETS_MINUTES[preferences.timezone.min(15) as usize] as i32;
+    let manual = preferences.clock_offset_quarters as i32 * 15;
+    let mut minutes = time.hour as i32 * 60 + time.minute as i32 + timezone + manual;
+    while minutes < 0 {
+        minutes += 24 * 60;
+        if time.day > 1 {
+            time.day -= 1;
+        } else {
+            if time.month > 1 {
+                time.month -= 1;
+            } else {
+                time.month = 12;
+                time.year = time.year.saturating_sub(1);
+            }
+            time.day = days_in_desktop_month(time.year, time.month);
+        }
+    }
+    while minutes >= 24 * 60 {
+        minutes -= 24 * 60;
+        if time.day < days_in_desktop_month(time.year, time.month) {
+            time.day += 1;
+        } else {
+            time.day = 1;
+            if time.month < 12 {
+                time.month += 1;
+            } else {
+                time.month = 1;
+                time.year = time.year.saturating_add(1);
+            }
+        }
+    }
+    time.hour = (minutes / 60) as u8;
+    time.minute = (minutes % 60) as u8;
+    time
+}
+
+fn draw_clock(x: i32, y: i32, time: crate::hardware::RtcTime, seconds: bool, clock_24h: bool) {
+    let mut bytes = [b'0'; 11];
+    let mut hour = time.hour;
+    if !clock_24h {
+        hour %= 12;
+        if hour == 0 {
+            hour = 12;
+        }
+    }
+    bytes[0] = b'0' + hour / 10;
+    bytes[1] = b'0' + hour % 10;
     bytes[2] = b':';
     bytes[3] = b'0' + time.minute / 10;
     bytes[4] = b'0' + time.minute % 10;
-    let length = if seconds {
+    let mut length = if seconds {
         bytes[5] = b':';
         bytes[6] = b'0' + time.second / 10;
         bytes[7] = b'0' + time.second % 10;
@@ -9023,8 +9758,59 @@ fn draw_clock(x: i32, y: i32, time: crate::hardware::RtcTime, seconds: bool) {
     } else {
         5
     };
+    if !clock_24h {
+        bytes[length] = b' ';
+        bytes[length + 1] = if time.hour >= 12 { b'P' } else { b'A' };
+        bytes[length + 2] = b'M';
+        length += 3;
+    }
     let text = core::str::from_utf8(&bytes[..length]).unwrap_or("--:--");
     framebuffer::text(x, y, text, color::INK, 1);
+}
+
+fn draw_short_date(x: i32, y: i32, time: crate::hardware::RtcTime, format: u8, ink: u32) {
+    let mut bytes = [b'0'; 10];
+    let year = time.year;
+    let (first, second, separator) = match format {
+        1 => (time.day, time.month, b'/'),
+        2 => (time.month, time.day, b'/'),
+        _ => {
+            bytes[0] = b'0' + ((year / 1000) % 10) as u8;
+            bytes[1] = b'0' + ((year / 100) % 10) as u8;
+            bytes[2] = b'0' + ((year / 10) % 10) as u8;
+            bytes[3] = b'0' + (year % 10) as u8;
+            bytes[4] = b'-';
+            bytes[5] = b'0' + time.month / 10;
+            bytes[6] = b'0' + time.month % 10;
+            bytes[7] = b'-';
+            bytes[8] = b'0' + time.day / 10;
+            bytes[9] = b'0' + time.day % 10;
+            framebuffer::text(x, y, core::str::from_utf8(&bytes).unwrap_or("----"), ink, 1);
+            return;
+        }
+    };
+    bytes[0] = b'0' + first / 10;
+    bytes[1] = b'0' + first % 10;
+    bytes[2] = separator;
+    bytes[3] = b'0' + second / 10;
+    bytes[4] = b'0' + second % 10;
+    bytes[5] = separator;
+    bytes[6] = b'0' + ((year / 1000) % 10) as u8;
+    bytes[7] = b'0' + ((year / 100) % 10) as u8;
+    bytes[8] = b'0' + ((year / 10) % 10) as u8;
+    bytes[9] = b'0' + (year % 10) as u8;
+    framebuffer::text(x, y, core::str::from_utf8(&bytes).unwrap_or("----"), ink, 1);
+}
+
+fn format_signed_minutes(minutes: i16, output: &mut [u8; 16]) -> &str {
+    let absolute = minutes.unsigned_abs();
+    output[0] = if minutes < 0 { b'-' } else { b'+' };
+    output[1] = b'0' + ((absolute / 60) / 10) as u8;
+    output[2] = b'0' + ((absolute / 60) % 10) as u8;
+    output[3] = b':';
+    output[4] = b'0' + ((absolute % 60) / 10) as u8;
+    output[5] = b'0' + (absolute % 10) as u8;
+    core::str::from_utf8(&output[..6]).unwrap_or("+00:00")
 }
 
 fn draw_launcher(desktop: &DesktopState) {
@@ -9639,24 +10425,31 @@ mod tests {
         assert!(!preferences.wallpaper_effects);
         assert!(!preferences.responsive_presentation);
         assert_eq!(preferences.presentation_policy_label(), "Efficient");
-        assert_eq!(SettingsCategory::ALL.len(), 16);
+        assert_eq!(SettingsCategory::ALL.len(), 17);
         assert_eq!(SettingsCategory::Performance.index(), 5);
         assert_eq!(SettingsCategory::Performance.row_count(), 4);
     }
 
     #[test]
     fn customization_pages_expose_more_than_one_thousand_real_values() {
-        assert_eq!(CUSTOMIZATION_VALUE_COUNT, 1_141);
+        assert_eq!(CUSTOMIZATION_VALUE_COUNT, 1_172);
         const { assert!(CUSTOMIZATION_VALUE_COUNT >= 1_000) };
         const { assert!(state::CUSTOMIZATION_SELECTABLE_VALUES >= 1_000) };
         assert_eq!(SettingsCategory::Profiles.row_count(), 6);
         assert_eq!(SettingsCategory::Appearance.row_count(), 8);
         assert_eq!(SettingsCategory::Accessibility.row_count(), 9);
         assert_eq!(SettingsCategory::Windows.row_count(), 8);
-        assert_eq!(SettingsCategory::Taskbar.row_count(), 7);
+        assert_eq!(SettingsCategory::Taskbar.row_count(), 11);
         assert_eq!(SettingsCategory::Menu.row_count(), 9);
         assert_eq!(SettingsCategory::Terminal.row_count(), 5);
         assert_eq!(SettingsCategory::Language.row_count(), 5);
+        assert_eq!(SettingsCategory::Time.row_count(), 7);
+        let preferences = DesktopPreferences::from_persistent(state::PersistentPreferences::new());
+        let extension = preferences.encode_ui_extension();
+        assert_eq!(&extension[..4], b"DUI2");
+        assert!(preferences.clock_24h);
+        let mut label = [0_u8; 16];
+        assert_eq!(format_signed_minutes(345, &mut label), "+05:45");
     }
 
     #[test]

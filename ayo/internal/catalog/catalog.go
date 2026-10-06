@@ -95,6 +95,16 @@ func Builtin() Catalog {
 		{Name: "MarkdownPad", Version: "1.0.0", Summary: "Tiny native Markdown scratchpad", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"MarkdownPadInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
 		{Name: "JsonInspect", Version: "1.0.0", Summary: "Bounded JSON framing inspector", Capabilities: []string{"render", "input", "inspect"}, ProvidedForms: []string{"JsonInspectInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
 		{Name: "HashLab", Version: "1.0.0", Summary: "Deterministic FNV-1a fingerprint tool", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"HashLabInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "Weather", Version: "1.0.0", Summary: "Live Open-Meteo weather with animated conditions", Capabilities: []string{"render", "input", "network"}, ProvidedForms: []string{"WeatherInterface"}, Dependencies: []string{"Network@>=2.1.0", "PrismDE@>=1.2.0"}},
+		{Name: "Timer", Version: "1.0.0", Summary: "Configurable pauseable countdown timer", Capabilities: []string{"render", "input", "read"}, ProvidedForms: []string{"TimerInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "TipCalculator", Version: "1.0.0", Summary: "Bill split and tip calculator", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"TipCalculatorInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "PasswordGen", Version: "1.0.0", Summary: "Bounded password generator backed by ExpOS entropy", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"PasswordGenInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "Dice", Version: "1.0.0", Summary: "Native virtual dice roller", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"DiceInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "DateCalc", Version: "1.0.0", Summary: "Gregorian weekday calculator", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"DateCalcInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "TextDiff", Version: "1.0.0", Summary: "Bounded side-by-side text comparison", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"TextDiffInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "SubnetCalc", Version: "1.0.0", Summary: "IPv4 network mask and broadcast calculator", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"SubnetCalcInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "Morse", Version: "1.0.0", Summary: "International Morse code encoder", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"MorseInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "UUIDGen", Version: "1.0.0", Summary: "Random RFC 4122 version 4 UUID generator", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"UUIDGenInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
 		{Name: "Breakout", Version: "1.0.0", Summary: "Block Forms native arcade game", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"BreakoutGame"}, Dependencies: []string{"GameHub@>=1.0.0"}},
 		{Name: "Memory", Version: "1.0.0", Summary: "Form pairs native memory game", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"MemoryGame"}, Dependencies: []string{"GameHub@>=1.0.0"}},
 	}}
@@ -237,16 +247,18 @@ func (catalog Catalog) Search(query string) []Package {
 
 func builtinCategory(name string) string {
 	switch name {
-	case "ExpEdit", "TextLab", "TextCase", "WordCount", "MarkdownPad":
+	case "ExpEdit", "TextLab", "TextCase", "WordCount", "MarkdownPad", "TextDiff":
 		return "Editors"
-	case "GoSDK", "RustSDK", "CSDK", "PythonSDK", "DeveloperKit", "FormMap", "BaseConvert", "JsonInspect", "HashLab":
+	case "GoSDK", "RustSDK", "CSDK", "PythonSDK", "DeveloperKit", "FormMap", "BaseConvert", "JsonInspect", "HashLab", "UUIDGen":
 		return "Developer tools"
 	case "ExpPython":
 		return "Languages"
 	case "GameHub", "Snake", "Pong", "Breakout", "Memory":
 		return "Games"
-	case "Network", "Browser", "NetScope":
+	case "Network", "Browser", "NetScope", "Weather", "SubnetCalc":
 		return "Networking"
+	case "PasswordGen":
+		return "Security"
 	case "ExpDisplay", "RenderKit", "MouseKit", "PrismDE", "PrismTheme", "ColorLab", "PixelPad":
 		return "Graphics"
 	default:

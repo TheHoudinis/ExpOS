@@ -108,6 +108,7 @@ pub enum NetworkError {
     TlsHandshake,
     TlsCertificate,
     TlsProtocol,
+    EndpointDenied,
     MalformedHttp,
 }
 
@@ -138,6 +139,7 @@ impl NetworkError {
             Self::TlsHandshake => "TLS 1.3 handshake failed",
             Self::TlsCertificate => "TLS certificate or hostname verification failed",
             Self::TlsProtocol => "TLS peer returned an unsupported or malformed record",
+            Self::EndpointDenied => "the app Network Handle does not allow this endpoint",
             Self::MalformedHttp => "malformed or incomplete HTTP response",
         }
     }
@@ -1899,6 +1901,37 @@ pub fn http_get(
 ) -> Result<HttpResponse, NetworkError> {
     authorize_network(broker, handle_id, requester, dimension)?;
     let parsed = parse_http_url(url)?;
+    http_get_authorized(parsed)
+}
+
+/// Perform an HTTPS GET whose destination is constrained to an exact host
+/// allowlist. This is used by narrow app Handles so a compromised UI parser
+/// cannot turn a provider-specific capability into ambient web access.
+pub fn https_get_allowlisted(
+    broker: &CapabilityBroker,
+    handle_id: u32,
+    requester: Fin,
+    dimension: Fin,
+    url: &str,
+    allowed_hosts: &[&str],
+) -> Result<HttpResponse, NetworkError> {
+    authorize_network(broker, handle_id, requester, dimension)?;
+    let parsed = parse_http_url(url)?;
+    if !https_endpoint_allowed(parsed, allowed_hosts) {
+        return Err(NetworkError::EndpointDenied);
+    }
+    http_get_authorized(parsed)
+}
+
+fn https_endpoint_allowed(parsed: HttpUrl<'_>, allowed_hosts: &[&str]) -> bool {
+    parsed.scheme == HttpScheme::Https
+        && parsed.port == HttpScheme::Https.default_port()
+        && allowed_hosts
+            .iter()
+            .any(|host| parsed.host.eq_ignore_ascii_case(host))
+}
+
+fn http_get_authorized(parsed: HttpUrl<'_>) -> Result<HttpResponse, NetworkError> {
     let mut request = [0_u8; HTTP_REQUEST_CAPACITY];
     let mut request_length = 0;
     append_bytes(&mut request, &mut request_length, b"GET ")?;
@@ -2869,5 +2902,30 @@ mod tests {
         assert_eq!(response.status, 302);
         assert_eq!(response.location(), Some("/next?q=1"));
         assert!(response.body().is_empty());
+    }
+
+    #[test]
+    fn app_endpoint_allowlist_requires_exact_https_default_port() {
+        let allowed = ["api.open-meteo.com", "geocoding-api.open-meteo.com"];
+        for url in [
+            "https://api.open-meteo.com/v1/forecast",
+            "https://GEOCODING-API.OPEN-METEO.COM/v1/search",
+        ] {
+            assert!(https_endpoint_allowed(
+                parse_http_url(url).unwrap(),
+                &allowed
+            ));
+        }
+        for url in [
+            "http://api.open-meteo.com/v1/forecast",
+            "https://api.open-meteo.com:444/v1/forecast",
+            "https://api.open-meteo.com.example.net/v1/forecast",
+            "https://open-meteo.com/v1/forecast",
+        ] {
+            assert!(!https_endpoint_allowed(
+                parse_http_url(url).unwrap(),
+                &allowed
+            ));
+        }
     }
 }

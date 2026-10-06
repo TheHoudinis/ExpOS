@@ -353,7 +353,7 @@ pub fn seed_genesis_plan(
     let mut app_bytes = [0_u8; FORM_CONTENT_CAPACITY];
     app_bytes[..4].copy_from_slice(b"AYO1");
     app_bytes[4..8].copy_from_slice(&plan.initial_apps.to_le_bytes());
-    app_bytes[8] = plan.initial_apps.trailing_zeros().min(19) as u8;
+    app_bytes[8] = plan.initial_apps.trailing_zeros().min(29) as u8;
     let mut apps_form = Form::new(APPS_FIN, "AyoApps.state", FormKind::Data);
     apps_form.revision = 1;
     snapshot.forms[1] = Some(StoredForm {
