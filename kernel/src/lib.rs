@@ -12,6 +12,7 @@ extern crate alloc;
 mod allocator;
 mod apps;
 mod asl;
+mod audio;
 pub(crate) mod boot;
 mod compat;
 mod crypto;
@@ -155,6 +156,16 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
         if online_cpus == 1 { "" } else { "s" }
     );
     asl::initialize();
+    let audio = audio::initialize();
+    println!(
+        "[{}] audio: {}",
+        if audio.backend == audio::Backend::Unavailable {
+            "warn"
+        } else {
+            "ok"
+        },
+        audio.backend.label()
+    );
     let _ = usb::initialize();
     println!("[ok] boot handoff @ {:#x}", mbi_phys);
 

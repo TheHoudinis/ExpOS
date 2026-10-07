@@ -3,14 +3,14 @@
 This matrix records observed results, not assumptions. “Implemented, untested”
 is not a promise that a physical machine will boot.
 
-| Platform | UEFI boot | Install | Storage | Keyboard / mouse | Ethernet | Display | Status |
-|---|---:|---:|---|---|---|---|---|
-| QEMU `pc` + OVMF/SeaBIOS | Yes | Yes | NVMe, AHCI, ATA-PIO | xHCI HID, PS/2 | RTL8139 | direct UEFI GOP; Bochs BIOS fallback | Automated by modern-hardware, startup and Genesis checks |
-| Framework Laptop 13 | Untested | Not approved | NVMe implemented, untested | xHCI HID implemented, untested | Untested | GOP implemented, untested | Not ready for destructive install |
-| ThinkPad T480 | Untested | Not approved | NVMe/AHCI implemented, untested | xHCI HID implemented, untested | Untested | GOP implemented, untested | Not ready for destructive install |
-| Dell OptiPlex 7060 | Untested | Not approved | NVMe/AHCI implemented, untested | xHCI HID implemented, untested | Untested | GOP implemented, untested | Not ready for destructive install |
-| Intel NUC | Untested | Not approved | NVMe/AHCI implemented, untested | xHCI HID implemented, untested | Untested | GOP implemented, untested | Not ready for destructive install |
-| Generic Ryzen desktop | Untested | Not approved | NVMe/AHCI implemented, untested | xHCI HID implemented, untested | Untested | GOP implemented, untested | Not ready for destructive install |
+| Platform | UEFI boot | Install | Storage | Keyboard / mouse | Ethernet | Audio | Display | Status |
+|---|---:|---:|---|---|---|---|---|---|
+| QEMU `pc` + OVMF/SeaBIOS | Yes | Yes | NVMe, AHCI, ATA-PIO | xHCI HID, PS/2 | RTL8139 | AC'97 PCM output | direct UEFI GOP; Bochs BIOS fallback | Automated by modern-hardware, startup, audio and Genesis checks |
+| Framework Laptop 13 | Untested | Not approved | NVMe implemented, untested | xHCI HID implemented, untested | Untested | Unsupported (HDA) | GOP implemented, untested | Not ready for destructive install |
+| ThinkPad T480 | Untested | Not approved | NVMe/AHCI implemented, untested | xHCI HID implemented, untested | Untested | Unsupported (HDA) | GOP implemented, untested | Not ready for destructive install |
+| Dell OptiPlex 7060 | Untested | Not approved | NVMe/AHCI implemented, untested | xHCI HID implemented, untested | Untested | Unsupported (HDA) | GOP implemented, untested | Not ready for destructive install |
+| Intel NUC | Untested | Not approved | NVMe/AHCI implemented, untested | xHCI HID implemented, untested | Untested | Unsupported (HDA) | GOP implemented, untested | Not ready for destructive install |
+| Generic Ryzen desktop | Untested | Not approved | NVMe/AHCI implemented, untested | xHCI HID implemented, untested | Untested | Unsupported (HDA/USB) | GOP implemented, untested | Not ready for destructive install |
 
 The first modern-driver milestone is intentionally bounded:
 
@@ -20,6 +20,10 @@ The first modern-driver milestone is intentionally bounded:
 - xHCI supports one controller, fixed DMA rings, up to four boot-protocol HID
   devices and eight scratchpads; it does not provide hubs, USB mass storage,
   Bluetooth, audio or arbitrary HID report parsing;
+- ExpAudio supports the Intel/QEMU-compatible AC'97 PCM-out interface with a
+  bounded 48 kHz stereo DMA buffer. It does not yet drive the HDA or USB audio
+  hardware used by the listed physical systems, so physical audio is not
+  claimed;
 - UEFI uses validated GOP address, size, geometry, stride and RGB/BGR order
   directly. The kernel does not change firmware modes or negotiate EDID;
 - PCI MSI/MSI-X capability discovery, vector reservation and programming exist,

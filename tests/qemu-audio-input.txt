@@ -1,0 +1,12 @@
+1111
+operator
+expos
+~
+open settings
+6
+j
+j
+j
+~
+audio
+shutdown

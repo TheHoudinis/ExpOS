@@ -73,6 +73,8 @@ const HTTP_REQUEST_CAPACITY: usize = 768;
 const HTTP_WIRE_CAPACITY: usize = 16 * 1024;
 pub const HTTP_BODY_CAPACITY: usize = 14 * 1024;
 const HTTP_LOCATION_CAPACITY: usize = 512;
+const HTTP_CONTENT_TYPE_CAPACITY: usize = 96;
+const HTTP_COOKIE_CAPACITY: usize = 384;
 const TCP_PAYLOAD_CAPACITY: usize = 1500 - 20 - TCP_HEADER_SIZE;
 const TCP_RECEIVE_WINDOW: u16 = 32 * 1024;
 
@@ -211,6 +213,10 @@ pub struct HttpResponse {
     pub peer: [u8; 4],
     location: [u8; HTTP_LOCATION_CAPACITY],
     location_len: usize,
+    content_type: [u8; HTTP_CONTENT_TYPE_CAPACITY],
+    content_type_len: usize,
+    set_cookie: [u8; HTTP_COOKIE_CAPACITY],
+    set_cookie_len: usize,
 }
 
 impl HttpResponse {
@@ -222,6 +228,20 @@ impl HttpResponse {
         (self.location_len != 0).then(|| {
             // Header parsing accepts visible ASCII only.
             unsafe { core::str::from_utf8_unchecked(&self.location[..self.location_len]) }
+        })
+    }
+
+    pub fn content_type(&self) -> Option<&str> {
+        (self.content_type_len != 0).then(|| {
+            // Header parsing accepts visible ASCII only.
+            unsafe { core::str::from_utf8_unchecked(&self.content_type[..self.content_type_len]) }
+        })
+    }
+
+    pub fn set_cookie(&self) -> Option<&str> {
+        (self.set_cookie_len != 0).then(|| {
+            // Header parsing accepts visible ASCII only.
+            unsafe { core::str::from_utf8_unchecked(&self.set_cookie[..self.set_cookie_len]) }
         })
     }
 }
@@ -1901,7 +1921,27 @@ pub fn http_get(
 ) -> Result<HttpResponse, NetworkError> {
     authorize_network(broker, handle_id, requester, dimension)?;
     let parsed = parse_http_url(url)?;
-    http_get_authorized(parsed)
+    http_get_authorized(parsed, None, None)
+}
+
+/// Perform a bounded GET with Browser-owned representation and cookie headers.
+/// CR/LF and over-capacity values are rejected before any packet is sent.
+pub fn browser_get(
+    broker: &CapabilityBroker,
+    handle_id: u32,
+    requester: Fin,
+    dimension: Fin,
+    url: &str,
+    accept: &str,
+    cookie: Option<&str>,
+) -> Result<HttpResponse, NetworkError> {
+    authorize_network(broker, handle_id, requester, dimension)?;
+    if !safe_header_value(accept, HTTP_CONTENT_TYPE_CAPACITY)
+        || cookie.is_some_and(|value| !safe_header_value(value, HTTP_COOKIE_CAPACITY))
+    {
+        return Err(NetworkError::BadUrl);
+    }
+    http_get_authorized(parse_http_url(url)?, Some(accept), cookie)
 }
 
 /// Perform an HTTPS GET whose destination is constrained to an exact host
@@ -1920,7 +1960,7 @@ pub fn https_get_allowlisted(
     if !https_endpoint_allowed(parsed, allowed_hosts) {
         return Err(NetworkError::EndpointDenied);
     }
-    http_get_authorized(parsed)
+    http_get_authorized(parsed, None, None)
 }
 
 fn https_endpoint_allowed(parsed: HttpUrl<'_>, allowed_hosts: &[&str]) -> bool {
@@ -1931,7 +1971,11 @@ fn https_endpoint_allowed(parsed: HttpUrl<'_>, allowed_hosts: &[&str]) -> bool {
             .any(|host| parsed.host.eq_ignore_ascii_case(host))
 }
 
-fn http_get_authorized(parsed: HttpUrl<'_>) -> Result<HttpResponse, NetworkError> {
+fn http_get_authorized(
+    parsed: HttpUrl<'_>,
+    accept: Option<&str>,
+    cookie: Option<&str>,
+) -> Result<HttpResponse, NetworkError> {
     let mut request = [0_u8; HTTP_REQUEST_CAPACITY];
     let mut request_length = 0;
     append_bytes(&mut request, &mut request_length, b"GET ")?;
@@ -1945,7 +1989,23 @@ fn http_get_authorized(parsed: HttpUrl<'_>) -> Result<HttpResponse, NetworkError
     append_bytes(
         &mut request,
         &mut request_length,
-        b"\r\nUser-Agent: ExpOS/8\r\nAccept: text/html,text/plain,*/*;q=0.1\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
+        b"\r\nUser-Agent: ExpOS/9.1\r\nAccept: ",
+    )?;
+    append_bytes(
+        &mut request,
+        &mut request_length,
+        accept
+            .unwrap_or("text/html,text/plain,*/*;q=0.1")
+            .as_bytes(),
+    )?;
+    if let Some(cookie) = cookie {
+        append_bytes(&mut request, &mut request_length, b"\r\nCookie: ")?;
+        append_bytes(&mut request, &mut request_length, cookie.as_bytes())?;
+    }
+    append_bytes(
+        &mut request,
+        &mut request_length,
+        b"\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
     )?;
 
     let mut network = NETWORK.lock();
@@ -1958,6 +2018,12 @@ fn http_get_authorized(parsed: HttpUrl<'_>) -> Result<HttpResponse, NetworkError
         network.tcp_exchange(peer, parsed.port, &request[..request_length], &mut wire)?
     };
     parse_http_response(peer, &wire[..wire_length], wire_truncated)
+}
+
+fn safe_header_value(value: &str, capacity: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= capacity
+        && value.bytes().all(|byte| (0x20..=0x7E).contains(&byte))
 }
 
 fn append_bytes(output: &mut [u8], length: &mut usize, bytes: &[u8]) -> Result<(), NetworkError> {
@@ -2561,6 +2627,10 @@ fn parse_http_response(
     let mut chunked = false;
     let mut location = [0_u8; HTTP_LOCATION_CAPACITY];
     let mut location_len = 0;
+    let mut content_type = [0_u8; HTTP_CONTENT_TYPE_CAPACITY];
+    let mut content_type_len = 0;
+    let mut set_cookie = [0_u8; HTTP_COOKIE_CAPACITY];
+    let mut set_cookie_len = 0;
     let mut cursor = first_line_end.saturating_add(2);
     while cursor < header_end {
         let line_length =
@@ -2581,6 +2651,26 @@ fn parse_http_response(
                 }
                 location[..value.len()].copy_from_slice(value);
                 location_len = value.len();
+            } else if name.eq_ignore_ascii_case(b"content-type") {
+                let value = value.trim_ascii();
+                if value.is_empty()
+                    || value.len() > content_type.len()
+                    || !value.iter().all(|byte| (0x20..=0x7E).contains(byte))
+                {
+                    return Err(NetworkError::MalformedHttp);
+                }
+                content_type[..value.len()].copy_from_slice(value);
+                content_type_len = value.len();
+            } else if name.eq_ignore_ascii_case(b"set-cookie") && set_cookie_len == 0 {
+                let value = value.trim_ascii();
+                if value.is_empty()
+                    || value.len() > set_cookie.len()
+                    || !value.iter().all(|byte| (0x20..=0x7E).contains(byte))
+                {
+                    return Err(NetworkError::MalformedHttp);
+                }
+                set_cookie[..value.len()].copy_from_slice(value);
+                set_cookie_len = value.len();
             } else if name.eq_ignore_ascii_case(b"transfer-encoding")
                 && value
                     .windows(7)
@@ -2601,6 +2691,10 @@ fn parse_http_response(
         peer,
         location,
         location_len,
+        content_type,
+        content_type_len,
+        set_cookie,
+        set_cookie_len,
     };
     if chunked {
         let (length, truncated) = decode_chunked(encoded_body, &mut response.body)?;

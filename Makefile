@@ -7,6 +7,8 @@ RUST_LIB   := target/$(TARGET)/release/libexpos_kernel.a
 STATE_IMG  := $(RUNTIME)/expos-state.img
 STATE_SIZE := 4M
 QEMU       := qemu-system-x86_64 -machine pc -cpu max -smp 4 -m 256M -vga std -global VGA.vgamem_mb=16 -netdev user,id=net0 -device rtl8139,netdev=net0
+QEMU_AUDIO ?= -audiodev driver=pipewire,id=exposaudio -device AC97,audiodev=exposaudio
+QEMU_TEST_AUDIO := -audiodev driver=wav,id=exposaudio,path=$(BUILD)/audio-output.wav -device AC97,audiodev=exposaudio
 UEFI_DIR   := $(BUILD)/esp
 UEFI_APP   := $(UEFI_DIR)/EFI/BOOT/BOOTX64.EFI
 UEFI_BOOT_IMG := $(BUILD)/uefi-boot.img
@@ -21,9 +23,9 @@ GENESIS_ISO := $(BUILD)/ExpOS-v9-x86_64.iso
 OVMF_CODE  ?= /usr/share/edk2/x64/OVMF_CODE.4m.fd
 OVMF_VARS  ?= /usr/share/edk2/x64/OVMF_VARS.4m.fd
 
-.PHONY: all iso genesis-iso genesis-check genesis-display-check run-genesis test check display-check session-check network-check internet-check https-check weather-check search-check wikipedia-check persistence-check modern-hardware-check ring3-check run debug clean legacy-alpha-check run-alpha ayo sdk rust-sdk go-sdk c-sdk python-sdk sdk-cli-check kernel-build genesis-kernel-build
+.PHONY: all iso genesis-iso genesis-check genesis-display-check run-genesis test check display-check audio-check session-check network-check internet-check https-check weather-check search-check wikipedia-check persistence-check modern-hardware-check ring3-check run debug clean legacy-alpha-check run-alpha ayo sdk rust-sdk go-sdk c-sdk python-sdk sdk-cli-check kernel-build genesis-kernel-build
 
-all: test check display-check session-check network-check persistence-check modern-hardware-check ayo sdk python-runtime-check python-check budget-check ring3-check uefi-check bootmode-check startup-check
+all: test check display-check audio-check session-check network-check persistence-check modern-hardware-check ayo sdk python-runtime-check python-check budget-check ring3-check uefi-check bootmode-check startup-check
 
 test:
 	cargo test --workspace
@@ -112,7 +114,7 @@ uefi: $(UEFI_APP)
 
 run-uefi: $(UEFI_APP) $(STATE_IMG)
 	cp $(OVMF_VARS) $(BUILD)/OVMF-run-vars.fd
-	$(QEMU) -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) -drive if=pflash,format=raw,file=$(BUILD)/OVMF-run-vars.fd -drive file=$(STATE_IMG),format=raw,if=ide,index=0 -drive file=fat:rw:$(UEFI_DIR),format=raw,if=ide,index=1 -serial stdio -no-reboot
+	$(QEMU) $(QEMU_AUDIO) -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) -drive if=pflash,format=raw,file=$(BUILD)/OVMF-run-vars.fd -drive file=$(STATE_IMG),format=raw,if=ide,index=0 -drive file=fat:rw:$(UEFI_DIR),format=raw,if=ide,index=1 -serial stdio -no-reboot
 
 startup-check: $(ISO) $(UEFI_BOOT_IMG)
 	TMPDIR=/tmp OVMF_CODE=$(OVMF_CODE) OVMF_VARS=$(OVMF_VARS) python3 tests/check-startup.py uefi
@@ -295,6 +297,25 @@ display-check: $(ISO)
 	grep -q "ExpOS Form ABI v1" $(BUILD)/display-serial.log
 	@echo ">>> EXPOS DISPLAY TEST PASSED <<<"
 
+audio-check: $(ISO)
+	rm -f $(BUILD)/audio-serial.log
+	rm -f $(BUILD)/audio-state.img
+	rm -f $(BUILD)/audio-output.wav
+	truncate -s $(STATE_SIZE) $(BUILD)/audio-state.img
+	set +e; timeout 35 $(QEMU) $(QEMU_TEST_AUDIO) -drive file=$(BUILD)/audio-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-audio-input.txt > $(BUILD)/audio-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
+	grep -q "EXPOS_AUDIO_READY backend=ac97 rate=48000 channels=2 sample=s16le" $(BUILD)/audio-serial.log
+	grep -q "EXPOS_SETTING_CHANGED key=audio-volume value=85" $(BUILD)/audio-serial.log
+	grep -q "EXPOS_SETTING_CHANGED key=audio-muted value=true" $(BUILD)/audio-serial.log
+	grep -q "EXPOS_SETTING_CHANGED key=audio-test action=play" $(BUILD)/audio-serial.log
+	grep -q "EXPOS_SETTING_CHANGED key=audio-test action=stop" $(BUILD)/audio-serial.log
+	grep -q "EXPOS_AUDIO_PLAY codec=generated-tone frequency=660" $(BUILD)/audio-serial.log
+	grep -q "EXPOS_TERMINAL_COMMAND name=audio" $(BUILD)/audio-serial.log
+	grep -q "EXPOS_AUDIO_STATUS backend=ac97 volume=85 muted=true" $(BUILD)/audio-serial.log
+	grep -q "EXPOS_AUDIO_STOP" $(BUILD)/audio-serial.log
+	grep -q "EXPOS_COMMAND_OK shutdown" $(BUILD)/audio-serial.log
+	python3 -c "from pathlib import Path; assert Path('$(BUILD)/audio-output.wav').stat().st_size > 44"
+	@echo ">>> EXPOS AC97 AUDIO TEST PASSED <<<"
+
 session-check: $(ISO)
 	rm -f $(BUILD)/guest-serial.log
 	rm -f $(BUILD)/guest-state.img
@@ -329,8 +350,12 @@ network-check: $(ISO)
 	grep -q "ExpOS native TCP and HTTP are online." $(BUILD)/network-serial.log
 	grep -q "EXPOS_BROWSER_ENGINE nodes=4 css_rules=5 scripts=1 executed=1 rejected=0 handlers=1" $(BUILD)/network-serial.log
 	grep -q "EXPOS_BROWSER_HTTP_OK status=200 bytes=786 peer=10.0.2.2" $(BUILD)/network-serial.log
-	grep -q "EXPOS_BROWSER_CONTAINER_REJECTED generation=2 rejected=1 error=TooManyNodes" $(BUILD)/network-serial.log
-	grep -q "EXPOS_BROWSER_HTTP_CONTAINED error=TooManyNodes retained_generation=2" $(BUILD)/network-serial.log
+	grep -q "EXPOS_BROWSER_RESOURCES discovered=2 loaded=2 rejected=0 css=1 js=1 images=0 audio=0 fetches=1" $(BUILD)/network-serial.log
+	grep -q "EXPOS_BROWSER_STORAGE area=local action=set key_bytes=5 value_bytes=8" $(BUILD)/network-serial.log
+	grep -q "EXPOS_BROWSER_STORAGE area=local action=get key_bytes=5 hit=true" $(BUILD)/network-serial.log
+	grep -q "EXPOS_BROWSER_COOKIE origin_bytes=21 secure=false" $(BUILD)/network-serial.log
+	grep -q "EXPOS_BROWSER_CONTAINER_REJECTED generation=3 rejected=1 error=TooManyNodes" $(BUILD)/network-serial.log
+	grep -q "EXPOS_BROWSER_HTTP_CONTAINED error=TooManyNodes retained_generation=3" $(BUILD)/network-serial.log
 	grep -q "EXPOS_BROWSER_HTTP_OK status=200 bytes=.* peer=10.0.2.2" $(BUILD)/network-serial.log
 	grep -q "EXPOS_BROWSER_REDIRECT status=301 hop=1" $(BUILD)/network-serial.log
 	grep -q "EXPOS_BROWSER_HTTP_OK status=200 bytes=134 peer=10.0.2.2" $(BUILD)/network-serial.log
@@ -455,10 +480,10 @@ run: run-uefi
 
 .PHONY: run-bios
 run-bios: $(ISO) $(STATE_IMG)
-	$(QEMU) -drive file=$(STATE_IMG),format=raw,if=ide,index=0 -boot once=d -cdrom $(ISO) -serial stdio -no-reboot
+	$(QEMU) $(QEMU_AUDIO) -drive file=$(STATE_IMG),format=raw,if=ide,index=0 -boot once=d -cdrom $(ISO) -serial stdio -no-reboot
 
 debug: $(ISO) $(STATE_IMG)
-	$(QEMU) -drive file=$(STATE_IMG),format=raw,if=ide,index=0 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot -s -S
+	$(QEMU) $(QEMU_AUDIO) -drive file=$(STATE_IMG),format=raw,if=ide,index=0 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot -s -S
 
 ayo:
 	$(MAKE) -C ayo test build

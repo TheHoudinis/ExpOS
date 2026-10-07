@@ -1,8 +1,9 @@
 //! A deliberately small, allocation-free document, style, and script core.
 //!
-//! This module does not fetch resources, import code, evaluate arbitrary
-//! JavaScript, expose storage, or retain references to the source document.
-//! HTML, CSS, scripts, and event handlers are all subject to fixed limits.
+//! The core discovers external resources but leaves authenticated transport to
+//! the Browser Form. It also owns the bounded origin state used by the native
+//! cookie and Web Storage bridge. HTML, CSS, scripts, resources, origin state,
+//! and event handlers are all subject to fixed limits.
 
 pub const MAX_BROWSER_NODES: usize = 48;
 pub const MAX_STYLE_RULES: usize = 32;
@@ -13,6 +14,11 @@ pub const MAX_CLICK_HANDLERS: usize = 12;
 pub const MAX_SEARCH_RESULTS: usize = 8;
 pub const BROWSER_TEXT_CAPACITY: usize = 512;
 pub const MAX_BROWSER_DOCUMENT_BYTES: usize = 16 * 1024;
+pub const MAX_EXTERNAL_RESOURCES: usize = 12;
+pub const MAX_ORIGIN_RECORDS: usize = 8;
+pub const MAX_STORAGE_ENTRIES: usize = 24;
+pub const MAX_COOKIE_ENTRIES: usize = 12;
+pub const MAX_WEB_API_REQUESTS: usize = 8;
 
 const MAX_HANDLER_BYTES: usize = 384;
 const STYLE_PROPERTY_COUNT: usize = 13;
@@ -27,6 +33,448 @@ pub enum NodeKind {
     Link,
     ListItem,
     Image,
+    Audio,
+    Video,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternalResourceKind {
+    Stylesheet,
+    Script,
+    Image,
+    Audio,
+    Video,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExternalResource {
+    pub kind: ExternalResourceKind,
+    pub url: BrowserText,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResourceManifest {
+    entries: [Option<ExternalResource>; MAX_EXTERNAL_RESOURCES],
+    count: u8,
+    rejected: u8,
+}
+
+impl ResourceManifest {
+    pub const fn empty() -> Self {
+        Self {
+            entries: [None; MAX_EXTERNAL_RESOURCES],
+            count: 0,
+            rejected: 0,
+        }
+    }
+
+    pub fn scan(source: &str) -> Result<Self, BrowserError> {
+        if !source.is_ascii() || source.len() > MAX_BROWSER_DOCUMENT_BYTES {
+            return Err(if source.len() > MAX_BROWSER_DOCUMENT_BYTES {
+                BrowserError::DocumentTooLarge
+            } else {
+                BrowserError::InvalidDocument
+            });
+        }
+        let mut manifest = Self::empty();
+        let mut cursor = 0;
+        while let Some((_, tag_end, tag)) = next_tag(source, cursor) {
+            cursor = tag_end + 1;
+            let tag = tag.trim();
+            if tag.starts_with('/') || tag.starts_with('!') || tag.starts_with('?') {
+                continue;
+            }
+            let name = tag_name(tag);
+            let resource = if eq_ascii(name, "link")
+                && attribute(tag, "rel").is_some_and(|value| eq_ascii(value, "stylesheet"))
+            {
+                attribute(tag, "href").map(|url| (ExternalResourceKind::Stylesheet, url))
+            } else if eq_ascii(name, "script") {
+                attribute(tag, "src").map(|url| (ExternalResourceKind::Script, url))
+            } else if eq_ascii(name, "img") {
+                attribute(tag, "src").map(|url| (ExternalResourceKind::Image, url))
+            } else if eq_ascii(name, "audio") {
+                attribute(tag, "src").map(|url| (ExternalResourceKind::Audio, url))
+            } else if eq_ascii(name, "video") {
+                attribute(tag, "src").map(|url| (ExternalResourceKind::Video, url))
+            } else if eq_ascii(name, "source") {
+                attribute(tag, "src").map(|url| (ExternalResourceKind::Audio, url))
+            } else {
+                None
+            };
+            let Some((kind, url)) = resource else {
+                continue;
+            };
+            let Ok(url) = BrowserText::new(url) else {
+                manifest.rejected = manifest.rejected.saturating_add(1);
+                continue;
+            };
+            if manifest
+                .entries()
+                .any(|entry| entry.kind == kind && entry.url == url)
+            {
+                continue;
+            }
+            let Some(slot) = manifest.entries.get_mut(manifest.count as usize) else {
+                manifest.rejected = manifest.rejected.saturating_add(1);
+                continue;
+            };
+            *slot = Some(ExternalResource { kind, url });
+            manifest.count += 1;
+        }
+        Ok(manifest)
+    }
+
+    pub fn entries(&self) -> impl Iterator<Item = ExternalResource> + '_ {
+        self.entries[..self.count as usize]
+            .iter()
+            .flatten()
+            .copied()
+    }
+
+    pub const fn len(&self) -> usize {
+        self.count as usize
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub const fn rejected(&self) -> u8 {
+        self.rejected
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageArea {
+    Local,
+    Session,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebStateError {
+    InvalidOrigin,
+    InvalidKey,
+    InvalidValue,
+    QuotaExceeded,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WebEntry {
+    origin: BrowserText,
+    key: BrowserText,
+    value: BrowserText,
+    area: StorageArea,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CookieEntry {
+    origin: BrowserText,
+    name: BrowserText,
+    value: BrowserText,
+    secure: bool,
+}
+
+/// Fixed-capacity, origin-partitioned state for cookies and Web Storage.
+/// The Browser Form decides when local entries are persisted; session entries
+/// are deliberately omitted from durable state.
+#[derive(Clone, Copy)]
+pub struct BrowserWebState {
+    storage: [Option<WebEntry>; MAX_STORAGE_ENTRIES],
+    cookies: [Option<CookieEntry>; MAX_COOKIE_ENTRIES],
+}
+
+impl BrowserWebState {
+    pub const fn new() -> Self {
+        Self {
+            storage: [None; MAX_STORAGE_ENTRIES],
+            cookies: [None; MAX_COOKIE_ENTRIES],
+        }
+    }
+
+    pub fn set_storage(
+        &mut self,
+        area: StorageArea,
+        origin: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<(), WebStateError> {
+        let origin = origin_text(origin)?;
+        let key = state_text(key, true)?;
+        let value = state_text(value, false)?;
+        if let Some(entry) = self
+            .storage
+            .iter_mut()
+            .flatten()
+            .find(|entry| entry.area == area && entry.origin == origin && entry.key == key)
+        {
+            entry.value = value;
+            return Ok(());
+        }
+        let slot = self
+            .storage
+            .iter_mut()
+            .find(|slot| slot.is_none())
+            .ok_or(WebStateError::QuotaExceeded)?;
+        *slot = Some(WebEntry {
+            origin,
+            key,
+            value,
+            area,
+        });
+        Ok(())
+    }
+
+    pub fn storage(&self, area: StorageArea, origin: &str, key: &str) -> Option<&str> {
+        self.storage.iter().flatten().find_map(|entry| {
+            (entry.area == area && entry.origin.as_str() == origin && entry.key.as_str() == key)
+                .then(|| entry.value.as_str())
+        })
+    }
+
+    pub fn remove_storage(&mut self, area: StorageArea, origin: &str, key: &str) -> bool {
+        let Some(slot) = self.storage.iter_mut().find(|slot| {
+            slot.is_some_and(|entry| {
+                entry.area == area && entry.origin.as_str() == origin && entry.key.as_str() == key
+            })
+        }) else {
+            return false;
+        };
+        *slot = None;
+        true
+    }
+
+    pub fn set_cookie(
+        &mut self,
+        origin: &str,
+        name: &str,
+        value: &str,
+        secure: bool,
+    ) -> Result<(), WebStateError> {
+        let origin = origin_text(origin)?;
+        if secure && !origin.as_str().starts_with("https://") {
+            return Err(WebStateError::InvalidOrigin);
+        }
+        if name.is_empty()
+            || !name.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(
+                        byte,
+                        b'!' | b'#'
+                            | b'$'
+                            | b'%'
+                            | b'&'
+                            | b'\''
+                            | b'*'
+                            | b'+'
+                            | b'-'
+                            | b'.'
+                            | b'^'
+                            | b'_'
+                            | b'`'
+                            | b'|'
+                            | b'~'
+                    )
+            })
+        {
+            return Err(WebStateError::InvalidKey);
+        }
+        if value.is_empty()
+            || !value.bytes().all(|byte| {
+                (0x21..=0x7e).contains(&byte) && !matches!(byte, b'"' | b',' | b';' | b'\\')
+            })
+        {
+            return Err(WebStateError::InvalidValue);
+        }
+        let name = state_text(name, true)?;
+        let value = state_text(value, false)?;
+        if let Some(cookie) = self
+            .cookies
+            .iter_mut()
+            .flatten()
+            .find(|cookie| cookie.origin == origin && cookie.name == name)
+        {
+            cookie.value = value;
+            cookie.secure = secure;
+            return Ok(());
+        }
+        let slot = self
+            .cookies
+            .iter_mut()
+            .find(|slot| slot.is_none())
+            .ok_or(WebStateError::QuotaExceeded)?;
+        *slot = Some(CookieEntry {
+            origin,
+            name,
+            value,
+            secure,
+        });
+        Ok(())
+    }
+
+    pub fn cookie(&self, origin: &str, name: &str) -> Option<&str> {
+        self.cookies.iter().flatten().find_map(|cookie| {
+            (cookie.origin.as_str() == origin && cookie.name.as_str() == name)
+                .then(|| cookie.value.as_str())
+        })
+    }
+
+    pub fn cookie_header(&self, origin: &str, output: &mut [u8]) -> usize {
+        let mut length = 0;
+        for cookie in self
+            .cookies
+            .iter()
+            .flatten()
+            .filter(|cookie| cookie.origin.as_str() == origin)
+        {
+            let separator = usize::from(length != 0) * 2;
+            let needed = separator + cookie.name.as_str().len() + 1 + cookie.value.as_str().len();
+            if length + needed > output.len() {
+                break;
+            }
+            if length != 0 {
+                output[length..length + 2].copy_from_slice(b"; ");
+                length += 2;
+            }
+            let name = cookie.name.as_str().as_bytes();
+            output[length..length + name.len()].copy_from_slice(name);
+            length += name.len();
+            output[length] = b'=';
+            length += 1;
+            let value = cookie.value.as_str().as_bytes();
+            output[length..length + value.len()].copy_from_slice(value);
+            length += value.len();
+        }
+        length
+    }
+
+    pub fn clear_session(&mut self) {
+        for slot in &mut self.storage {
+            if slot.is_some_and(|entry| entry.area == StorageArea::Session) {
+                *slot = None;
+            }
+        }
+    }
+
+    pub fn encode_local(&self, output: &mut [u8]) -> usize {
+        if output.len() < 5 {
+            return 0;
+        }
+        output[..4].copy_from_slice(b"BWS1");
+        output[4] = 0;
+        let mut cursor = 5;
+        let mut count = 0_u8;
+        for entry in self
+            .storage
+            .iter()
+            .flatten()
+            .filter(|entry| entry.area == StorageArea::Local)
+        {
+            let origin = entry.origin.as_str().as_bytes();
+            let key = entry.key.as_str().as_bytes();
+            let value = entry.value.as_str().as_bytes();
+            if origin.len() > u8::MAX as usize
+                || key.len() > u8::MAX as usize
+                || value.len() > u16::MAX as usize
+            {
+                continue;
+            }
+            let needed = 4 + origin.len() + key.len() + value.len();
+            if cursor + needed > output.len() {
+                break;
+            }
+            output[cursor] = origin.len() as u8;
+            output[cursor + 1] = key.len() as u8;
+            output[cursor + 2..cursor + 4].copy_from_slice(&(value.len() as u16).to_le_bytes());
+            cursor += 4;
+            for bytes in [origin, key, value] {
+                output[cursor..cursor + bytes.len()].copy_from_slice(bytes);
+                cursor += bytes.len();
+            }
+            count = count.saturating_add(1);
+        }
+        output[4] = count;
+        cursor
+    }
+
+    pub fn restore_local(input: &[u8]) -> Self {
+        let mut state = Self::new();
+        if input.len() < 5 || &input[..4] != b"BWS1" {
+            return state;
+        }
+        let mut cursor = 5;
+        for _ in 0..input[4] {
+            let Some(header) = input.get(cursor..cursor + 4) else {
+                return Self::new();
+            };
+            let origin_len = header[0] as usize;
+            let key_len = header[1] as usize;
+            let value_len = u16::from_le_bytes([header[2], header[3]]) as usize;
+            cursor += 4;
+            let Some(origin) = input.get(cursor..cursor + origin_len) else {
+                return Self::new();
+            };
+            cursor += origin_len;
+            let Some(key) = input.get(cursor..cursor + key_len) else {
+                return Self::new();
+            };
+            cursor += key_len;
+            let Some(value) = input.get(cursor..cursor + value_len) else {
+                return Self::new();
+            };
+            cursor += value_len;
+            let (Ok(origin), Ok(key), Ok(value)) = (
+                core::str::from_utf8(origin),
+                core::str::from_utf8(key),
+                core::str::from_utf8(value),
+            ) else {
+                return Self::new();
+            };
+            if state
+                .set_storage(StorageArea::Local, origin, key, value)
+                .is_err()
+            {
+                return Self::new();
+            }
+        }
+        state
+    }
+}
+
+impl Default for BrowserWebState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn origin_text(value: &str) -> Result<BrowserText, WebStateError> {
+    let scheme_end = value.find("://").ok_or(WebStateError::InvalidOrigin)? + 3;
+    if !(value.starts_with("https://")
+        || value.starts_with("http://")
+        || value.starts_with("expos://"))
+        || value[scheme_end..].is_empty()
+        || value[scheme_end..].contains(['/', '?', '#'])
+    {
+        return Err(WebStateError::InvalidOrigin);
+    }
+    BrowserText::new(value).map_err(|_| WebStateError::InvalidOrigin)
+}
+
+fn state_text(value: &str, key: bool) -> Result<BrowserText, WebStateError> {
+    if value.is_empty() || !value.is_ascii() || value.len() > BROWSER_TEXT_CAPACITY {
+        return Err(if key {
+            WebStateError::InvalidKey
+        } else {
+            WebStateError::InvalidValue
+        });
+    }
+    BrowserText::new(value).map_err(|_| {
+        if key {
+            WebStateError::InvalidKey
+        } else {
+            WebStateError::InvalidValue
+        }
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -283,6 +731,31 @@ pub enum ScriptRejection {
     TargetNotFound,
     ValueTooLong,
     InvalidStyle,
+    WebApiLimit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebApiRequest {
+    Fetch {
+        url: BrowserText,
+        target: BrowserText,
+    },
+    StorageSet {
+        area: StorageArea,
+        key: BrowserText,
+        value: BrowserText,
+    },
+    StorageGet {
+        area: StorageArea,
+        key: BrowserText,
+        target_node: u8,
+    },
+    CookieSet {
+        value: BrowserText,
+    },
+    CookieGet {
+        target_node: u8,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -499,11 +972,28 @@ enum ScriptCommand<'a> {
         body: &'a str,
         replace: bool,
     },
+    Fetch {
+        url: &'a str,
+        target: &'a str,
+    },
+    StorageSet {
+        area: StorageArea,
+        key: &'a str,
+        value: &'a str,
+    },
+    StorageGet {
+        area: StorageArea,
+        key: &'a str,
+        target_node: usize,
+    },
+    CookieSet(&'a str),
+    CookieGet(usize),
 }
 
 struct ValidationBudget {
     statements: usize,
     handlers: usize,
+    web_requests: usize,
 }
 
 pub struct Document {
@@ -519,6 +1009,8 @@ pub struct Document {
     count: usize,
     style_order: u16,
     style_rule_count: u16,
+    web_requests: [Option<WebApiRequest>; MAX_WEB_API_REQUESTS],
+    web_request_count: u8,
 }
 
 impl Document {
@@ -550,6 +1042,8 @@ impl Document {
             count: 0,
             style_order: 0,
             style_rule_count: 0,
+            web_requests: [None; MAX_WEB_API_REQUESTS],
+            web_request_count: 0,
         };
         let mut node_tag_offsets = [0usize; MAX_BROWSER_NODES];
         document.parse_nodes(source, &mut node_tag_offsets)?;
@@ -593,6 +1087,8 @@ impl Document {
             count: 0,
             style_order: 0,
             style_rule_count: 0,
+            web_requests: [None; MAX_WEB_API_REQUESTS],
+            web_request_count: 0,
         };
         document.push_projected_node(
             NodeKind::Title,
@@ -745,6 +1241,46 @@ impl Document {
         self.style_rule_count
     }
 
+    /// Merge one authenticated external stylesheet into the existing cascade.
+    pub fn apply_external_stylesheet(&mut self, css: &str) -> Result<(), BrowserError> {
+        if !css.is_ascii() || css.len() > MAX_BROWSER_DOCUMENT_BYTES {
+            return Err(BrowserError::InvalidDocument);
+        }
+        let mut rules = self.style_rule_count as usize;
+        self.apply_stylesheet(css, &mut rules)?;
+        self.style_rule_count = rules as u16;
+        Ok(())
+    }
+
+    pub fn set_text_by_id(&mut self, id: &str, value: &str) -> Result<(), ScriptRejection> {
+        let index = self.require_id(id)?;
+        self.set_text_at_node(index, value)
+    }
+
+    pub fn set_text_at_node(&mut self, index: usize, value: &str) -> Result<(), ScriptRejection> {
+        let node = self
+            .nodes
+            .get_mut(index)
+            .and_then(Option::as_mut)
+            .ok_or(ScriptRejection::TargetNotFound)?;
+        node.text = BrowserText::script_value(value)?;
+        Ok(())
+    }
+
+    pub fn web_api_requests(&self) -> impl Iterator<Item = WebApiRequest> + '_ {
+        self.web_requests[..self.web_request_count as usize]
+            .iter()
+            .flatten()
+            .copied()
+    }
+
+    pub fn drain_web_api_requests(&mut self) -> [Option<WebApiRequest>; MAX_WEB_API_REQUESTS] {
+        let requests = self.web_requests;
+        self.web_requests = [None; MAX_WEB_API_REQUESTS];
+        self.web_request_count = 0;
+        requests
+    }
+
     /// Executes the supported deterministic script subset.
     ///
     /// Rejected programs are validated before execution and make no DOM or
@@ -766,6 +1302,7 @@ impl Document {
         let mut budget = ValidationBudget {
             statements: 0,
             handlers: 0,
+            web_requests: 0,
         };
         if let Err(error) = self.validate_program(source, None, 0, &mut budget) {
             return Err(self.reject_script(error));
@@ -846,7 +1383,7 @@ impl Document {
                 .unwrap_or(source.len());
             let content = source[cursor..content_end].trim();
             let id = attribute(tag, "id").unwrap_or("");
-            let image_alt = if kind == NodeKind::Image {
+            let image_alt = if matches!(kind, NodeKind::Image | NodeKind::Audio | NodeKind::Video) {
                 attribute(tag, "alt").unwrap_or("Image")
             } else {
                 ""
@@ -854,7 +1391,7 @@ impl Document {
             let has_behavior = !id.is_empty()
                 || attribute(tag, "onclick").is_some()
                 || attribute(tag, "style").is_some()
-                || kind == NodeKind::Image;
+                || matches!(kind, NodeKind::Image | NodeKind::Audio | NodeKind::Video);
             if content.is_empty() && image_alt.is_empty() && !has_behavior {
                 continue;
             }
@@ -862,15 +1399,20 @@ impl Document {
                 attribute(tag, "href")
                     .and_then(|value| BrowserText::new(value).ok())
                     .unwrap_or(BrowserText::empty())
-            } else if kind == NodeKind::Image {
+            } else if matches!(kind, NodeKind::Image | NodeKind::Audio | NodeKind::Video) {
                 attribute(tag, "src")
                     .and_then(|value| BrowserText::new(value).ok())
                     .unwrap_or(BrowserText::empty())
             } else {
                 BrowserText::empty()
             };
-            let text = if kind == NodeKind::Image {
-                BrowserText::html_text(image_alt)?
+            let text = if matches!(kind, NodeKind::Image | NodeKind::Audio | NodeKind::Video) {
+                let fallback = match kind {
+                    NodeKind::Audio => attribute(tag, "title").unwrap_or("Audio"),
+                    NodeKind::Video => attribute(tag, "title").unwrap_or("Video"),
+                    _ => image_alt,
+                };
+                BrowserText::html_text(fallback)?
             } else if content.is_empty() {
                 BrowserText::empty()
             } else {
@@ -1001,11 +1543,9 @@ impl Document {
             }
             let closing = find_closing_tag(source, cursor, "script");
             let (script_end, closing_end) = closing.unwrap_or((source.len(), source.len()));
-            if attribute(tag, "src").is_some() {
-                if self.note_script_seen().is_ok() {
-                    self.reject_script(ScriptRejection::ForbiddenApi);
-                }
-            } else {
+            // External sources are discovered by `ResourceManifest` and are
+            // executed only after the Browser Form authenticates the fetch.
+            if attribute(tag, "src").is_none() {
                 let _ = self.execute_script(&source[cursor..script_end]);
             }
             cursor = closing_end;
@@ -1115,6 +1655,7 @@ impl Document {
                 | ScriptRejection::TooManyHandlers
                 | ScriptRejection::NestingLimit
                 | ScriptRejection::ValueTooLong
+                | ScriptRejection::WebApiLimit
         ) {
             self.report.limit_hits = self.report.limit_hits.saturating_add(1);
         }
@@ -1142,6 +1683,7 @@ impl Document {
         let mut budget = ValidationBudget {
             statements: 0,
             handlers: 0,
+            web_requests: 0,
         };
         if let Err(error) = self.validate_program(source, Some(node_index), 1, &mut budget) {
             return Err(self.reject_script(error));
@@ -1200,6 +1742,50 @@ impl Document {
                     }
                     self.validate_program(body, Some(node_index), depth + 1, budget)?;
                 }
+                ScriptCommand::Fetch { url, target } => {
+                    BrowserText::script_value(url)?;
+                    if !target.is_empty() {
+                        BrowserText::script_value(target)?;
+                        self.require_id(target)?;
+                    }
+                    budget.web_requests += 1;
+                    if self.web_request_count as usize + budget.web_requests > MAX_WEB_API_REQUESTS
+                    {
+                        return Err(ScriptRejection::WebApiLimit);
+                    }
+                }
+                ScriptCommand::StorageSet { key, value, .. } => {
+                    BrowserText::script_value(key)?;
+                    BrowserText::script_value(value)?;
+                    budget.web_requests += 1;
+                    if self.web_request_count as usize + budget.web_requests > MAX_WEB_API_REQUESTS
+                    {
+                        return Err(ScriptRejection::WebApiLimit);
+                    }
+                }
+                ScriptCommand::StorageGet { key, .. } => {
+                    BrowserText::script_value(key)?;
+                    budget.web_requests += 1;
+                    if self.web_request_count as usize + budget.web_requests > MAX_WEB_API_REQUESTS
+                    {
+                        return Err(ScriptRejection::WebApiLimit);
+                    }
+                }
+                ScriptCommand::CookieSet(value) => {
+                    BrowserText::script_value(value)?;
+                    budget.web_requests += 1;
+                    if self.web_request_count as usize + budget.web_requests > MAX_WEB_API_REQUESTS
+                    {
+                        return Err(ScriptRejection::WebApiLimit);
+                    }
+                }
+                ScriptCommand::CookieGet(_) => {
+                    budget.web_requests += 1;
+                    if self.web_request_count as usize + budget.web_requests > MAX_WEB_API_REQUESTS
+                    {
+                        return Err(ScriptRejection::WebApiLimit);
+                    }
+                }
             }
         }
         if !found {
@@ -1244,6 +1830,30 @@ impl Document {
                 replace: true,
             });
         }
+        if let Some(arguments) = call_arguments(statement, "fetch") {
+            let [url] = parse_arguments::<1>(arguments)?;
+            return Ok(ScriptCommand::Fetch { url, target: "" });
+        }
+        if let Some(arguments) = call_arguments(statement, "fetchText") {
+            let [url, target] = parse_arguments::<2>(arguments)?;
+            return Ok(ScriptCommand::Fetch { url, target });
+        }
+        if let Some(arguments) = call_arguments(statement, "localStorage.setItem") {
+            let [key, value] = parse_arguments::<2>(arguments)?;
+            return Ok(ScriptCommand::StorageSet {
+                area: StorageArea::Local,
+                key,
+                value,
+            });
+        }
+        if let Some(arguments) = call_arguments(statement, "sessionStorage.setItem") {
+            let [key, value] = parse_arguments::<2>(arguments)?;
+            return Ok(ScriptCommand::StorageSet {
+                area: StorageArea::Session,
+                key,
+                value,
+            });
+        }
 
         let Some((left, right)) = split_assignment(statement) else {
             if let Some((node_index, tail)) =
@@ -1268,11 +1878,34 @@ impl Document {
         if eq_ascii(left.trim(), "document.title") {
             return Ok(ScriptCommand::SetTitle(parse_quoted_value(right)?));
         }
+        if eq_ascii(left.trim(), "document.cookie") {
+            return Ok(ScriptCommand::CookieSet(parse_quoted_value(right)?));
+        }
         let (node_index, tail) = self
             .parse_element_expression(left.trim(), implicit_node)?
             .ok_or(ScriptRejection::UnsupportedSyntax)?;
         let tail = tail.trim();
         if eq_ascii(tail, ".textContent") || eq_ascii(tail, ".innerText") {
+            let right = right.trim();
+            if let Some(arguments) = call_arguments(right, "localStorage.getItem") {
+                let [key] = parse_arguments::<1>(arguments)?;
+                return Ok(ScriptCommand::StorageGet {
+                    area: StorageArea::Local,
+                    key,
+                    target_node: node_index,
+                });
+            }
+            if let Some(arguments) = call_arguments(right, "sessionStorage.getItem") {
+                let [key] = parse_arguments::<1>(arguments)?;
+                return Ok(ScriptCommand::StorageGet {
+                    area: StorageArea::Session,
+                    key,
+                    target_node: node_index,
+                });
+            }
+            if eq_ascii(right, "document.cookie") {
+                return Ok(ScriptCommand::CookieGet(node_index));
+            }
             return Ok(ScriptCommand::SetText(
                 node_index,
                 parse_quoted_value(right)?,
@@ -1392,7 +2025,54 @@ impl Document {
                 let script = ScriptText::new(body)?;
                 self.install_handler(node_index, script, replace)?;
             }
+            ScriptCommand::Fetch { url, target } => {
+                self.push_web_request(WebApiRequest::Fetch {
+                    url: BrowserText::script_value(url)?,
+                    target: if target.is_empty() {
+                        BrowserText::empty()
+                    } else {
+                        BrowserText::script_value(target)?
+                    },
+                })?;
+            }
+            ScriptCommand::StorageSet { area, key, value } => {
+                self.push_web_request(WebApiRequest::StorageSet {
+                    area,
+                    key: BrowserText::script_value(key)?,
+                    value: BrowserText::script_value(value)?,
+                })?;
+            }
+            ScriptCommand::StorageGet {
+                area,
+                key,
+                target_node,
+            } => {
+                self.push_web_request(WebApiRequest::StorageGet {
+                    area,
+                    key: BrowserText::script_value(key)?,
+                    target_node: target_node as u8,
+                })?;
+            }
+            ScriptCommand::CookieSet(value) => {
+                self.push_web_request(WebApiRequest::CookieSet {
+                    value: BrowserText::script_value(value)?,
+                })?;
+            }
+            ScriptCommand::CookieGet(target_node) => {
+                self.push_web_request(WebApiRequest::CookieGet {
+                    target_node: target_node as u8,
+                })?;
+            }
         }
+        Ok(())
+    }
+
+    fn push_web_request(&mut self, request: WebApiRequest) -> Result<(), ScriptRejection> {
+        let Some(slot) = self.web_requests.get_mut(self.web_request_count as usize) else {
+            return Err(ScriptRejection::WebApiLimit);
+        };
+        *slot = Some(request);
+        self.web_request_count += 1;
         Ok(())
     }
 
@@ -1458,7 +2138,7 @@ fn default_style(kind: NodeKind, tag: &str) -> ComputedStyle {
             style.font_weight = 700;
         }
         NodeKind::Link => style.color = CssColor::BLUE,
-        NodeKind::Image => {
+        NodeKind::Image | NodeKind::Audio | NodeKind::Video => {
             style.color = CssColor::rgb(154, 174, 184);
             style.background = CssColor::rgb(20, 27, 33);
             style.border = BorderStyle {
@@ -1525,6 +2205,10 @@ fn node_kind(name: &str) -> Option<NodeKind> {
         Some(NodeKind::ListItem)
     } else if eq_ascii(name, "img") {
         Some(NodeKind::Image)
+    } else if eq_ascii(name, "audio") {
+        Some(NodeKind::Audio)
+    } else if eq_ascii(name, "video") {
+        Some(NodeKind::Video)
     } else {
         None
     }
@@ -2162,16 +2846,12 @@ fn parse_add_event_listener(tail: &str) -> Result<Option<&str>, ScriptRejection>
 }
 
 fn contains_forbidden_api(source: &str) -> bool {
-    const FORBIDDEN: [&str; 15] = [
-        "fetch(",
+    const FORBIDDEN: [&str; 11] = [
         "xmlhttprequest",
         "websocket",
         "eval(",
         "new function",
-        "localstorage",
-        "sessionstorage",
         "indexeddb",
-        "document.cookie",
         "navigator.",
         "window.",
         "globalthis",
@@ -2363,7 +3043,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_scripts_are_counted_once_including_rejections() {
+    fn automatic_scripts_queue_bounded_fetches() {
         let document = Document::parse(
             "expos://stats",
             "<title>Zero</title><p id='status'>Waiting</p>
@@ -2374,10 +3054,11 @@ mod tests {
         .unwrap();
         let report = document.script_report();
         assert_eq!(report.scripts_seen, 3);
-        assert_eq!(report.scripts_executed, 2);
-        assert_eq!(report.scripts_rejected, 1);
-        assert_eq!(report.statements_executed, 2);
-        assert_eq!(report.last_rejection, Some(ScriptRejection::ForbiddenApi));
+        assert_eq!(report.scripts_executed, 3);
+        assert_eq!(report.scripts_rejected, 0);
+        assert_eq!(report.statements_executed, 3);
+        assert_eq!(report.last_rejection, None);
+        assert_eq!(document.web_api_requests().count(), 1);
         assert_eq!(document.title(), "One");
         assert_eq!(
             document.element_by_id("status").unwrap().node.text.as_str(),
@@ -2450,7 +3131,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            document.execute_script("text('status', 'Changed'); localStorage.setItem('x', 'y')"),
+            document.execute_script("text('status', 'Changed'); indexedDB.open('x')"),
             Err(ScriptRejection::ForbiddenApi)
         );
         assert_eq!(
@@ -2472,17 +3153,123 @@ mod tests {
     }
 
     #[test]
-    fn external_script_sources_are_never_loaded() {
+    fn resource_manifest_deduplicates_and_bounds_external_inputs() {
+        let manifest = ResourceManifest::scan(
+            "<link rel='stylesheet' href='/app.css'><script src='/app.js'></script><img src='/hero.bmp'><img src='/hero.bmp'><audio src='/tone.wav'></audio><video src='/clip.ogv'></video>",
+        )
+        .unwrap();
+        assert_eq!(manifest.len(), 5);
+        assert_eq!(manifest.rejected(), 0);
+        let kinds = manifest
+            .entries()
+            .map(|entry| entry.kind)
+            .collect::<std::vec::Vec<_>>();
+        assert_eq!(
+            kinds,
+            [
+                ExternalResourceKind::Stylesheet,
+                ExternalResourceKind::Script,
+                ExternalResourceKind::Image,
+                ExternalResourceKind::Audio,
+                ExternalResourceKind::Video,
+            ]
+        );
+    }
+
+    #[test]
+    fn origin_state_partitions_local_session_and_secure_cookies() {
+        let mut state = BrowserWebState::new();
+        state
+            .set_storage(StorageArea::Local, "https://example.com", "theme", "dark")
+            .unwrap();
+        state
+            .set_storage(StorageArea::Session, "https://example.com", "tab", "3")
+            .unwrap();
+        state
+            .set_cookie("https://example.com", "sid", "abc", true)
+            .unwrap();
+        assert_eq!(
+            state.storage(StorageArea::Local, "https://example.com", "theme"),
+            Some("dark")
+        );
+        assert_eq!(state.cookie("https://example.com", "sid"), Some("abc"));
+        assert_eq!(
+            state.set_cookie("http://example.com", "sid", "bad", true),
+            Err(WebStateError::InvalidOrigin)
+        );
+        state.clear_session();
+        assert_eq!(
+            state.storage(StorageArea::Session, "https://example.com", "tab"),
+            None
+        );
+        assert_eq!(
+            state.storage(StorageArea::Local, "https://example.com", "theme"),
+            Some("dark")
+        );
+
+        let mut encoded = [0_u8; 1024];
+        let length = state.encode_local(&mut encoded);
+        let restored = BrowserWebState::restore_local(&encoded[..length]);
+        assert_eq!(
+            restored.storage(StorageArea::Local, "https://example.com", "theme"),
+            Some("dark")
+        );
+        assert_eq!(restored.cookie("https://example.com", "sid"), None);
+    }
+
+    #[test]
+    fn deterministic_web_api_subset_queues_fetch_storage_and_cookie_effects() {
+        let document = Document::parse(
+            "https://example.com",
+            "<p id='result'>Waiting</p><p id='theme'>Unset</p><p id='cookies'>Unset</p><script>fetchText('/data.txt','result');localStorage.setItem('theme','dark');sessionStorage.setItem('seen','yes');document.cookie='sid=abc';document.getElementById('theme').textContent=localStorage.getItem('theme');document.getElementById('cookies').textContent=document.cookie</script>",
+        )
+        .unwrap();
+        let requests = document.web_api_requests().collect::<std::vec::Vec<_>>();
+        assert_eq!(requests.len(), 6);
+        assert!(matches!(requests[0], WebApiRequest::Fetch { .. }));
+        assert!(matches!(
+            requests[1],
+            WebApiRequest::StorageSet {
+                area: StorageArea::Local,
+                ..
+            }
+        ));
+        assert!(matches!(
+            requests[2],
+            WebApiRequest::StorageSet {
+                area: StorageArea::Session,
+                ..
+            }
+        ));
+        assert!(matches!(requests[3], WebApiRequest::CookieSet { .. }));
+        assert!(matches!(
+            requests[4],
+            WebApiRequest::StorageGet {
+                area: StorageArea::Local,
+                ..
+            }
+        ));
+        assert!(matches!(requests[5], WebApiRequest::CookieGet { .. }));
+    }
+
+    #[test]
+    fn external_script_sources_wait_for_the_browser_form_transport() {
         let document = Document::parse(
             "expos://external",
             "<title>Safe</title><script src='https://example.com/code.js'></script>",
         )
         .unwrap();
         let report = document.script_report();
-        assert_eq!(report.scripts_seen, 1);
+        assert_eq!(report.scripts_seen, 0);
         assert_eq!(report.scripts_executed, 0);
-        assert_eq!(report.scripts_rejected, 1);
-        assert_eq!(report.last_rejection, Some(ScriptRejection::ForbiddenApi));
+        assert_eq!(report.scripts_rejected, 0);
+        assert_eq!(report.last_rejection, None);
+        assert_eq!(
+            ResourceManifest::scan("<script src='https://example.com/code.js'></script>")
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

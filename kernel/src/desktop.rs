@@ -1,4 +1,5 @@
 use crate::{
+    audio,
     display_timing::{FrameDecision, FramePacer, RefreshRate, TimingConfig, VSyncPolicy},
     framebuffer,
     input::{
@@ -13,8 +14,9 @@ use crate::{
 use alloc::boxed::Box;
 use expos_core::{
     AbiCall, AbiRequest, AbiResponse, AbiStatus, Authority, BrowserError, BrowserText,
-    BufferFormat, BufferHandle, CapabilityBroker, CfcFin, DisplayServer, Document, Fin, FormKind,
-    NativeCallGate, NodeKind, Operations, Rect, SurfaceRole, TextAlign, FORM_ABI_VERSION,
+    BrowserWebState, BufferFormat, BufferHandle, CapabilityBroker, CfcFin, DisplayServer, Document,
+    ExternalResourceKind, Fin, FormKind, NativeCallGate, NodeKind, Operations, Rect,
+    ResourceManifest, SurfaceRole, TextAlign, WebApiRequest, FORM_ABI_VERSION,
 };
 use framebuffer::color;
 
@@ -32,8 +34,10 @@ pub const AYO_FIN: Fin = Fin::from_u128(0x4159_4F00_0000_0000_0000_0000_0000_000
 
 const APP_COUNT: usize = 9;
 const DESKTOP_UI_STATE: &str = "DesktopUI.state";
+const BROWSER_DATA_STATE: &str = "BrowserData.state";
 const DESKTOP_UI_MAGIC_V1: [u8; 4] = *b"DUI1";
 const DESKTOP_UI_MAGIC_V2: [u8; 4] = *b"DUI2";
+const DESKTOP_UI_MAGIC_V3: [u8; 4] = *b"DUI3";
 const TERMINAL_HISTORY: usize = 24;
 const TERMINAL_CAPACITY: usize = 96;
 const TERMINAL_SCROLLBACK: usize = 40;
@@ -157,6 +161,50 @@ struct BrowserContainer {
     last_error: Option<BrowserError>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct BrowserResourceStats {
+    discovered: u16,
+    loaded: u16,
+    rejected: u16,
+    stylesheets: u16,
+    scripts: u16,
+    images: u16,
+    audio: u16,
+    fetches: u16,
+}
+
+struct BrowserMediaCache {
+    image_url: BrowserText,
+    image_width: u8,
+    image_height: u8,
+    image_pixels: [u32; 64 * 64],
+    audio_url: BrowserText,
+    audio_len: usize,
+    audio_bytes: [u8; network::HTTP_BODY_CAPACITY],
+}
+
+impl BrowserMediaCache {
+    const fn new() -> Self {
+        Self {
+            image_url: BrowserText::empty(),
+            image_width: 0,
+            image_height: 0,
+            image_pixels: [0; 64 * 64],
+            audio_url: BrowserText::empty(),
+            audio_len: 0,
+            audio_bytes: [0; network::HTTP_BODY_CAPACITY],
+        }
+    }
+
+    fn clear(&mut self) {
+        self.image_url = BrowserText::empty();
+        self.image_width = 0;
+        self.image_height = 0;
+        self.audio_url = BrowserText::empty();
+        self.audio_len = 0;
+    }
+}
+
 impl BrowserContainer {
     fn new(document: Document) -> Self {
         Self {
@@ -205,6 +253,8 @@ fn taskbar_widget_width(preferences: DesktopPreferences) -> i32 {
         + i32::from(flags & TASKBAR_WIDGET_ACTIVE_APP != 0) * 86
         + i32::from(flags & TASKBAR_WIDGET_WEATHER != 0) * 68
         + i32::from(flags & TASKBAR_WIDGET_PERFORMANCE != 0) * 58
+        + i32::from(flags & TASKBAR_WIDGET_AUDIO != 0) * 54
+        + i32::from(flags & TASKBAR_WIDGET_TIMEZONE != 0) * 62
 }
 
 fn taskbar_rect(preferences: DesktopPreferences) -> Rect {
@@ -517,8 +567,8 @@ const fn bypass_software_pacing(responsive: bool, damaged_commit: bool) -> bool 
     responsive && damaged_commit
 }
 
-const HOME: &str = "<style>h1{color:#74bcc7;max-width:720px}.card{background:#151c20;border:1px solid #35433f;border-radius:10px;padding:10px;max-width:720px;line-height:20px}button{color:#f0f2f0;background:#365c62;border-radius:8px;padding:7px;max-width:240px}a{padding:3px}</style><title>New tab</title><h1>ExpOS Browser</h1><p id='status' class='card'>Native tabs, independent history, bookmarks, find-in-page, verified TLS, HTML, CSS, and deterministic scripts are ready.</p><button id='demo'>Test page interaction</button><p class='card'>Press N for a new tab, Tab to switch, X to close, F to find, B to bookmark, or / to focus the omnibox.</p><a href='expos://about'>Browser capabilities</a><a href='expos://packages'>Packages</a><a href='expos://system'>System</a><script>document.title='New tab';document.getElementById('demo').onclick=function(){document.getElementById('status').textContent='Local JavaScript handled this click without granting a Web API';}</script>";
-const ABOUT: &str = "<style>.card{background:#151c20;border:1px solid #35433f;border-radius:9px;padding:9px;max-width:720px;line-height:20px}</style><title>About Browser</title><h1>ExpOS Browser</h1><p class='card'>A bounded Form-native browser with six tab sessions, per-tab history and scroll, eight bookmarks, find-in-page, DuckDuckGo search, verified HTTPS, and native HTML/CSS/script rendering.</p><p class='card'>It is Chromium-like in browser workflow, but it does not embed Blink, V8, extensions, arbitrary Web APIs, media codecs, cookies, or general site storage.</p><a href='expos://home'>New tab</a>";
+const HOME: &str = "<style>h1{color:#a8d9df;max-width:720px}.hero{background:#182427;border:1px solid #466267;border-radius:18px;padding:14px;max-width:720px;line-height:21px}.card{background:#151c20;border:1px solid #35433f;border-radius:12px;padding:11px;max-width:720px;line-height:20px}.chip{color:#bce8ed;background:#243a3e;border:1px solid #426167;border-radius:16px;padding:6px}button{color:#071f23;background:#9cdce4;border-radius:14px;padding:8px;max-width:260px}</style><title>New tab</title><h1>ExpOS Browser</h1><p id='status' class='hero'>A calm, bounded web workspace with verified TLS, six tab sessions, history, bookmarks, find, external page resources and persistent site data.</p><button id='demo'>Try a local interaction</button><p class='card'>Web bridge: bounded fetch, cookies, local/session storage, external CSS and script, BMP images, and PCM WAV audio. Every queue, body, origin and media buffer has a fixed ceiling.</p><p class='card'>Press N for a new tab, Tab to switch, X to close, F to find, B to bookmark, or / to focus the omnibox.</p><a class='chip' href='expos://about'>Capabilities</a><a class='chip' href='expos://packages'>Packages</a><a class='chip' href='expos://system'>System</a><script>document.title='New tab';document.getElementById('demo').onclick=function(){document.getElementById('status').textContent='The deterministic script engine handled this Material-style action.';document.getElementById('status').style.backgroundColor='#20363a';}</script>";
+const ABOUT: &str = "<style>h1{color:#a8d9df}.card{background:#151c20;border:1px solid #35433f;border-radius:12px;padding:11px;max-width:720px;line-height:20px}.accent{background:#20363a;border:1px solid #568087;border-radius:16px;padding:12px;max-width:720px}</style><title>About Browser</title><h1>Browser capabilities</h1><p class='accent'>Form-native navigation, verified HTTP/TLS transport, external CSS and deterministic scripts, bounded fetch, origin-partitioned cookies and storage, BMP images, and PCM WAV playback through ExpAudio.</p><p class='card'>This is a contained browser engine, not Blink/V8. It does not promise arbitrary ECMAScript, a standards-complete Web API surface, compressed media or video decoding, extensions, or GPU raster acceleration.</p><a href='expos://home'>New tab</a>";
 const BROWSER_PACKAGES: &str = "<title>Packages</title><h1>Packages</h1><li>Core tools</li><li>Display</li><li>Notes</li><li>Games</li><a href='expos://home'>Home</a>";
 const BROWSER_SYSTEM: &str = "<title>System</title><h1>System</h1><li>480p / 720p / 1080p display</li><li>60 / 75 / 120 / 144 Hz compositor pacing</li><li>Keyboard and mouse</li><li>RTL8139 network</li><a href='expos://home'>Home</a>";
 const NETWORK_BLOCKED: &str = "<title>Offline</title><h1>Offline</h1><p>The address could not be loaded.</p><a href='expos://home'>Home</a>";
@@ -707,7 +757,7 @@ fn launcher_capacity(preferences: DesktopPreferences) -> usize {
     launcher_visible_rows(preferences) * launcher_columns(preferences)
 }
 
-const SETTINGS_CATEGORY_COUNT: usize = 17;
+const SETTINGS_CATEGORY_COUNT: usize = 18;
 const CUSTOMIZATION_VALUE_COUNT: usize = state::THEME_PALETTE_CHOICES
     + state::WALLPAPER_VARIANT_CHOICES
     + state::ACCENT_COLOR_CHOICES
@@ -744,13 +794,20 @@ const CUSTOMIZATION_VALUE_COUNT: usize = state::THEME_PALETTE_CHOICES
     + 2 // 12 / 24 hour clock
     + DATE_FORMAT_LABELS.len()
     + 2 // week start
-    + 8 // four taskbar widgets, each on/off
+    + 12 // six taskbar widgets, each on/off
+    + 101 // audio volume
+    + 2 // audio mute
+    + 2 // reduce transparency
+    + 2 // focus ring
+    + WINDOW_TILING_LABELS.len()
     + CustomizationProfile::ALL.len(); // coordinated whole-desktop profiles
 
 const TASKBAR_WIDGET_DATE: u8 = 1 << 0;
 const TASKBAR_WIDGET_ACTIVE_APP: u8 = 1 << 1;
 const TASKBAR_WIDGET_WEATHER: u8 = 1 << 2;
 const TASKBAR_WIDGET_PERFORMANCE: u8 = 1 << 3;
+const TASKBAR_WIDGET_AUDIO: u8 = 1 << 4;
+const TASKBAR_WIDGET_TIMEZONE: u8 = 1 << 5;
 const TIMEZONE_LABELS: [&str; 16] = [
     "UTC-12",
     "Pacific UTC-8",
@@ -783,6 +840,7 @@ enum SettingsCategory {
     Network,
     Bluetooth,
     Display,
+    Audio,
     Performance,
     Input,
     Windows,
@@ -802,6 +860,7 @@ impl SettingsCategory {
         Self::Network,
         Self::Bluetooth,
         Self::Display,
+        Self::Audio,
         Self::Performance,
         Self::Input,
         Self::Windows,
@@ -823,18 +882,19 @@ impl SettingsCategory {
             Self::Network => 2,
             Self::Bluetooth => 3,
             Self::Display => 4,
-            Self::Performance => 5,
-            Self::Input => 6,
-            Self::Windows => 7,
-            Self::Taskbar => 8,
-            Self::Menu => 9,
-            Self::Profiles => 10,
-            Self::Accessibility => 11,
-            Self::Privacy => 12,
-            Self::About => 13,
-            Self::Terminal => 14,
-            Self::Language => 15,
-            Self::Time => 16,
+            Self::Audio => 5,
+            Self::Performance => 6,
+            Self::Input => 7,
+            Self::Windows => 8,
+            Self::Taskbar => 9,
+            Self::Menu => 10,
+            Self::Profiles => 11,
+            Self::Accessibility => 12,
+            Self::Privacy => 13,
+            Self::About => 14,
+            Self::Terminal => 15,
+            Self::Language => 16,
+            Self::Time => 17,
         }
     }
 
@@ -847,6 +907,7 @@ impl SettingsCategory {
             Self::Network => "Connections and network access",
             Self::Bluetooth => "Nearby wireless devices",
             Self::Display => "ExpDisplay output",
+            Self::Audio => "Output, volume, and media diagnostics",
             Self::Performance => "Rendering cost and responsiveness",
             Self::Input => "Pointer and keyboard",
             Self::Windows => "Placement, decoration, and focus",
@@ -865,14 +926,15 @@ impl SettingsCategory {
             Self::System => 2,
             Self::Profiles => CustomizationProfile::ALL.len(),
             Self::Appearance => 8,
-            Self::Accessibility => 9,
+            Self::Accessibility => 11,
             Self::Network => 4,
             Self::Bluetooth => 2,
             Self::Display => 6,
+            Self::Audio => 5,
             Self::Performance => 4,
             Self::Input => 5,
-            Self::Windows => 8,
-            Self::Taskbar => 11,
+            Self::Windows => 9,
+            Self::Taskbar => 13,
             Self::Menu => 9,
             Self::Privacy => 5,
             Self::About => 4,
@@ -900,16 +962,20 @@ enum CustomizationProfile {
     Accessible,
     Showcase,
     Touch,
+    Night,
+    Presentation,
 }
 
 impl CustomizationProfile {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 8] = [
         Self::Balanced,
         Self::Compact,
         Self::Focus,
         Self::Accessible,
         Self::Showcase,
         Self::Touch,
+        Self::Night,
+        Self::Presentation,
     ];
 
     const fn label(self) -> &'static str {
@@ -920,6 +986,8 @@ impl CustomizationProfile {
             Self::Accessible => "Accessible",
             Self::Showcase => "Showcase",
             Self::Touch => "Touch friendly",
+            Self::Night => "Night",
+            Self::Presentation => "Presentation",
         }
     }
 
@@ -931,6 +999,8 @@ impl CustomizationProfile {
             Self::Accessible => "Increase contrast, weight, targets, and pointer clarity",
             Self::Showcase => "Enable rich color, depth, translucency, and motion",
             Self::Touch => "Enlarge controls, launcher rows, titlebars, and the taskbar",
+            Self::Night => "Warm low-motion surfaces with reduced transparency",
+            Self::Presentation => "Large focused windows, strong contrast, and visible status",
         }
     }
 }
@@ -1041,6 +1111,11 @@ const MENU_DENSITY_LABELS: [&str; 5] = ["Dense", "Compact", "Balanced", "Comfort
 const ANIMATION_LABELS: [&str; 5] = ["Off", "Fast", "Balanced", "Smooth", "Cinematic"];
 const UI_SCALE_LABELS: [&str; 7] = ["100%", "80%", "90%", "110%", "125%", "150%", "200%"];
 const MENU_LAYOUT_LABELS: [&str; 4] = ["List", "Grid", "Compact grid", "Dashboard"];
+const WINDOW_TILING_LABELS: [&str; 3] = ["Halves", "Thirds", "Quarters"];
+const AUDIO_VOLUME_LABELS: [&str; 21] = [
+    "0%", "5%", "10%", "15%", "20%", "25%", "30%", "35%", "40%", "45%", "50%", "55%", "60%", "65%",
+    "70%", "75%", "80%", "85%", "90%", "95%", "100%",
+];
 const TERMINAL_SCALE_LABELS: [&str; 3] = ["Small", "Medium", "Large"];
 const TERMINAL_COLOR_LABELS: [&str; 8] = [
     "Default", "White", "Green", "Cyan", "Amber", "Rose", "Blue", "Black",
@@ -1445,6 +1520,11 @@ struct DesktopPreferences {
     date_format: u8,
     week_starts_monday: bool,
     taskbar_widgets: u8,
+    reduce_transparency: bool,
+    focus_ring: bool,
+    window_tiling: u8,
+    audio_volume: u8,
+    audio_muted: bool,
 }
 
 impl DesktopPreferences {
@@ -1477,7 +1557,9 @@ impl DesktopPreferences {
     }
 
     const fn border_color(self, focused: bool) -> u32 {
-        if self.high_contrast {
+        if focused && self.focus_ring {
+            self.accent.color()
+        } else if self.high_contrast {
             if focused {
                 color::WHITE
             } else {
@@ -1519,7 +1601,11 @@ impl DesktopPreferences {
     }
 
     fn window_alpha(self) -> u8 {
-        state::WINDOW_OPACITY_ALPHA[self.window_opacity.min(5) as usize]
+        if self.reduce_transparency {
+            u8::MAX
+        } else {
+            state::WINDOW_OPACITY_ALPHA[self.window_opacity.min(5) as usize]
+        }
     }
 
     fn offscreen_pixels(self) -> i32 {
@@ -1602,6 +1688,11 @@ impl DesktopPreferences {
             date_format: 0,
             week_starts_monday: true,
             taskbar_widgets: 0,
+            reduce_transparency: false,
+            focus_ring: false,
+            window_tiling: 0,
+            audio_volume: 80,
+            audio_muted: false,
         }
     }
 
@@ -1610,7 +1701,11 @@ impl DesktopPreferences {
         else {
             return self;
         };
-        if length < 11 || (bytes[..4] != DESKTOP_UI_MAGIC_V1 && bytes[..4] != DESKTOP_UI_MAGIC_V2) {
+        if length < 11
+            || (bytes[..4] != DESKTOP_UI_MAGIC_V1
+                && bytes[..4] != DESKTOP_UI_MAGIC_V2
+                && bytes[..4] != DESKTOP_UI_MAGIC_V3)
+        {
             return self;
         }
         self.locale = bytes[4].min(4);
@@ -1623,7 +1718,8 @@ impl DesktopPreferences {
         self.terminal_scale = bytes[8].min(2);
         self.terminal_foreground = bytes[9].min(7);
         self.terminal_background = bytes[10].min(7);
-        if bytes[..4] == DESKTOP_UI_MAGIC_V2 && length >= 17 {
+        if (bytes[..4] == DESKTOP_UI_MAGIC_V2 || bytes[..4] == DESKTOP_UI_MAGIC_V3) && length >= 17
+        {
             self.timezone = bytes[11].min((TIMEZONE_LABELS.len() - 1) as u8);
             self.clock_24h = bytes[12] != 0;
             self.clock_offset_quarters = (bytes[13] as i8).clamp(-48, 48);
@@ -1633,17 +1729,26 @@ impl DesktopPreferences {
                 & (TASKBAR_WIDGET_DATE
                     | TASKBAR_WIDGET_ACTIVE_APP
                     | TASKBAR_WIDGET_WEATHER
-                    | TASKBAR_WIDGET_PERFORMANCE);
+                    | TASKBAR_WIDGET_PERFORMANCE
+                    | TASKBAR_WIDGET_AUDIO
+                    | TASKBAR_WIDGET_TIMEZONE);
+        }
+        if bytes[..4] == DESKTOP_UI_MAGIC_V3 && length >= 22 {
+            self.audio_volume = bytes[17].min(100);
+            self.audio_muted = bytes[18] != 0;
+            self.reduce_transparency = bytes[19] != 0;
+            self.focus_ring = bytes[20] != 0;
+            self.window_tiling = bytes[21].min(2);
         }
         self
     }
 
-    fn encode_ui_extension(self) -> [u8; 17] {
+    fn encode_ui_extension(self) -> [u8; 22] {
         [
-            DESKTOP_UI_MAGIC_V2[0],
-            DESKTOP_UI_MAGIC_V2[1],
-            DESKTOP_UI_MAGIC_V2[2],
-            DESKTOP_UI_MAGIC_V2[3],
+            DESKTOP_UI_MAGIC_V3[0],
+            DESKTOP_UI_MAGIC_V3[1],
+            DESKTOP_UI_MAGIC_V3[2],
+            DESKTOP_UI_MAGIC_V3[3],
             self.locale,
             self.menu_layout,
             self.terminal_font_face.persisted(),
@@ -1657,6 +1762,11 @@ impl DesktopPreferences {
             self.date_format,
             u8::from(self.week_starts_monday),
             self.taskbar_widgets,
+            self.audio_volume,
+            u8::from(self.audio_muted),
+            u8::from(self.reduce_transparency),
+            u8::from(self.focus_ring),
+            self.window_tiling,
         ]
     }
 
@@ -1685,6 +1795,11 @@ impl DesktopPreferences {
         next.date_format = self.date_format;
         next.week_starts_monday = self.week_starts_monday;
         next.taskbar_widgets = self.taskbar_widgets;
+        next.audio_volume = self.audio_volume;
+        next.audio_muted = self.audio_muted;
+        next.reduce_transparency = self.reduce_transparency;
+        next.focus_ring = self.focus_ring;
+        next.window_tiling = self.window_tiling;
 
         match profile {
             CustomizationProfile::Balanced => {}
@@ -1740,6 +1855,8 @@ impl DesktopPreferences {
                 next.animation_level = 0;
                 next.tooltips = true;
                 next.notification_animations = false;
+                next.reduce_transparency = true;
+                next.focus_ring = true;
             }
             CustomizationProfile::Showcase => {
                 next.theme = ThemeChoice::Aurora;
@@ -1789,6 +1906,33 @@ impl DesktopPreferences {
                 next.tooltips = true;
                 next.menu_grid = true;
                 next.menu_categories = true;
+            }
+            CustomizationProfile::Night => {
+                next.theme = ThemeChoice::Rose;
+                next.wallpaper = WallpaperChoice::Gradient;
+                next.wallpaper_variant = 226;
+                next.accent = AccentChoice::from_persisted(226);
+                next.backdrop = BackdropChoice::Black;
+                next.window_shadows = false;
+                next.wallpaper_effects = true;
+                next.reduce_transparency = true;
+                next.animation_level = 1;
+                next.notification_animations = false;
+            }
+            CustomizationProfile::Presentation => {
+                next.theme = ThemeChoice::Nord;
+                next.high_contrast = true;
+                next.font_weight = framebuffer::FontWeight::Bold;
+                next.titlebar_density = 3;
+                next.taskbar_size = 5;
+                next.taskbar_labels = true;
+                next.taskbar_autohide = false;
+                next.ui_scale = 4;
+                next.focus_ring = true;
+                next.reduce_transparency = true;
+                next.window_tiling = 0;
+                next.animation_level = 1;
+                next.tooltips = true;
             }
         }
         next
@@ -1940,6 +2084,9 @@ struct DesktopState {
     browser_find_len: usize,
     browser_find_editing: bool,
     browser_find_match: Option<usize>,
+    browser_web_state: BrowserWebState,
+    browser_resources: BrowserResourceStats,
+    browser_media: Box<BrowserMediaCache>,
     last_weather_request_ticks: u64,
     terminal_line: [u8; TERMINAL_CAPACITY],
     terminal_len: usize,
@@ -2185,6 +2332,8 @@ impl DesktopState {
         let active = start_app.unwrap_or(AppKind::Terminal);
         let preferences =
             DesktopPreferences::from_persistent(state::preferences()).load_ui_extension(cfc);
+        audio::set_volume(preferences.audio_volume);
+        audio::set_muted(preferences.audio_muted);
         framebuffer::set_font_style(framebuffer::FontStyle::new(
             preferences.font_face,
             preferences.font_weight,
@@ -2385,6 +2534,9 @@ impl DesktopState {
         let native_apps = crate::expfs_store::load_data_form(cfc, "AyoApps.state")
             .map(|(content, length)| crate::apps::NativeApps::restore_state(&content[..length]))
             .unwrap_or_else(crate::apps::NativeApps::new);
+        let browser_web_state = crate::expfs_store::load_data_form(cfc, BROWSER_DATA_STATE)
+            .map(|(content, length)| BrowserWebState::restore_local(&content[..length]))
+            .unwrap_or_default();
         let mut state = Self {
             server,
             broker,
@@ -2426,6 +2578,9 @@ impl DesktopState {
             browser_find_len: 0,
             browser_find_editing: false,
             browser_find_match: None,
+            browser_web_state,
+            browser_resources: BrowserResourceStats::default(),
+            browser_media: Box::new(BrowserMediaCache::new()),
             last_weather_request_ticks: 0,
             terminal_line: [0; TERMINAL_CAPACITY],
             terminal_len: 0,
@@ -2504,6 +2659,19 @@ impl DesktopState {
         {
             self.settings_notice = error.message();
             slog!("EXPOS_UI_PERSIST_FAILED error={:?}\r\n", error);
+        }
+    }
+
+    fn persist_browser_web_state(&mut self) {
+        let mut encoded = [0_u8; crate::expfs_store::FORM_CONTENT_CAPACITY];
+        let length = self.browser_web_state.encode_local(&mut encoded);
+        if length == 0 {
+            return;
+        }
+        if let Err(error) =
+            crate::expfs_store::save_data_form(self.cfc, BROWSER_DATA_STATE, &encoded[..length])
+        {
+            slog!("EXPOS_BROWSER_STORAGE_PERSIST_FAILED error={:?}\r\n", error);
         }
     }
 
@@ -3046,17 +3214,59 @@ impl DesktopState {
         }
         self.fullscreen = false;
         let area = self.usable_area();
-        let left_width = area.width / 2;
-        let right_width = area.width - left_width;
-        let rect = if right_half {
-            Rect::new(
-                area.x.saturating_add_unsigned(left_width),
-                area.y,
-                right_width,
-                area.height,
-            )
-        } else {
-            Rect::new(area.x, area.y, left_width, area.height)
+        let rect = match self.preferences.window_tiling {
+            1 => {
+                let third = area.width / 3;
+                if right_half {
+                    Rect::new(
+                        area.x.saturating_add_unsigned(area.width - third),
+                        area.y,
+                        third,
+                        area.height,
+                    )
+                } else {
+                    Rect::new(area.x, area.y, third, area.height)
+                }
+            }
+            2 => {
+                let width = area.width / 2;
+                let height = area.height / 2;
+                let current = self
+                    .server
+                    .surface(self.active_surface())
+                    .map(|surface| surface.current.rect)
+                    .unwrap_or(area);
+                let bottom = current.y as i32 + current.height as i32 / 2
+                    >= area.y as i32 + area.height as i32 / 2;
+                Rect::new(
+                    if right_half {
+                        area.x.saturating_add_unsigned(area.width - width)
+                    } else {
+                        area.x
+                    },
+                    if bottom {
+                        area.y.saturating_add_unsigned(area.height - height)
+                    } else {
+                        area.y
+                    },
+                    width,
+                    height,
+                )
+            }
+            _ => {
+                let left_width = area.width / 2;
+                let right_width = area.width - left_width;
+                if right_half {
+                    Rect::new(
+                        area.x.saturating_add_unsigned(left_width),
+                        area.y,
+                        right_width,
+                        area.height,
+                    )
+                } else {
+                    Rect::new(area.x, area.y, left_width, area.height)
+                }
+            }
         };
         self.set_app_geometry(self.active, rect);
     }
@@ -3146,8 +3356,273 @@ impl DesktopState {
 
     fn navigate(&mut self, url: &str, source: &str) {
         match Document::parse(url, source) {
-            Ok(document) => self.set_document(document),
+            Ok(mut document) => {
+                let manifest = ResourceManifest::scan(source).unwrap_or(ResourceManifest::empty());
+                if url.starts_with("http://") || url.starts_with("https://") {
+                    self.hydrate_browser_document(&mut document, url, manifest);
+                } else {
+                    self.process_document_web_apis(&mut document, url);
+                }
+                self.set_document(document);
+            }
             Err(error) => self.reject_browser_candidate(error),
+        }
+    }
+
+    fn browser_fetch(
+        &mut self,
+        url: &str,
+        accept: &str,
+    ) -> Result<Box<network::HttpResponse>, network::NetworkError> {
+        let handle_id = self
+            .browser_network_handle
+            .ok_or(network::NetworkError::CapabilityDenied)?;
+        let mut origin_buffer = [0_u8; 512];
+        let origin = browser_origin(url, &mut origin_buffer).unwrap_or("");
+        let mut cookie_buffer = [0_u8; 384];
+        let cookie_length = self
+            .browser_web_state
+            .cookie_header(origin, &mut cookie_buffer);
+        let cookie = (cookie_length != 0)
+            .then(|| core::str::from_utf8(&cookie_buffer[..cookie_length]).unwrap_or(""));
+        let response = Box::new(network::browser_get(
+            &self.broker,
+            handle_id,
+            BROWSER_FIN,
+            STABLE_FIN,
+            url,
+            accept,
+            cookie,
+        )?);
+        if let Some(value) = response.set_cookie() {
+            self.store_response_cookie(origin, value);
+        }
+        Ok(response)
+    }
+
+    fn store_response_cookie(&mut self, origin: &str, header: &str) {
+        let pair = header.split(';').next().unwrap_or("").trim();
+        let Some((name, value)) = pair.split_once('=') else {
+            return;
+        };
+        let secure = header
+            .split(';')
+            .skip(1)
+            .any(|attribute| attribute.trim().eq_ignore_ascii_case("secure"));
+        if self
+            .browser_web_state
+            .set_cookie(origin, name.trim(), value.trim(), secure)
+            .is_ok()
+        {
+            slog!(
+                "EXPOS_BROWSER_COOKIE origin_bytes={} secure={}\r\n",
+                origin.len(),
+                secure
+            );
+        }
+    }
+
+    fn hydrate_browser_document(
+        &mut self,
+        document: &mut Document,
+        base_url: &str,
+        manifest: ResourceManifest,
+    ) {
+        self.browser_media.clear();
+        self.browser_resources = BrowserResourceStats {
+            discovered: manifest.len() as u16,
+            rejected: manifest.rejected() as u16,
+            ..BrowserResourceStats::default()
+        };
+        for resource in manifest.entries() {
+            let mut absolute = [0_u8; 512];
+            let Some(length) = resolve_browser_link(base_url, resource.url.as_str(), &mut absolute)
+            else {
+                self.browser_resources.rejected = self.browser_resources.rejected.saturating_add(1);
+                continue;
+            };
+            let url = core::str::from_utf8(&absolute[..length]).unwrap_or("");
+            if base_url.starts_with("https://") && url.starts_with("http://") {
+                self.browser_resources.rejected = self.browser_resources.rejected.saturating_add(1);
+                continue;
+            }
+            let accept = match resource.kind {
+                ExternalResourceKind::Stylesheet => "text/css",
+                ExternalResourceKind::Script => "text/javascript,application/javascript",
+                ExternalResourceKind::Image => "image/bmp,image/x-portable-pixmap,image/*;q=0.1",
+                ExternalResourceKind::Audio => "audio/wav,audio/x-wav,audio/*;q=0.1",
+                ExternalResourceKind::Video => "video/*",
+            };
+            let Ok(response) = self.browser_fetch(url, accept) else {
+                self.browser_resources.rejected = self.browser_resources.rejected.saturating_add(1);
+                continue;
+            };
+            if !(200..300).contains(&response.status) || response.truncated {
+                self.browser_resources.rejected = self.browser_resources.rejected.saturating_add(1);
+                continue;
+            }
+            let content_type = response.content_type().unwrap_or("");
+            let type_matches = content_type.is_empty()
+                || match resource.kind {
+                    ExternalResourceKind::Stylesheet => content_type.starts_with("text/css"),
+                    ExternalResourceKind::Script => content_type.contains("javascript"),
+                    ExternalResourceKind::Image => content_type.starts_with("image/"),
+                    ExternalResourceKind::Audio => content_type.starts_with("audio/"),
+                    ExternalResourceKind::Video => content_type.starts_with("video/"),
+                };
+            let loaded = type_matches
+                && match resource.kind {
+                    ExternalResourceKind::Stylesheet => core::str::from_utf8(response.body())
+                        .ok()
+                        .is_some_and(|css| document.apply_external_stylesheet(css).is_ok()),
+                    ExternalResourceKind::Script => core::str::from_utf8(response.body())
+                        .ok()
+                        .is_some_and(|script| document.execute_script(script).is_ok()),
+                    ExternalResourceKind::Image => decode_browser_image(
+                        response.body(),
+                        resource.url.as_str(),
+                        &mut self.browser_media,
+                    ),
+                    ExternalResourceKind::Audio => {
+                        if response.body().starts_with(b"RIFF")
+                            && response.body_len <= self.browser_media.audio_bytes.len()
+                        {
+                            self.browser_media.audio_bytes[..response.body_len]
+                                .copy_from_slice(response.body());
+                            self.browser_media.audio_len = response.body_len;
+                            self.browser_media.audio_url = BrowserText::new(resource.url.as_str())
+                                .unwrap_or(BrowserText::empty());
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    ExternalResourceKind::Video => false,
+                };
+            if loaded {
+                self.browser_resources.loaded = self.browser_resources.loaded.saturating_add(1);
+                match resource.kind {
+                    ExternalResourceKind::Stylesheet => {
+                        self.browser_resources.stylesheets =
+                            self.browser_resources.stylesheets.saturating_add(1)
+                    }
+                    ExternalResourceKind::Script => {
+                        self.browser_resources.scripts =
+                            self.browser_resources.scripts.saturating_add(1)
+                    }
+                    ExternalResourceKind::Image => {
+                        self.browser_resources.images =
+                            self.browser_resources.images.saturating_add(1)
+                    }
+                    ExternalResourceKind::Audio => {
+                        self.browser_resources.audio =
+                            self.browser_resources.audio.saturating_add(1)
+                    }
+                    ExternalResourceKind::Video => {}
+                }
+            } else {
+                self.browser_resources.rejected = self.browser_resources.rejected.saturating_add(1);
+            }
+        }
+        self.process_document_web_apis(document, base_url);
+        slog!(
+            "EXPOS_BROWSER_RESOURCES discovered={} loaded={} rejected={} css={} js={} images={} audio={} fetches={}\r\n",
+            self.browser_resources.discovered,
+            self.browser_resources.loaded,
+            self.browser_resources.rejected,
+            self.browser_resources.stylesheets,
+            self.browser_resources.scripts,
+            self.browser_resources.images,
+            self.browser_resources.audio,
+            self.browser_resources.fetches
+        );
+    }
+
+    fn process_document_web_apis(&mut self, document: &mut Document, base_url: &str) {
+        let requests = document.drain_web_api_requests();
+        let mut origin_buffer = [0_u8; 512];
+        let origin = browser_origin(base_url, &mut origin_buffer).unwrap_or("expos://local");
+        for request in requests.iter().flatten().copied() {
+            match request {
+                WebApiRequest::StorageSet { area, key, value } => {
+                    let stored = self.browser_web_state.set_storage(
+                        area,
+                        origin,
+                        key.as_str(),
+                        value.as_str(),
+                    );
+                    if stored.is_ok() && area == expos_core::StorageArea::Local {
+                        self.persist_browser_web_state();
+                    }
+                    if stored.is_ok() {
+                        slog!(
+                            "EXPOS_BROWSER_STORAGE area={} action=set key_bytes={} value_bytes={}\r\n",
+                            if area == expos_core::StorageArea::Local {
+                                "local"
+                            } else {
+                                "session"
+                            },
+                            key.as_str().len(),
+                            value.as_str().len()
+                        );
+                    }
+                }
+                WebApiRequest::StorageGet {
+                    area,
+                    key,
+                    target_node,
+                } => {
+                    let value = self
+                        .browser_web_state
+                        .storage(area, origin, key.as_str())
+                        .unwrap_or("");
+                    let _ = document.set_text_at_node(target_node as usize, value);
+                    slog!(
+                        "EXPOS_BROWSER_STORAGE area={} action=get key_bytes={} hit={}\r\n",
+                        if area == expos_core::StorageArea::Local {
+                            "local"
+                        } else {
+                            "session"
+                        },
+                        key.as_str().len(),
+                        !value.is_empty()
+                    );
+                }
+                WebApiRequest::CookieSet { value } => {
+                    self.store_response_cookie(origin, value.as_str());
+                }
+                WebApiRequest::CookieGet { target_node } => {
+                    let mut cookies = [0_u8; expos_core::BROWSER_TEXT_CAPACITY];
+                    let length = self.browser_web_state.cookie_header(origin, &mut cookies);
+                    if let Ok(value) = core::str::from_utf8(&cookies[..length]) {
+                        let _ = document.set_text_at_node(target_node as usize, value);
+                    }
+                }
+                WebApiRequest::Fetch { url, target } => {
+                    let mut absolute = [0_u8; 512];
+                    let Some(length) = resolve_browser_link(base_url, url.as_str(), &mut absolute)
+                    else {
+                        continue;
+                    };
+                    let address = core::str::from_utf8(&absolute[..length]).unwrap_or("");
+                    if base_url.starts_with("https://") && address.starts_with("http://") {
+                        continue;
+                    }
+                    let Ok(response) = self.browser_fetch(address, "text/plain,application/json")
+                    else {
+                        continue;
+                    };
+                    self.browser_resources.fetches =
+                        self.browser_resources.fetches.saturating_add(1);
+                    if !target.as_str().is_empty() && (200..300).contains(&response.status) {
+                        let mut text = [0_u8; expos_core::BROWSER_TEXT_CAPACITY];
+                        let length = flatten_browser_text(response.body(), &mut text);
+                        if let Ok(value) = core::str::from_utf8(&text[..length]) {
+                            let _ = document.set_text_by_id(target.as_str(), value);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -3500,9 +3975,9 @@ impl DesktopState {
             slog!("EXPOS_BROWSER_HTTP_ERROR error=CapabilityDenied\r\n");
             return;
         }
-        let Some(handle_id) = self.browser_network_handle else {
+        if self.browser_network_handle.is_none() {
             return;
-        };
+        }
         let mut current = [0_u8; 512];
         let Some(current_len) = copy_browser_url(&mut current, address.as_bytes()) else {
             self.navigate("expos://error", NETWORK_ERROR);
@@ -3523,18 +3998,11 @@ impl DesktopState {
         }
         for redirect_count in 0..=MAX_BROWSER_REDIRECTS {
             let current_url = core::str::from_utf8(&current[..current_len]).unwrap_or("");
-            match network::http_get(
-                &self.broker,
-                handle_id,
-                BROWSER_FIN,
-                STABLE_FIN,
+            match self.browser_fetch(
                 current_url,
+                "text/html,text/plain,application/xhtml+xml,*/*;q=0.1",
             ) {
                 Ok(response) => {
-                    // Keep the maximum-sized transport response off the
-                    // compositor's stack while the bounded parser stages a
-                    // replacement document.
-                    let response = Box::new(response);
                     if is_http_redirect(response.status) {
                         let Some(location) = response.location() else {
                             self.navigate("expos://error", NETWORK_ERROR);
@@ -3585,6 +4053,11 @@ impl DesktopState {
                     let projected = Document::parse_duckduckgo_results(current_url, source).ok();
                     let search_results =
                         projected.as_ref().map_or(0, |results| results.result_count);
+                    let manifest = if wikipedia_original_len == 0 && projected.is_none() {
+                        ResourceManifest::scan(source).ok()
+                    } else {
+                        None
+                    };
                     let document = if wikipedia_original_len != 0 {
                         let original =
                             core::str::from_utf8(&wikipedia_original[..wikipedia_original_len])
@@ -3600,7 +4073,12 @@ impl DesktopState {
                         Document::parse(current_url, source)
                     };
                     match document {
-                        Ok(document) => {
+                        Ok(mut document) => {
+                            if let Some(manifest) = manifest {
+                                self.hydrate_browser_document(&mut document, current_url, manifest);
+                            } else {
+                                self.process_document_web_apis(&mut document, current_url);
+                            }
                             self.set_document(document);
                             if search_results != 0 {
                                 slog!("EXPOS_SEARCH_RESULTS count={}\r\n", search_results);
@@ -3736,7 +4214,7 @@ impl DesktopState {
         }
 
         let mut content_y = rect.y as i32 + browser_content_top(self) - self.browser_scroll;
-        let mut selected: Option<(usize, BrowserText, bool, bool)> = None;
+        let mut selected: Option<(usize, BrowserText, bool, bool, NodeKind)> = None;
         for styled in self.document.styled_nodes() {
             if styled.node.kind == NodeKind::Title || !styled.style.is_rendered() {
                 continue;
@@ -3751,14 +4229,33 @@ impl DesktopState {
                     styled.node.target,
                     styled.clickable,
                     styled.node.kind == NodeKind::Link,
+                    styled.node.kind,
                 ));
                 break;
             }
         }
-        let Some((index, target, scripted, navigable)) = selected else {
+        let Some((index, target, scripted, navigable, kind)) = selected else {
             return false;
         };
         if scripted && self.document.dispatch_click_at_node(index) {
+            if self.document.web_api_requests().next().is_some() {
+                let current = self.document.url().as_bytes();
+                let mut url = [0_u8; 512];
+                let length = current.len().min(url.len());
+                url[..length].copy_from_slice(&current[..length]);
+                // Handler requests are already held by the document and are
+                // processed through the same origin/capability bridge.
+                let base = core::str::from_utf8(&url[..length]).unwrap_or("expos://home");
+                let mut staged = core::mem::replace(
+                    &mut self.document,
+                    BrowserContainer::new(
+                        Document::parse("expos://pending", "<title>Pending</title>")
+                            .expect("built-in pending document"),
+                    ),
+                );
+                self.process_document_web_apis(&mut staged.document, base);
+                self.document = staged;
+            }
             let report = self.document.script_report();
             slog!(
                 "EXPOS_BROWSER_EVENT type=click node={} executed={}\r\n",
@@ -3766,6 +4263,21 @@ impl DesktopState {
                 report.statements_executed
             );
             self.log_browser_engine();
+            return true;
+        }
+        if kind == NodeKind::Audio
+            && !target.as_str().is_empty()
+            && target.as_str() == self.browser_media.audio_url.as_str()
+            && self.browser_media.audio_len != 0
+        {
+            let status = audio::status();
+            if status.playing {
+                audio::stop();
+            } else {
+                let _ = audio::play_wave(
+                    &self.browser_media.audio_bytes[..self.browser_media.audio_len],
+                );
+            }
             return true;
         }
         if navigable && !target.as_str().is_empty() {
@@ -3964,6 +4476,8 @@ impl DesktopState {
             CustomizationProfile::Accessible => "Accessible desktop profile applied.",
             CustomizationProfile::Showcase => "Showcase desktop profile applied.",
             CustomizationProfile::Touch => "Touch-friendly desktop profile applied.",
+            CustomizationProfile::Night => "Night desktop profile applied.",
+            CustomizationProfile::Presentation => "Presentation desktop profile applied.",
         };
         slog!(
             "EXPOS_SETTING_CHANGED key=profile value={}\r\n",
@@ -4193,6 +4707,16 @@ impl DesktopState {
                 self.preferences.tooltips = !self.preferences.tooltips;
                 self.settings_notice = "Interface hints updated.";
             }
+            (SettingsCategory::Accessibility, 9) => {
+                self.preferences.reduce_transparency = !self.preferences.reduce_transparency;
+                self.full_redraw_requested = true;
+                self.settings_notice = "Transparency accessibility updated.";
+            }
+            (SettingsCategory::Accessibility, 10) => {
+                self.preferences.focus_ring = !self.preferences.focus_ring;
+                self.full_redraw_requested = true;
+                self.settings_notice = "Keyboard focus ring updated.";
+            }
             (SettingsCategory::Network, 0) => {
                 self.full_redraw_requested = true;
                 self.change_network_policy();
@@ -4261,6 +4785,42 @@ impl DesktopState {
                     }
                 );
                 self.settings_notice = "Contrast rendering updated.";
+            }
+            (SettingsCategory::Audio, 0) => {
+                let step = if direction < 0 { -5 } else { 5 };
+                self.preferences.audio_volume = self
+                    .preferences
+                    .audio_volume
+                    .saturating_add_signed(step)
+                    .min(100);
+                audio::set_volume(self.preferences.audio_volume);
+                self.settings_notice = "Output volume updated.";
+                slog!(
+                    "EXPOS_SETTING_CHANGED key=audio-volume value={}\r\n",
+                    self.preferences.audio_volume
+                );
+            }
+            (SettingsCategory::Audio, 1) => {
+                self.preferences.audio_muted = !self.preferences.audio_muted;
+                audio::set_muted(self.preferences.audio_muted);
+                self.settings_notice = "Audio mute updated.";
+                slog!(
+                    "EXPOS_SETTING_CHANGED key=audio-muted value={}\r\n",
+                    self.preferences.audio_muted
+                );
+            }
+            (SettingsCategory::Audio, 2) => {
+                self.settings_notice = if audio::play_tone(660, 120).is_ok() {
+                    "Playing a bounded PCM test tone."
+                } else {
+                    "No supported audio output is active."
+                };
+                slog!("EXPOS_SETTING_CHANGED key=audio-test action=play\r\n");
+            }
+            (SettingsCategory::Audio, 3) => {
+                audio::stop();
+                self.settings_notice = "Audio playback stopped.";
+                slog!("EXPOS_SETTING_CHANGED key=audio-test action=stop\r\n");
             }
             (SettingsCategory::Performance, 0) => {
                 self.full_redraw_requested = true;
@@ -4448,6 +5008,14 @@ impl DesktopState {
                 );
                 self.settings_notice = "Window focus policy updated.";
             }
+            (SettingsCategory::Windows, 8) => {
+                self.preferences.window_tiling = shift_index(
+                    self.preferences.window_tiling,
+                    WINDOW_TILING_LABELS.len() as u8,
+                    direction,
+                );
+                self.settings_notice = "Keyboard tiling layout updated.";
+            }
             (SettingsCategory::Taskbar, 0) => {
                 self.preferences.taskbar_placement =
                     self.preferences.taskbar_placement.shifted(direction);
@@ -4536,7 +5104,7 @@ impl DesktopState {
                 );
                 self.settings_notice = "Taskbar clock precision updated.";
             }
-            (SettingsCategory::Taskbar, row @ 7..=10) => {
+            (SettingsCategory::Taskbar, row @ 7..=12) => {
                 if self.preferences.taskbar_placement.vertical() {
                     self.settings_notice = "Small widgets are shown on horizontal taskbars.";
                     self.save_preferences();
@@ -4546,7 +5114,9 @@ impl DesktopState {
                     7 => TASKBAR_WIDGET_DATE,
                     8 => TASKBAR_WIDGET_ACTIVE_APP,
                     9 => TASKBAR_WIDGET_WEATHER,
-                    _ => TASKBAR_WIDGET_PERFORMANCE,
+                    10 => TASKBAR_WIDGET_PERFORMANCE,
+                    11 => TASKBAR_WIDGET_AUDIO,
+                    _ => TASKBAR_WIDGET_TIMEZONE,
                 };
                 self.preferences.taskbar_widgets ^= flag;
                 self.full_redraw_requested = true;
@@ -4737,6 +5307,11 @@ impl DesktopState {
                 self.browser_active_tab = 0;
                 self.browser_bookmarks = [BrowserBookmark::EMPTY; BROWSER_BOOKMARK_CAPACITY];
                 self.browser_bookmark_count = 0;
+                self.browser_web_state = BrowserWebState::new();
+                self.browser_resources = BrowserResourceStats::default();
+                self.browser_media.clear();
+                audio::stop();
+                self.persist_browser_web_state();
                 self.browser_history_locked = true;
                 self.navigate("expos://home", HOME);
                 slog!("EXPOS_SETTING_CHANGED key=browser-data value=cleared\r\n");
@@ -5182,10 +5757,14 @@ impl DesktopState {
         self.terminal_push(
             "  help clear status version hostname pwd whoami id uname uptime neofetch",
         );
-        self.terminal_push("  users display resolution network netstat storage theme history cpus");
+        self.terminal_push(
+            "  users display resolution network netstat storage theme history cpus audio",
+        );
         self.terminal_push("  apps ls ps forms read <name> write <name.txt> <text>");
         self.terminal_push("  ayo list | ayo install <app> | ayo remove <app>");
-        self.terminal_push("  echo <text> windowreset displaydebug [on|off] displayrepair");
+        self.terminal_push(
+            "  echo <text> audiotest audiostop windowreset displaydebug [on|off] displayrepair",
+        );
         self.terminal_push("  open <app> close console shutdown reboot");
         self.terminal_push("Use Up/Down for command history.");
     }
@@ -5629,6 +6208,40 @@ impl DesktopState {
             self.terminal_print_network();
         } else if name.eq_ignore_ascii_case(b"storage") {
             self.terminal_print_storage();
+        } else if name.eq_ignore_ascii_case(b"audio") {
+            let status = audio::status();
+            slog!(
+                "EXPOS_AUDIO_STATUS backend={} volume={} muted={} playing={} submitted={} completed={} underruns={}\r\n",
+                if status.backend == audio::Backend::Ac97 {
+                    "ac97"
+                } else {
+                    "unavailable"
+                },
+                status.volume,
+                status.muted,
+                status.playing,
+                status.submitted_frames,
+                status.completed_buffers,
+                status.underruns
+            );
+            self.terminal_push_parts(&["audio backend: ", status.backend.label()]);
+            self.terminal_push_number("volume: ", status.volume as u64, "%");
+            self.terminal_push_parts(&[
+                "muted: ",
+                if status.muted { "yes" } else { "no" },
+                "  playing: ",
+                if status.playing { "yes" } else { "no" },
+            ]);
+            self.terminal_push_number("submitted frames: ", status.submitted_frames, "");
+        } else if name.eq_ignore_ascii_case(b"audiotest") {
+            if audio::play_tone(660, 120).is_ok() {
+                self.terminal_push("Playing a bounded 660 Hz stereo test tone.");
+            } else {
+                self.terminal_push("Audio output is unavailable on this device.");
+            }
+        } else if name.eq_ignore_ascii_case(b"audiostop") {
+            audio::stop();
+            self.terminal_push("Audio output stopped.");
         } else if name.eq_ignore_ascii_case(b"cpus") || name.eq_ignore_ascii_case(b"smp") {
             self.terminal_print_cpus();
         } else if name.eq_ignore_ascii_case(b"theme") {
@@ -6949,7 +7562,10 @@ fn browser_layout(rect: Rect, styled: expos_core::StyledNode<'_>, content_y: i32
     let button = styled.tag.eq_ignore_ascii_case("button");
     let prefix = if button {
         0
-    } else if styled.node.kind == NodeKind::Image {
+    } else if matches!(
+        styled.node.kind,
+        NodeKind::Image | NodeKind::Audio | NodeKind::Video
+    ) {
         34
     } else if matches!(styled.node.kind, NodeKind::Link | NodeKind::ListItem) {
         18
@@ -6975,7 +7591,10 @@ fn browser_layout(rect: Rect, styled: expos_core::StyledNode<'_>, content_y: i32
     );
     let minimum_height = if button {
         30
-    } else if styled.node.kind == NodeKind::Image {
+    } else if matches!(
+        styled.node.kind,
+        NodeKind::Image | NodeKind::Audio | NodeKind::Video
+    ) {
         42
     } else {
         0
@@ -7442,21 +8061,35 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
                 framebuffer::text(layout.x + 3, layout.text_y, ">", color::GREEN, 1);
             }
             NodeKind::Image => {
-                framebuffer::outline(layout.x + 7, layout.y + 7, 22, 18, color::MUTED);
-                framebuffer::line(
-                    layout.x + 9,
-                    layout.y + 22,
-                    layout.x + 17,
-                    layout.y + 14,
-                    color::MUTED,
-                );
-                framebuffer::line(
-                    layout.x + 17,
-                    layout.y + 14,
-                    layout.x + 27,
-                    layout.y + 22,
-                    color::MUTED,
-                );
+                if desktop.browser_media.image_width != 0
+                    && styled.node.target == desktop.browser_media.image_url
+                {
+                    draw_browser_image(layout.x + 5, layout.y + 5, 28, 28, &desktop.browser_media);
+                } else {
+                    framebuffer::outline(layout.x + 7, layout.y + 7, 22, 18, color::MUTED);
+                    framebuffer::line(
+                        layout.x + 9,
+                        layout.y + 22,
+                        layout.x + 17,
+                        layout.y + 14,
+                        color::MUTED,
+                    );
+                    framebuffer::line(
+                        layout.x + 17,
+                        layout.y + 14,
+                        layout.x + 27,
+                        layout.y + 22,
+                        color::MUTED,
+                    );
+                }
+            }
+            NodeKind::Audio => {
+                framebuffer::outline(layout.x + 7, layout.y + 7, 24, 18, color::GREEN);
+                framebuffer::text(layout.x + 14, layout.y + 12, ">", color::WHITE, 1);
+            }
+            NodeKind::Video => {
+                framebuffer::outline(layout.x + 7, layout.y + 7, 26, 18, color::CYAN);
+                framebuffer::text(layout.x + 16, layout.y + 12, ">", color::WHITE, 1);
             }
             NodeKind::Heading | NodeKind::Paragraph | NodeKind::Link => {}
         }
@@ -7520,6 +8153,25 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
         framebuffer::text(x + width - 270, bottom - 18, "SCROLLED", color::CYAN, 1);
     } else {
         framebuffer::text(x + width - 270, bottom - 18, "BOXED PAGE", color::MUTED, 1);
+    }
+}
+
+fn draw_browser_image(x: i32, y: i32, width: i32, height: i32, image: &BrowserMediaCache) {
+    let source_width = image.image_width as usize;
+    let source_height = image.image_height as usize;
+    if source_width == 0 || source_height == 0 {
+        return;
+    }
+    for output_y in 0..height {
+        let source_y = output_y as usize * source_height / height as usize;
+        for output_x in 0..width {
+            let source_x = output_x as usize * source_width / width as usize;
+            framebuffer::pixel(
+                x + output_x,
+                y + output_y,
+                image.image_pixels[source_y * 64 + source_x],
+            );
+        }
     }
 }
 
@@ -8141,6 +8793,42 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                     available: true,
                 },
             );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                9,
+                "Reduce transparency",
+                "Force opaque windows and panels for easier reading",
+                if desktop.preferences.reduce_transparency {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.reduce_transparency,
+                    available: true,
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                10,
+                "Focus ring",
+                "Use the selected accent around the active window",
+                if desktop.preferences.focus_ring {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.focus_ring,
+                    available: true,
+                },
+            );
         }
         SettingsCategory::Network => {
             settings_row(
@@ -8348,6 +9036,77 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 SettingControl::Toggle {
                     on: desktop.preferences.high_contrast,
                     available: true,
+                },
+            );
+        }
+        SettingsCategory::Audio => {
+            let status = audio::status();
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                0,
+                "Output volume",
+                "Master PCM level for system and browser audio",
+                AUDIO_VOLUME_LABELS[(desktop.preferences.audio_volume / 5) as usize],
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                1,
+                "Mute",
+                "Silence the hardware mixer without losing volume",
+                if desktop.preferences.audio_muted {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.audio_muted,
+                    available: audio::available(),
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                2,
+                "Test output",
+                "Play a short generated 48 kHz stereo PCM tone",
+                "Play",
+                SettingControl::Action {
+                    available: audio::available(),
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                3,
+                "Stop playback",
+                "Halt the active DMA stream immediately",
+                "Stop",
+                SettingControl::Action {
+                    available: status.playing,
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                4,
+                "Output backend",
+                "ExpAudio hardware path and current stream state",
+                status.backend.label(),
+                SettingControl::Status {
+                    ready: status.backend != audio::Backend::Unavailable,
                 },
             );
         }
@@ -8571,6 +9330,17 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 desktop.preferences.focus_policy_label(),
                 SettingControl::Choice,
             );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                8,
+                "Keyboard tiling",
+                "Choose halves, thirds, or quarters for Super+Alt+Arrow",
+                WINDOW_TILING_LABELS[desktop.preferences.window_tiling as usize],
+                SettingControl::Choice,
+            );
         }
         SettingsCategory::Taskbar => {
             settings_row(
@@ -8702,6 +9472,18 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                     "Performance widget",
                     "Show the selected compositor frame target",
                     TASKBAR_WIDGET_PERFORMANCE,
+                ),
+                (
+                    11,
+                    "Audio widget",
+                    "Show mute or active PCM playback state",
+                    TASKBAR_WIDGET_AUDIO,
+                ),
+                (
+                    12,
+                    "Time zone widget",
+                    "Show the selected UTC offset beside the clock",
+                    TASKBAR_WIDGET_TIMEZONE,
                 ),
             ] {
                 settings_row(
@@ -9041,7 +9823,7 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 content_width,
                 0,
                 "Clear browser data",
-                "Reset tabs, histories, bookmarks, find text, and the current document",
+                "Reset tabs, histories, cookies, storage, media, and the current document",
                 "Clear",
                 SettingControl::Action { available: true },
             );
@@ -9464,7 +10246,7 @@ fn draw_dock(desktop: &DesktopState) {
     let width = dock.width as i32;
     let height = dock.height as i32;
     let accent = desktop.preferences.accent.color();
-    if desktop.preferences.taskbar_translucent {
+    if desktop.preferences.taskbar_translucent && !desktop.preferences.reduce_transparency {
         framebuffer::alpha_rect(x, y, width, height, desktop.preferences.panel_color(), 204);
     } else {
         framebuffer::rect(x, y, width, height, desktop.preferences.panel_color());
@@ -9662,6 +10444,39 @@ fn draw_dock(desktop: &DesktopState) {
                     clock_y,
                     desktop.preferences.refresh_rate.hz() as u64,
                     color::GREEN,
+                );
+            }
+            if desktop.preferences.taskbar_widgets & TASKBAR_WIDGET_AUDIO != 0 {
+                widget_right -= 54;
+                let status = audio::status();
+                framebuffer::text(
+                    widget_right + 4,
+                    clock_y,
+                    if status.muted {
+                        "MUTE"
+                    } else if status.playing {
+                        "PLAY"
+                    } else if status.backend != audio::Backend::Unavailable {
+                        "AUDIO"
+                    } else {
+                        "NO AUD"
+                    },
+                    if status.playing {
+                        color::GREEN
+                    } else {
+                        color::MUTED
+                    },
+                    1,
+                );
+            }
+            if desktop.preferences.taskbar_widgets & TASKBAR_WIDGET_TIMEZONE != 0 {
+                widget_right -= 62;
+                framebuffer::text(
+                    widget_right + 4,
+                    clock_y,
+                    browser_text_prefix(TIMEZONE_LABELS[desktop.preferences.timezone as usize], 9),
+                    color::CYAN,
+                    1,
                 );
             }
         }
@@ -10253,6 +11068,163 @@ const fn is_http_redirect(status: u16) -> bool {
     matches!(status, 301 | 302 | 303 | 307 | 308)
 }
 
+fn browser_origin<'a>(url: &str, output: &'a mut [u8]) -> Option<&'a str> {
+    let parsed = network::parse_http_url(url).ok();
+    if let Some(parsed) = parsed {
+        let scheme = if parsed.scheme == network::HttpScheme::Https {
+            "https://"
+        } else {
+            "http://"
+        };
+        let mut length = 0;
+        for part in [scheme.as_bytes(), parsed.host.as_bytes()] {
+            if length + part.len() > output.len() {
+                return None;
+            }
+            output[length..length + part.len()].copy_from_slice(part);
+            length += part.len();
+        }
+        if parsed.port != parsed.scheme.default_port() {
+            if length + 6 > output.len() {
+                return None;
+            }
+            output[length] = b':';
+            length += 1;
+            let mut digits = [0_u8; 5];
+            let mut value = parsed.port;
+            let mut count = 0;
+            loop {
+                digits[digits.len() - 1 - count] = b'0' + (value % 10) as u8;
+                count += 1;
+                value /= 10;
+                if value == 0 {
+                    break;
+                }
+            }
+            output[length..length + count].copy_from_slice(&digits[digits.len() - count..]);
+            length += count;
+        }
+        return core::str::from_utf8(&output[..length]).ok();
+    }
+    if let Some(rest) = url.strip_prefix("expos://") {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        let value = if authority.is_empty() {
+            "expos://local"
+        } else {
+            let prefix = b"expos://";
+            if prefix.len() + authority.len() > output.len() {
+                return None;
+            }
+            output[..prefix.len()].copy_from_slice(prefix);
+            output[prefix.len()..prefix.len() + authority.len()]
+                .copy_from_slice(authority.as_bytes());
+            return core::str::from_utf8(&output[..prefix.len() + authority.len()]).ok();
+        };
+        output[..value.len()].copy_from_slice(value.as_bytes());
+        return core::str::from_utf8(&output[..value.len()]).ok();
+    }
+    None
+}
+
+fn flatten_browser_text(input: &[u8], output: &mut [u8]) -> usize {
+    let mut length = 0;
+    for byte in input.iter().copied() {
+        let byte = if byte.is_ascii_whitespace() {
+            b' '
+        } else {
+            byte
+        };
+        if !byte.is_ascii_graphic() && byte != b' ' {
+            continue;
+        }
+        if byte == b' ' && (length == 0 || output[length - 1] == b' ') {
+            continue;
+        }
+        if length == output.len() {
+            break;
+        }
+        output[length] = byte;
+        length += 1;
+    }
+    while length != 0 && output[length - 1] == b' ' {
+        length -= 1;
+    }
+    length
+}
+
+fn decode_browser_image(bytes: &[u8], url: &str, cache: &mut BrowserMediaCache) -> bool {
+    if bytes.len() < 54 || &bytes[..2] != b"BM" {
+        return false;
+    }
+    let Some(pixel_offset) = browser_u32(bytes, 10).map(|value| value as usize) else {
+        return false;
+    };
+    let Some(width) = browser_i32(bytes, 18) else {
+        return false;
+    };
+    let Some(height) = browser_i32(bytes, 22) else {
+        return false;
+    };
+    let Some(planes) = browser_u16(bytes, 26) else {
+        return false;
+    };
+    let Some(bits) = browser_u16(bytes, 28) else {
+        return false;
+    };
+    let Some(compression) = browser_u32(bytes, 30) else {
+        return false;
+    };
+    let top_down = height < 0;
+    let height = height.unsigned_abs() as usize;
+    let width = width.unsigned_abs() as usize;
+    if planes != 1
+        || !matches!(bits, 24 | 32)
+        || compression != 0
+        || width == 0
+        || height == 0
+        || width > 64
+        || height > 64
+    {
+        return false;
+    }
+    let bytes_per_pixel = bits as usize / 8;
+    let row_bytes = (width * bytes_per_pixel).div_ceil(4) * 4;
+    if pixel_offset
+        .checked_add(row_bytes.saturating_mul(height))
+        .is_none_or(|end| end > bytes.len())
+    {
+        return false;
+    }
+    for y in 0..height {
+        let source_y = if top_down { y } else { height - 1 - y };
+        let row = pixel_offset + source_y * row_bytes;
+        for x in 0..width {
+            let offset = row + x * bytes_per_pixel;
+            cache.image_pixels[y * 64 + x] = ((bytes[offset + 2] as u32) << 16)
+                | ((bytes[offset + 1] as u32) << 8)
+                | bytes[offset] as u32;
+        }
+    }
+    cache.image_width = width as u8;
+    cache.image_height = height as u8;
+    cache.image_url = BrowserText::new(url).unwrap_or(BrowserText::empty());
+    true
+}
+
+fn browser_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+    let value = bytes.get(offset..offset + 2)?;
+    Some(u16::from_le_bytes([value[0], value[1]]))
+}
+
+fn browser_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    let value = bytes.get(offset..offset + 4)?;
+    Some(u32::from_le_bytes([value[0], value[1], value[2], value[3]]))
+}
+
+fn browser_i32(bytes: &[u8], offset: usize) -> Option<i32> {
+    browser_u32(bytes, offset).map(|value| value as i32)
+}
+
 fn resolve_browser_link(base: &str, target: &str, output: &mut [u8]) -> Option<usize> {
     let target = target.trim();
     if target.is_empty() || !target.is_ascii() {
@@ -10419,34 +11391,57 @@ mod tests {
     }
 
     #[test]
+    fn bounded_bmp_decoder_preserves_dimensions_and_rgb_pixels() {
+        let mut bitmap = [0_u8; 62];
+        bitmap[..2].copy_from_slice(b"BM");
+        bitmap[2..6].copy_from_slice(&62_u32.to_le_bytes());
+        bitmap[10..14].copy_from_slice(&54_u32.to_le_bytes());
+        bitmap[14..18].copy_from_slice(&40_u32.to_le_bytes());
+        bitmap[18..22].copy_from_slice(&2_i32.to_le_bytes());
+        bitmap[22..26].copy_from_slice(&1_i32.to_le_bytes());
+        bitmap[26..28].copy_from_slice(&1_u16.to_le_bytes());
+        bitmap[28..30].copy_from_slice(&24_u16.to_le_bytes());
+        bitmap[54..60].copy_from_slice(&[0, 0, 255, 0, 255, 0]);
+        let mut cache = BrowserMediaCache::new();
+        assert!(decode_browser_image(&bitmap, "/material.bmp", &mut cache));
+        assert_eq!(cache.image_width, 2);
+        assert_eq!(cache.image_height, 1);
+        assert_eq!(cache.image_pixels[0], 0x00ff_0000);
+        assert_eq!(cache.image_pixels[1], 0x0000_ff00);
+        assert_eq!(cache.image_url.as_str(), "/material.bmp");
+    }
+
+    #[test]
     fn performance_settings_are_conservative_and_have_a_dedicated_category() {
         let preferences = DesktopPreferences::from_persistent(state::PersistentPreferences::new());
         assert!(!preferences.window_shadows);
         assert!(!preferences.wallpaper_effects);
         assert!(!preferences.responsive_presentation);
         assert_eq!(preferences.presentation_policy_label(), "Efficient");
-        assert_eq!(SettingsCategory::ALL.len(), 17);
-        assert_eq!(SettingsCategory::Performance.index(), 5);
+        assert_eq!(SettingsCategory::ALL.len(), 18);
+        assert_eq!(SettingsCategory::Audio.index(), 5);
+        assert_eq!(SettingsCategory::Performance.index(), 6);
+        assert_eq!(SettingsCategory::Audio.row_count(), 5);
         assert_eq!(SettingsCategory::Performance.row_count(), 4);
     }
 
     #[test]
     fn customization_pages_expose_more_than_one_thousand_real_values() {
-        assert_eq!(CUSTOMIZATION_VALUE_COUNT, 1_172);
+        assert_eq!(CUSTOMIZATION_VALUE_COUNT, 1_288);
         const { assert!(CUSTOMIZATION_VALUE_COUNT >= 1_000) };
         const { assert!(state::CUSTOMIZATION_SELECTABLE_VALUES >= 1_000) };
-        assert_eq!(SettingsCategory::Profiles.row_count(), 6);
+        assert_eq!(SettingsCategory::Profiles.row_count(), 8);
         assert_eq!(SettingsCategory::Appearance.row_count(), 8);
-        assert_eq!(SettingsCategory::Accessibility.row_count(), 9);
-        assert_eq!(SettingsCategory::Windows.row_count(), 8);
-        assert_eq!(SettingsCategory::Taskbar.row_count(), 11);
+        assert_eq!(SettingsCategory::Accessibility.row_count(), 11);
+        assert_eq!(SettingsCategory::Windows.row_count(), 9);
+        assert_eq!(SettingsCategory::Taskbar.row_count(), 13);
         assert_eq!(SettingsCategory::Menu.row_count(), 9);
         assert_eq!(SettingsCategory::Terminal.row_count(), 5);
         assert_eq!(SettingsCategory::Language.row_count(), 5);
         assert_eq!(SettingsCategory::Time.row_count(), 7);
         let preferences = DesktopPreferences::from_persistent(state::PersistentPreferences::new());
         let extension = preferences.encode_ui_extension();
-        assert_eq!(&extension[..4], b"DUI2");
+        assert_eq!(&extension[..4], b"DUI3");
         assert!(preferences.clock_24h);
         let mut label = [0_u8; 16];
         assert_eq!(format_signed_minutes(345, &mut label), "+05:45");
@@ -10491,6 +11486,8 @@ mod tests {
         assert_eq!(accessible.titlebar_density, 4);
         assert_eq!(accessible.cursor, CursorChoice::Crosshair);
         assert_eq!(accessible.animation_level, 0);
+        assert!(accessible.reduce_transparency);
+        assert!(accessible.focus_ring);
         assert_eq!(accessible.refresh_rate, state::RefreshRate::Hz120);
         assert!(!accessible.vsync);
         assert_eq!(accessible.locale, Locale::Hebrew.persisted());
@@ -10513,6 +11510,15 @@ mod tests {
         assert_eq!(touch.taskbar_size, 8);
         assert_eq!(touch.menu_density, 4);
         assert_eq!(touch.ui_scale, 6);
+
+        let night = current.with_profile(CustomizationProfile::Night);
+        assert!(night.reduce_transparency);
+        assert!(!night.notification_animations);
+
+        let presentation = current.with_profile(CustomizationProfile::Presentation);
+        assert!(presentation.high_contrast);
+        assert!(presentation.focus_ring);
+        assert!(presentation.reduce_transparency);
     }
 
     #[test]

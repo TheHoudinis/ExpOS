@@ -27,11 +27,14 @@ pub use abi::{
     AbiCall, AbiRequest, AbiResponse, AbiStatus, NativeCallGate, FORM_ABI_VERSION, GO_ABI_VERSION,
 };
 pub use browser::{
-    BorderStyle, BoxEdges, BrowserError, BrowserText, ComputedStyle, CssColor, CssVisibility,
-    DisplayMode, Document, DocumentNode, DomEvent, NodeKind, ScriptRejection, ScriptReport,
-    SearchResultsDocument, StyledNode, TextAlign, BROWSER_TEXT_CAPACITY,
-    MAX_BROWSER_DOCUMENT_BYTES, MAX_BROWSER_NODES, MAX_BROWSER_SCRIPTS, MAX_CLICK_HANDLERS,
-    MAX_SCRIPT_BYTES, MAX_SCRIPT_STATEMENTS, MAX_SEARCH_RESULTS, MAX_STYLE_RULES,
+    BorderStyle, BoxEdges, BrowserError, BrowserText, BrowserWebState, ComputedStyle, CssColor,
+    CssVisibility, DisplayMode, Document, DocumentNode, DomEvent, ExternalResource,
+    ExternalResourceKind, NodeKind, ResourceManifest, ScriptRejection, ScriptReport,
+    SearchResultsDocument, StorageArea, StyledNode, TextAlign, WebApiRequest, WebStateError,
+    BROWSER_TEXT_CAPACITY, MAX_BROWSER_DOCUMENT_BYTES, MAX_BROWSER_NODES, MAX_BROWSER_SCRIPTS,
+    MAX_CLICK_HANDLERS, MAX_COOKIE_ENTRIES, MAX_EXTERNAL_RESOURCES, MAX_ORIGIN_RECORDS,
+    MAX_SCRIPT_BYTES, MAX_SCRIPT_STATEMENTS, MAX_SEARCH_RESULTS, MAX_STORAGE_ENTRIES,
+    MAX_STYLE_RULES, MAX_WEB_API_REQUESTS,
 };
 pub use budget::{BudgetError, ExpBudget, ResourceAccount, ResourceKind, RESOURCE_KIND_COUNT};
 pub use capability::{

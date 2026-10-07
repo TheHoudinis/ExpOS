@@ -1,9 +1,10 @@
-# ExpOS v9.1 “Acopolis”
+# ExpOS v9.1.3 “Acopolis”
 
-**Acopolis** is the v9.1 feature and hardening update: thirty functional,
-optional Ayo-installed desktop apps; expanded persisted time, regional and
-taskbar customization; a live five-day Open-Meteo Weather experience; tighter
-network/package boundaries; and lower-cost cached weather rendering.
+**Acopolis** v9.1.3 is the feature and hardening update: thirty functional,
+optional Ayo-installed desktop apps; expanded persisted time, regional,
+taskbar, window and accessibility customization; a live five-day Open-Meteo
+Weather experience; a bounded external-resource/Web-state Browser bridge; and
+native AC'97 PCM audio output.
 
 ExpOS is the Form-native operating system described by
 [`docs/PHILOSOPHY.txt`](docs/PHILOSOPHY.txt). The current image contains:
@@ -45,12 +46,14 @@ ExpOS is the Form-native operating system described by
   menu layouts, direct entries for
   installed Ayo apps, menu density/content/category/motion controls, and a
   taskbar with movable, closable, minimizable and maximizable windows plus
-  optional date, active-app, weather and compositor-rate widgets;
+  optional date, active-app, weather, compositor-rate, audio and time-zone
+  widgets, plus keyboard-selectable half, third and quarter window tiling;
 - a five-day Weather forecast with live conditions, precipitation chances,
   Celsius/Fahrenheit switching, persisted last results and cached coordinates;
 - an interactive Settings control center for profiles, accessibility,
-  appearance, windows, taskbar, display, performance, input, network, Wi-Fi,
-  Bluetooth, privacy, system, terminal, language, time zone, date/time and menu behavior, including six coordinated
+  appearance, windows, taskbar, display, audio, performance, input, network,
+  Wi-Fi, Bluetooth, privacy, system, terminal, language, time zone, date/time
+  and menu behavior, including eight coordinated
   desktop profiles, 256 coordinated theme palettes, 252 wallpaper variants,
   256 accent colors, 256 backdrop tones, four cursor themes, five font faces
   and three real font weights;
@@ -67,10 +70,15 @@ ExpOS is the Form-native operating system described by
 - a graphical Browser that fetches and renders bounded `http://` and
   `https://` documents, provides six tab sessions with independent history and
   scroll, eight bookmarks and find-in-page, applies a native CSS subset, runs a
-  deterministic DOM-mutation/click-handler JavaScript subset, and searches
+  deterministic DOM-mutation/click-handler JavaScript subset, loads bounded
+  external CSS/scripts/BMP images/PCM WAV audio, exposes an origin-scoped
+  fetch/cookie/local-storage/session-storage bridge, and searches
   DuckDuckGo's non-JavaScript HTML endpoint from the address bar; direct
   Wikipedia article links use its live HTTPS summary endpoint and render as a
   scrollable reader;
+- ExpAudio with an ASL-owned AC'97 PCI backend, 48 kHz stereo DMA, persistent
+  volume/mute controls, a test tone, and bounded PCM WAV conversion from
+  8/16/24/32-bit mono or stereo sources;
 - graphical and console login for Operator, Power and Guest authority;
 - a bright white-on-black native command deck with cyan/green identity
   accents, a structured startup banner, grouped help, and aligned system
@@ -189,6 +197,7 @@ make ring3-check    # verify CPL3, per-Form CR3, ABI calls and timer quotas
 make iso            # build the fallback build/expos.iso
 make check          # boot and exercise the command environment
 make display-check  # verify desktop and window lifecycle
+make audio-check    # verify AC'97 discovery, DMA submission and controls in QEMU
 make network-check  # verify ICMP, TCP, HTTP and Browser against a local fixture
 make weather-check  # test shell/GUI Ayo installs and live Open-Meteo weather
 make internet-check # verify live DNS and public HTTP (requires Internet access)
@@ -295,7 +304,7 @@ find result counter and `TLS`/`WEB`/`FORM` omnibox indicators expose the same
 actions without the keyboard.
 
 Settings controls are clickable and keyboard-accessible. Its category and row
-viewports follow the selection, so all fourteen pages and long
+viewports follow the selection, so all eighteen pages and long
 Menu/Windows/Accessibility lists remain usable at 480p. Appearance, taskbar,
 status-area, border,
 contrast, pointer-speed, theme, wallpaper, cursor and font changes take effect
@@ -304,22 +313,26 @@ and Bold stroke weights preserve the existing text layout while visibly
 changing glyph rendering.
 
 The Windows page controls corner radius, border width, titlebar height, backdrop
-and titlebar opacity, bounded off-screen travel, edge snapping, snap distance and
-click/sloppy/pointer focus. Off-screen travel is configurable from contained to
+and titlebar opacity, bounded off-screen travel, edge snapping, snap distance,
+click/sloppy/pointer focus, and keyboard tiling into halves, thirds or quarters.
+Off-screen travel is configurable from contained to
 256 px; movement remains bounded so a recovery strip or titlebar stays
 reachable. The Taskbar page controls bottom/top/left/right placement, nine
 panel sizes, start/center/end app alignment, edge-reveal auto-hide,
-translucency, horizontal app labels, hardware-RTC seconds and four small widgets.
+translucency, horizontal app labels, hardware-RTC seconds and six small widgets,
+including live audio and time-zone status.
 The Date & time page adds 16 time zones, 12/24-hour display, a persisted
 15-minute manual correction, regional date formats and week start. The cursor shadow
 is independently switchable. The Menu page controls list/grid layout, density,
 icon scale, built-in and installed-app visibility, categories, motion and hints;
 installed Ayo apps open directly from this launcher rather than a nested Apps
-list. The Profiles page applies Balanced, Compact, Focus, Accessible, Showcase
-or Touch-friendly settings as one persistent transaction while preserving the
+list. The Profiles page applies Balanced, Compact, Focus, Accessible, Showcase,
+Touch-friendly, Night or Presentation settings as one persistent transaction while preserving the
 chosen display timing and system visibility. Accessibility gathers contrast,
-font, drag-target, taskbar-target, pointer, motion and hint controls in one
-place. Across the customization pages, 1,172 selectable values are directly
+font, drag-target, taskbar-target, pointer, motion, reduced-transparency,
+visible-focus-ring and hint controls in one place. The Audio page controls
+volume, mute, a hardware test tone and stop action, and reports the active
+backend. Across the customization pages, 1,288 selectable values are directly
 wired to rendering, geometry or interaction. That includes six named plus 250
 procedural theme palettes, 256 persisted accent colors, 252 wallpaper variants
 across seven procedural patterns, and three named plus 253 procedural backdrop
@@ -356,7 +369,7 @@ still honored. Fresh state uses Efficient presentation with shadows and
 wallpaper effects off, so the desktop begins with the least expensive renderer
 path. Weather refreshes reuse persisted coordinates to skip redundant geocoding,
 and its animation is capped at four damage-only frames per second. These choices
-persist. With the keyboard, `6` selects Performance, `j`/`k`
+persist. With the keyboard, `7` selects Performance, `j`/`k`
 select a row, Enter or Space activates it, and `+`/`-` move choices.
 
 ExpDisplay Portal adopts compositor concepts also used by Wayland—client-owned
@@ -427,12 +440,24 @@ border and radius, font size/weight, line height, display, visibility, margin,
 padding, maximum width and text alignment with tag/class/id specificity and
 inline styles. JavaScript is not
 arbitrary ECMAScript; only deterministic document title, node text, supported
-style, visibility and click-handler mutations run. External
-stylesheet/script/image loading, general Web APIs, `fetch`, cookies,
-local/session storage, media containers/codecs, audio/video output and GPU
-acceleration are absent. The workflow is intentionally Chromium-like, but the
-engine is not Chromium/Blink/V8 compatible. Consequently, fetching YouTube
-HTML does **not** make YouTube playback work.
+style, visibility and click-handler mutations run. A twelve-entry resource
+manifest can load external CSS, deterministic scripts, one bounded 64x64 BMP
+image cache and one bounded PCM WAV media cache. An eight-request per-document
+bridge supports GET-style `fetch`/`fetchText`, `document.cookie`, and
+origin-partitioned local/session storage set/get operations; local storage is
+persisted in `BrowserData.state`, while cookies and session storage end with the
+session. These are deliberate subsets, not general Web APIs. Compressed images,
+fonts, MP3/AAC/Opus, video decoding/output and GPU raster acceleration remain
+absent. The workflow is intentionally Chromium-like, but the engine is not
+Chromium/Blink/V8 compatible. Consequently, fetching YouTube HTML does **not**
+make YouTube playback work.
+
+ExpAudio currently supports the QEMU/Intel-compatible AC'97 PCM-out interface.
+It converts bounded RIFF/WAVE integer PCM at 8-192 kHz, mono or stereo, and
+8/16/24/32-bit depth into 48 kHz stereo signed-16 DMA. Settings and the
+graphical Terminal (`audio`, `audiotest`, `audiostop`) expose real backend and
+playback state. This is full end-to-end PCM output, not a claim of universal
+sound-card support or compressed-media/video codec coverage.
 
 IPv6, physical Wi-Fi drivers, a USB host/Bluetooth data path, concurrent
 sockets, TCP servers and downloads are also absent. HTTP, TLS record and

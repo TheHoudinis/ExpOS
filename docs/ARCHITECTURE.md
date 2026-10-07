@@ -302,15 +302,18 @@ either and refuses to run without at least two online CPUs.
   taskbar can occupy any edge, use
   one of nine thicknesses, align running apps at start/center/end, auto-hide and
   reveal at that edge, blend translucently, show horizontal labels, and include
-  RTC seconds plus date, active-app, Weather and presentation-rate widgets. The
-  seventeen-category Settings UI adds coordinated whole-desktop
+  RTC seconds plus date, active-app, Weather, presentation-rate, audio and
+  time-zone widgets. Windows also supports persisted keyboard tiling into
+  halves, thirds or quarters. The eighteen-category Settings UI adds coordinated whole-desktop
   Profiles, dedicated Accessibility, Terminal and Language pages, and a Menu
   page for list, grid, compact-grid and dashboard layout, density, scale,
   content visibility, categories and motion, and computes compact category/row
   viewports so the selected item remains visible at 480p. Appearance, Windows
-  Taskbar, Menu, Date & time and Profiles expose 1,172 directly working selectable values.
-  Profiles atomically apply Balanced, Compact, Focus, Accessible, Showcase or
-  Touch-friendly combinations through the same persisted preference path. Its
+  Taskbar, Menu, Date & time and Profiles expose 1,288 directly working selectable values.
+  Profiles atomically apply Balanced, Compact, Focus, Accessible, Showcase,
+  Touch-friendly, Night or Presentation combinations through the same persisted
+  preference path. Accessibility also persists reduced transparency and an
+  explicit focus ring. Its
   Display page also selects a 60, 75, 120 or 144 Hz compositor presentation
   target and optional VSync. These are software-pacing targets, not negotiated
   physical monitor modes. The Performance page independently controls window
@@ -458,14 +461,27 @@ either and refuses to run without at least two online CPUs.
   text tags and unloaded image placeholders, and computes a bounded CSS subset
   for tag, class, id and inline rules, including border radius, maximum width
   and line height. It then runs a deterministic JavaScript subset for document title, node
-  text, supported styles, visibility and local click handlers. It does not
-  evaluate arbitrary ECMAScript or load external scripts, stylesheets, images
-  or fonts, and it exposes no general Web APIs, cookies or storage. Media
-  containers/codecs, audio/video output and GPU rendering are absent. The
+  text, supported styles, visibility and local click handlers. A bounded
+  twelve-resource manifest loads authenticated external stylesheets,
+  deterministic scripts, a 64x64 BMP image cache and a PCM WAV media cache.
+  The per-document Web bridge admits at most eight GET-style fetch, cookie, or
+  local/session-storage set/get requests and partitions all state by origin;
+  only local storage is durable in `BrowserData.state`. It does not evaluate
+  arbitrary ECMAScript or expose a standards-complete Web API surface. Fonts,
+  compressed images/audio, video decoding/output and GPU rasterization are
+  absent. The
   browser chrome is Chromium-like; the engine is not Blink/V8 or Chromium
   extension compatible. A
   verified fetch of `www.youtube.com` may return HTML, but YouTube playback is
   not supported.
+- ExpAudio is a bounded kernel service owned through ASL. Its first backend
+  drives the Intel/QEMU-compatible AC'97 PCM-out bus-master interface with one
+  below-4-GiB DMA descriptor, persistent volume/mute policy and a 48 kHz stereo
+  signed-16 output format. RIFF/WAVE integer PCM inputs are validated and
+  converted from 8-192 kHz, mono/stereo and 8/16/24/32-bit depth. Settings,
+  Browser `<audio>` controls and graphical Terminal diagnostics share this
+  service. MP3/AAC/Opus, mixing, capture, HDA/USB audio and video codecs are not
+  implemented.
 - Form ABI v1 freezes language-neutral 72-byte requests, 40-byte responses,
   call/status numbers, FIN caller identity, and explicit Handles for identity,
   IPC, display, input/events, time, storage, networking, browser navigation,

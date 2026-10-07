@@ -17,6 +17,7 @@ pub enum Kind {
     StorageNvme,
     UsbXhci,
     NetworkEthernet,
+    Audio,
     OtherPci,
 }
 
@@ -29,6 +30,7 @@ impl Kind {
             Self::StorageNvme => "storage-nvme",
             Self::UsbXhci => "usb-xhci",
             Self::NetworkEthernet => "network-ethernet",
+            Self::Audio => "audio",
             Self::OtherPci => "pci-function",
         }
     }
@@ -42,6 +44,7 @@ pub enum Owner {
     ExpStorage,
     ExpUsb,
     ExpNetwork,
+    ExpAudio,
 }
 
 impl Owner {
@@ -53,6 +56,7 @@ impl Owner {
             Self::ExpStorage => "ExpStorage",
             Self::ExpUsb => "ExpUSB",
             Self::ExpNetwork => "ExpNetwork",
+            Self::ExpAudio => "ExpAudio",
         }
     }
 }
@@ -208,6 +212,7 @@ const fn classify(function: pci::Function) -> Kind {
         (0x03, _, _) => Kind::Display,
         (0x0C, 0x03, 0x30) => Kind::UsbXhci,
         (0x02, 0x00, _) => Kind::NetworkEthernet,
+        (0x04, _, _) => Kind::Audio,
         _ => Kind::OtherPci,
     }
 }

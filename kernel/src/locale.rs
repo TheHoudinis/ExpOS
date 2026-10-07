@@ -241,12 +241,13 @@ const ESPERANTO: [&str; 22] = [
     "Instalado finiĝis",
 ];
 
-const CATEGORIES_EN: [&str; 17] = [
+const CATEGORIES_EN: [&str; 18] = [
     "System",
     "Appearance",
     "Network & Wi-Fi",
     "Bluetooth",
     "Display",
+    "Audio",
     "Performance",
     "Mouse & keyboard",
     "Windows",
@@ -260,12 +261,13 @@ const CATEGORIES_EN: [&str; 17] = [
     "Language & region",
     "Date & time",
 ];
-const CATEGORIES_RU: [&str; 17] = [
+const CATEGORIES_RU: [&str; 18] = [
     "Система",
     "Внешний вид",
     "Сеть и Wi-Fi",
     "Bluetooth",
     "Экран",
+    "Звук",
     "Производительность",
     "Мышь и клавиатура",
     "Окна",
@@ -279,12 +281,13 @@ const CATEGORIES_RU: [&str; 17] = [
     "Язык и регион",
     "Дата и время",
 ];
-const CATEGORIES_HE: [&str; 17] = [
+const CATEGORIES_HE: [&str; 18] = [
     "מערכת",
     "מראה",
     "רשת ו-Wi-Fi",
     "Bluetooth",
     "תצוגה",
+    "שמע",
     "ביצועים",
     "עכבר ומקלדת",
     "חלונות",
@@ -298,12 +301,13 @@ const CATEGORIES_HE: [&str; 17] = [
     "שפה ואזור",
     "תאריך ושעה",
 ];
-const CATEGORIES_DE: [&str; 17] = [
+const CATEGORIES_DE: [&str; 18] = [
     "System",
     "Darstellung",
     "Netzwerk & Wi-Fi",
     "Bluetooth",
     "Anzeige",
+    "Audio",
     "Leistung",
     "Maus & Tastatur",
     "Fenster",
@@ -317,12 +321,13 @@ const CATEGORIES_DE: [&str; 17] = [
     "Sprache & Region",
     "Datum & Uhrzeit",
 ];
-const CATEGORIES_EO: [&str; 17] = [
+const CATEGORIES_EO: [&str; 18] = [
     "Sistemo",
     "Aspekto",
     "Reto kaj Wi-Fi",
     "Bluetooth",
     "Ekrano",
+    "Sono",
     "Efikeco",
     "Muso kaj klavaro",
     "Fenestroj",

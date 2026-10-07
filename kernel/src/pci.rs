@@ -8,6 +8,7 @@ use crate::port;
 
 const CONFIG_ADDRESS: u16 = 0xCF8;
 const CONFIG_DATA: u16 = 0xCFC;
+const COMMAND_IO: u16 = 1;
 const COMMAND_MEMORY: u16 = 1 << 1;
 const COMMAND_BUS_MASTER: u16 = 1 << 2;
 const STATUS_CAPABILITIES: u16 = 1 << 4;
@@ -38,6 +39,11 @@ pub struct MemoryBar {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IoBar {
+    pub address: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Capability {
     pub id: u8,
     pub offset: u8,
@@ -57,6 +63,13 @@ impl Function {
     pub fn enable_memory_bus_master(self) {
         let value = self.read(0x04);
         let command = value as u16 | COMMAND_MEMORY | COMMAND_BUS_MASTER;
+        self.write(0x04, (value & 0xFFFF_0000) | command as u32);
+    }
+
+    /// Enable I/O decoding and DMA for a claimed legacy PCI function.
+    pub fn enable_io_bus_master(self) {
+        let value = self.read(0x04);
+        let command = value as u16 | COMMAND_IO | COMMAND_BUS_MASTER;
         self.write(0x04, (value & 0xFFFF_0000) | command as u32);
     }
 
@@ -82,6 +95,23 @@ impl Function {
             address,
             prefetchable: low & (1 << 3) != 0,
             is_64_bit,
+        })
+    }
+
+    pub fn io_bar(self, index: u8) -> Option<IoBar> {
+        if index >= 6 {
+            return None;
+        }
+        let value = self.read(0x10 + index * 4);
+        if value == 0 || value == u32::MAX || value & 1 == 0 {
+            return None;
+        }
+        let address = (value & !3) as u64;
+        if address == 0 || address > u16::MAX as u64 {
+            return None;
+        }
+        Some(IoBar {
+            address: address as u16,
         })
     }
 

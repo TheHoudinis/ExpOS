@@ -1,6 +1,6 @@
 [package]
 name = "expos-kernel"
-version = "9.1.0"
+version = "9.1.3"
 edition = "2021"
 
 # Bare-metal static library: linked together with boot/boot.asm by ld.
