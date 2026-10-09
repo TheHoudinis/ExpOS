@@ -1,10 +1,11 @@
-# ExpOS v9.1.3 “Acopolis”
+# ExpOS v9.2-dev “Mole”
 
-**Acopolis** v9.1.3 is the feature and hardening update: thirty functional,
-optional Ayo-installed desktop apps; expanded persisted time, regional,
-taskbar, window and accessibility customization; a live five-day Open-Meteo
-Weather experience; a bounded external-resource/Web-state Browser bridge; and
-native AC'97 PCM audio output.
+**Mole** is the in-development v9.2 desktop reliability and interaction update.
+It bounds failed Browser and Weather requests, safely reapplies display modes,
+hardens shell/desktop transitions, adds persisted taskbar styles and icon
+sizing, refreshes Browser and Weather presentation, and introduces a styled
+Power & session menu with lock, display sleep, interrupt-driven suspend,
+restart, and shutdown. This checkout is development work, not a v9.2 release.
 
 ExpOS is the Form-native operating system described by
 [`docs/PHILOSOPHY.txt`](docs/PHILOSOPHY.txt). The current image contains:
@@ -43,9 +44,10 @@ ExpOS is the Form-native operating system described by
   diagnostics; native UEFI uses a validated shadow-backed GOP scanout, while
   BIOS/QEMU retains bounded double-buffered Bochs output and selectable pacing;
 - a flat dark desktop with list, grid, compact-grid and dashboard application
-  menu layouts, direct entries for
+  menu layouts, a styled Power & session surface, direct entries for
   installed Ayo apps, menu density/content/category/motion controls, and a
-  taskbar with movable, closable, minimizable and maximizable windows plus
+  taskbar with edge, floating and accent-rail styles, three icon scales,
+  optional running indicators, movable, closable, minimizable and maximizable windows plus
   optional date, active-app, weather, compositor-rate, audio and time-zone
   widgets, plus keyboard-selectable half, third and quarter window tiling;
 - a five-day Weather forecast with live conditions, precipitation chances,
@@ -73,9 +75,10 @@ ExpOS is the Form-native operating system described by
   deterministic DOM-mutation/click-handler JavaScript subset, loads bounded
   external CSS/scripts/BMP images/PCM WAV audio, exposes an origin-scoped
   fetch/cookie/local-storage/session-storage bridge, and searches
-  DuckDuckGo's non-JavaScript HTML endpoint from the address bar; direct
+  Wikipedia's compact REST endpoint from the address bar; direct
   Wikipedia article links use its live HTTPS summary endpoint and render as a
-  scrollable reader;
+  scrollable reader; interactive transport retries and automatic subresources
+  are capped so a failed or media-heavy site returns control to the desktop;
 - ExpAudio with an ASL-owned AC'97 PCI backend, 48 kHz stereo DMA, persistent
   volume/mute controls, a test tone, and bounded PCM WAV conversion from
   8/16/24/32-bit mono or stereo sources;
@@ -197,12 +200,13 @@ make ring3-check    # verify CPL3, per-Form CR3, ABI calls and timer quotas
 make iso            # build the fallback build/expos.iso
 make check          # boot and exercise the command environment
 make display-check  # verify desktop and window lifecycle
+make power-check    # verify lock, sleep, suspend and shutdown from the power menu
 make audio-check    # verify AC'97 discovery, DMA submission and controls in QEMU
 make network-check  # verify ICMP, TCP, HTTP and Browser against a local fixture
 make weather-check  # test shell/GUI Ayo installs and live Open-Meteo weather
 make internet-check # verify live DNS and public HTTP (requires Internet access)
-make https-check    # verify TLS and fetch youtube.com HTML (requires Internet)
-make search-check   # verify DuckDuckGo HTML address-bar search (requires Internet)
+make https-check    # verify immediate bounded YouTube compatibility handling
+make search-check   # verify Wikipedia REST address-bar search (requires Internet)
 make persistence-check # verify Forms, Handles, settings and checkpoints across boots
 make modern-hardware-check # NVMe/AHCI persistence and USB-only HID input
 make ayo            # test and build Ayo v3
@@ -296,8 +300,8 @@ two-eye mark, the ExpOS version and architecture. Graphical `windowreset`
 returns every application window to its default recoverable position. In
 Browser, click the address field or press `/`, type an `http://` or `https://`
 URL, and press Enter. Text without a scheme is treated as a search query and
-sent to DuckDuckGo's non-JavaScript HTML search; prefix a query with `?` for the
-same behavior. Browser shortcuts are `N` for a new tab, `Tab` to switch tabs,
+sent to Wikipedia's compact REST search; prefix a query with `?` for the same
+behavior. Browser shortcuts are `N` for a new tab, `Tab` to switch tabs,
 `X` to close a tab, `[`/`]` for back/forward, `R` to reload, `B` to toggle a
 bookmark and `F` to open find-in-page. The clickable tab strip, bookmark bar,
 find result counter and `TLS`/`WEB`/`FORM` omnibox indicators expose the same
@@ -332,7 +336,7 @@ chosen display timing and system visibility. Accessibility gathers contrast,
 font, drag-target, taskbar-target, pointer, motion, reduced-transparency,
 visible-focus-ring and hint controls in one place. The Audio page controls
 volume, mute, a hardware test tone and stop action, and reports the active
-backend. Across the customization pages, 1,288 selectable values are directly
+backend. Across the customization pages, 1,296 selectable values are directly
 wired to rendering, geometry or interaction. That includes six named plus 250
 procedural theme palettes, 256 persisted accent colors, 252 wallpaper variants
 across seven procedural patterns, and three named plus 253 procedural backdrop
@@ -410,17 +414,16 @@ The native stack supports:
   or over-budget response, and reports container generations/rejections;
 - six bounded tab sessions with twelve history entries and preserved scroll per
   tab, eight in-session bookmarks, and case-insensitive find-in-page;
-- address-bar search through the canonical
-  `https://duckduckgo.com/html/?q=...` endpoint, with at most three redirects,
-  rejection of HTTPS-to-HTTP downgrades, and projection of up to eight result
-  titles and links into the bounded document model;
+- address-bar search through Wikipedia's compact REST endpoint, with at most
+  eight result titles and verified article links projected into the bounded
+  document model;
 - a direct Wikipedia reader that unwraps DuckDuckGo result redirects, requests
   the live REST summary over verified HTTPS, and provides bounded scrolling.
 
 Use `ifconfig`, `dhcp`, `ping`, `dns`, `fetch` and `netstat` in the console to inspect
 and exercise the network. Type an `http://` or `https://` URL in Browser to
-fetch it through the same native stack. `make https-check` performs a verified
-fetch of the HTML returned by `https://www.youtube.com/`; `make
+fetch it through the same native stack. `make https-check` proves that a
+YouTube navigation returns an immediate bounded compatibility view; `make
 wikipedia-check` boots QEMU and proves a live `en.wikipedia.org` article reaches
 the reader.
 
@@ -449,8 +452,8 @@ persisted in `BrowserData.state`, while cookies and session storage end with the
 session. These are deliberate subsets, not general Web APIs. Compressed images,
 fonts, MP3/AAC/Opus, video decoding/output and GPU raster acceleration remain
 absent. The workflow is intentionally Chromium-like, but the engine is not
-Chromium/Blink/V8 compatible. Consequently, fetching YouTube HTML does **not**
-make YouTube playback work.
+Chromium/Blink/V8 compatible. YouTube addresses therefore open an immediate
+bounded compatibility notice instead of attempting unsupported playback.
 
 ExpAudio currently supports the QEMU/Intel-compatible AC'97 PCM-out interface.
 It converts bounded RIFF/WAVE integer PCM at 8-192 kHz, mono or stereo, and

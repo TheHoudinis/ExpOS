@@ -3,6 +3,6 @@ operator
 expos
 browser
 /https://en.wikipedia.org/wiki/NetBSD
-~	?
+~t
 console
 shutdown

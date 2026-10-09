@@ -1802,9 +1802,31 @@ impl NativeApps {
     }
 
     fn render_weather(&self, x: i32, y: i32, width: i32, height: i32, input: &str) {
-        input_box(x + 12, y + 4, width - 24, input);
-        let card_y = y + 58;
-        let card_height = (height - 74).max(180);
+        // Weather owns its search chrome instead of inheriting the generic
+        // utility-app text box. This keeps location, action and live-source
+        // state visually distinct even on the compact 480p desktop.
+        framebuffer::rounded_rect(x + 12, y + 4, width - 24, 50, 12, 0x0018_2634);
+        framebuffer::rounded_outline(x + 12, y + 4, width - 24, 50, 12, 0x0041_7895);
+        framebuffer::text(x + 28, y + 12, "LOCATION", 0x008E_B8CC, 1);
+        framebuffer::text(
+            x + 28,
+            y + 31,
+            if input.is_empty() {
+                "Search a city"
+            } else {
+                input
+            },
+            if input.is_empty() {
+                0x007A_99A8
+            } else {
+                color::WHITE
+            },
+            1,
+        );
+        framebuffer::rounded_rect(x + width - 106, y + 13, 78, 32, 9, 0x002D_7898);
+        framebuffer::text(x + width - 91, y + 25, "UPDATE", color::WHITE, 1);
+        let card_y = y + 64;
+        let card_height = (height - 80).max(180);
         let (sky_top, sky_bottom) = if self.weather_is_day {
             (0x001B_6FB0, 0x0048_B5D8)
         } else {
@@ -1821,7 +1843,20 @@ impl NativeApps {
                 mixed,
             );
         }
-        framebuffer::outline(x + 12, card_y, width - 24, card_height, 0x007D_CAE8);
+        framebuffer::rounded_outline(x + 12, card_y, width - 24, card_height, 14, 0x007D_CAE8);
+
+        framebuffer::rounded_rect(x + width - 166, card_y + 12, 128, 22, 11, 0x0020_4058);
+        framebuffer::text(
+            x + width - 152,
+            card_y + 20,
+            if matches!(self.weather_state, WeatherState::Ready) {
+                "LIVE  OPEN-METEO"
+            } else {
+                "OPEN-METEO"
+            },
+            0x00D8_F4FF,
+            1,
+        );
 
         let seconds = hardware::timestamp() / hardware::clock_info().tsc_hz.max(1);
         let bob = match seconds % 8 {
@@ -1952,6 +1987,14 @@ impl NativeApps {
                 );
             }
             WeatherState::Loading => {
+                framebuffer::rounded_rect(
+                    x + 28,
+                    card_y + 66,
+                    (width - 56).min(390),
+                    108,
+                    16,
+                    0x0020_4058,
+                );
                 framebuffer::text(
                     x + 34,
                     card_y + 86,
@@ -1972,10 +2015,12 @@ impl NativeApps {
                 }
             }
             WeatherState::Error => {
+                framebuffer::rounded_rect(x + 28, card_y + 66, width - 56, 104, 16, 0x004A_2630);
                 framebuffer::text(x + 34, card_y + 86, "WEATHER UNAVAILABLE", color::WHITE, 2);
                 framebuffer::text(x + 36, card_y + 130, self.weather_notice, 0x00FF_D0D0, 1);
             }
             WeatherState::Empty => {
+                framebuffer::rounded_rect(x + 28, card_y + 64, width - 56, 110, 16, 0x0020_4058);
                 framebuffer::text(x + 34, card_y + 84, "YOUR WEATHER, LIVE", color::WHITE, 2);
                 framebuffer::text(
                     x + 36,

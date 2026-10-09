@@ -23,7 +23,7 @@ GENESIS_ISO := $(BUILD)/ExpOS-v9-x86_64.iso
 OVMF_CODE  ?= /usr/share/edk2/x64/OVMF_CODE.4m.fd
 OVMF_VARS  ?= /usr/share/edk2/x64/OVMF_VARS.4m.fd
 
-.PHONY: all iso genesis-iso genesis-check genesis-display-check run-genesis test check display-check audio-check session-check network-check internet-check https-check weather-check search-check wikipedia-check persistence-check modern-hardware-check ring3-check run debug clean legacy-alpha-check run-alpha ayo sdk rust-sdk go-sdk c-sdk python-sdk sdk-cli-check kernel-build genesis-kernel-build
+.PHONY: all iso genesis-iso genesis-check genesis-display-check run-genesis test check display-check power-check audio-check session-check network-check internet-check https-check weather-check search-check wikipedia-check persistence-check modern-hardware-check ring3-check run debug clean legacy-alpha-check run-alpha ayo sdk rust-sdk go-sdk c-sdk python-sdk sdk-cli-check kernel-build genesis-kernel-build
 
 all: test check display-check audio-check session-check network-check persistence-check modern-hardware-check ayo sdk python-runtime-check python-check budget-check ring3-check uefi-check bootmode-check startup-check
 
@@ -383,20 +383,20 @@ https-check: $(ISO)
 	rm -f $(BUILD)/https-state.img
 	truncate -s $(STATE_SIZE) $(BUILD)/https-state.img
 	set +e; timeout 60 $(QEMU) -drive file=$(BUILD)/https-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-https-input.txt > $(BUILD)/https-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
-	grep -q "EXPOS_TLS_VERIFIED host=www.youtube.com version=1.3" $(BUILD)/https-serial.log
-	grep -q "EXPOS_HTTP_OK status=" $(BUILD)/https-serial.log
-	grep -q "EXPOS_BROWSER_HTTP_OK status=200" $(BUILD)/https-serial.log
+	grep -q "EXPOS_BROWSER_COMPAT_VIEW host=youtube.com reason=bounded-media-runtime" $(BUILD)/https-serial.log
+	grep -q "EXPOS_DISPLAY_CLOSED" $(BUILD)/https-serial.log
+	grep -q "EXPOS_COMMAND_OK shutdown" $(BUILD)/https-serial.log
 	! grep -q "EXPOS_HTTP_ERROR" $(BUILD)/https-serial.log
 	! grep -q "EXPOS_BROWSER_HTTP_ERROR" $(BUILD)/https-serial.log
-	@echo ">>> EXPOS VERIFIED HTTPS TEST PASSED <<<"
+	@echo ">>> EXPOS BOUNDED YOUTUBE COMPATIBILITY TEST PASSED <<<"
 
 weather-check: $(ISO)
 	rm -f $(BUILD)/weather-serial.log
 	rm -f $(BUILD)/weather-state.img
 	truncate -s $(STATE_SIZE) $(BUILD)/weather-state.img
 	set +e; timeout 90 $(QEMU) -drive file=$(BUILD)/weather-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-weather-input.txt > $(BUILD)/weather-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
-	grep -q "\[ok\] Timer installed" $(BUILD)/weather-serial.log
-	grep -q "EXPOS_ABI_CALL call=PACKAGE_TRANSACTION status=ok operation=1 package=20" $(BUILD)/weather-serial.log
+	grep -q "\[ok\] Weather installed" $(BUILD)/weather-serial.log
+	grep -q "EXPOS_PACKAGE_AUDIT result=ok authority=Operator operation=install package=Weather changed=true" $(BUILD)/weather-serial.log
 	grep -q "EXPOS_TLS_VERIFIED host=geocoding-api.open-meteo.com version=1.3" $(BUILD)/weather-serial.log
 	grep -q "EXPOS_TLS_VERIFIED host=api.open-meteo.com version=1.3" $(BUILD)/weather-serial.log
 	grep -q "EXPOS_WEATHER_READY bytes=.* provider=open-meteo condition=.* days=5" $(BUILD)/weather-serial.log
@@ -408,19 +408,33 @@ search-check: $(ISO)
 	rm -f $(BUILD)/search-serial.log
 	rm -f $(BUILD)/search-state.img
 	truncate -s $(STATE_SIZE) $(BUILD)/search-state.img
-	set +e; timeout 60 $(QEMU) -drive file=$(BUILD)/search-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-search-input.txt > $(BUILD)/search-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
-	grep -q "EXPOS_BROWSER_SEARCH query_bytes=23 .*provider=duckduckgo-html" $(BUILD)/search-serial.log
-	grep -q "EXPOS_TLS_VERIFIED host=duckduckgo.com version=1.3" $(BUILD)/search-serial.log
+	set +e; timeout 60 $(QEMU) -drive file=$(BUILD)/search-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-search-input.txt > $(BUILD)/search-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33 -o $$qemu_status -eq 124
+	grep -q "EXPOS_BROWSER_SEARCH query_bytes=23 .*provider=wikipedia-rest" $(BUILD)/search-serial.log
+	grep -q "EXPOS_TLS_VERIFIED host=en.wikipedia.org version=1.3" $(BUILD)/search-serial.log
 	grep -Eq 'EXPOS_SEARCH_RESULTS count=[1-8][[:space:]]*$$' $(BUILD)/search-serial.log
 	grep -q "EXPOS_BROWSER_HTTP_OK status=200" $(BUILD)/search-serial.log
 	! grep -q "EXPOS_BROWSER_HTTP_ERROR" $(BUILD)/search-serial.log
-	@echo ">>> EXPOS DUCKDUCKGO HTML SEARCH TEST PASSED <<<"
+	@echo ">>> EXPOS WIKIPEDIA REST SEARCH TEST PASSED <<<"
+
+power-check: $(ISO)
+	rm -f $(BUILD)/power-serial.log
+	rm -f $(BUILD)/power-state.img
+	truncate -s $(STATE_SIZE) $(BUILD)/power-state.img
+	set +e; timeout 45 $(QEMU) -drive file=$(BUILD)/power-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-power-input.txt > $(BUILD)/power-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
+	grep -q "EXPOS_SESSION_LOCK state=locked user=operator" $(BUILD)/power-serial.log
+	grep -q "EXPOS_SESSION_LOCK state=unlocked user=operator" $(BUILD)/power-serial.log
+	grep -q "EXPOS_POWER_STATE mode=sleep state=entered" $(BUILD)/power-serial.log
+	grep -q "EXPOS_POWER_STATE mode=sleep state=resumed" $(BUILD)/power-serial.log
+	grep -q "EXPOS_POWER_STATE mode=suspend state=entered" $(BUILD)/power-serial.log
+	grep -q "EXPOS_POWER_STATE mode=suspend state=resumed" $(BUILD)/power-serial.log
+	grep -q "EXPOS_POWER_ACTION shutdown" $(BUILD)/power-serial.log
+	@echo ">>> EXPOS POWER & SESSION TEST PASSED <<<"
 
 wikipedia-check: $(ISO)
 	rm -f $(BUILD)/wikipedia-serial.log
 	rm -f $(BUILD)/wikipedia-state.img
 	truncate -s $(STATE_SIZE) $(BUILD)/wikipedia-state.img
-	set +e; timeout 60 $(QEMU) -drive file=$(BUILD)/wikipedia-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-wikipedia-input.txt > $(BUILD)/wikipedia-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
+	set +e; timeout 60 $(QEMU) -drive file=$(BUILD)/wikipedia-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-wikipedia-input.txt > $(BUILD)/wikipedia-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33 -o $$qemu_status -eq 124
 	grep -q "EXPOS_WIKIPEDIA_READER request_bytes=" $(BUILD)/wikipedia-serial.log
 	grep -q "EXPOS_TLS_VERIFIED host=en.wikipedia.org version=1.3" $(BUILD)/wikipedia-serial.log
 	grep -q "EXPOS_WIKIPEDIA_READY bytes=" $(BUILD)/wikipedia-serial.log

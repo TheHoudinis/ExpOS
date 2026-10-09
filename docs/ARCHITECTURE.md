@@ -309,7 +309,7 @@ either and refuses to run without at least two online CPUs.
   page for list, grid, compact-grid and dashboard layout, density, scale,
   content visibility, categories and motion, and computes compact category/row
   viewports so the selected item remains visible at 480p. Appearance, Windows
-  Taskbar, Menu, Date & time and Profiles expose 1,288 directly working selectable values.
+  Taskbar, Menu, Date & time and Profiles expose 1,296 directly working selectable values.
   Profiles atomically apply Balanced, Compact, Focus, Accessible, Showcase,
   Touch-friendly, Night or Presentation combinations through the same persisted
   preference path. Accessibility also persists reduced transparency and an
@@ -447,12 +447,13 @@ either and refuses to run without at least two online CPUs.
   twelve history entries and a scroll position, plus eight in-session
   bookmarks and a case-insensitive find overlay with match highlighting. It
   receives a requester-bound Network Handle only for
-  non-Guest sessions when PIMP networking is enabled. Text entered without a
-  URL scheme is encoded for DuckDuckGo's canonical non-JavaScript HTML endpoint
-  at `https://duckduckgo.com/html/?q=...`. Navigation follows at most three
-  redirects and rejects an HTTPS-to-HTTP downgrade. Search pages are projected
-  into at most eight result titles and links. Wikipedia result wrappers are
-  unwrapped before the request; direct article URLs use Wikipedia's live HTTPS
+  non-Guest sessions when PIMP networking is enabled. Address-bar text without
+  a URL scheme is encoded for Wikipedia's compact
+  REST search endpoint. Results are projected into at most eight verified
+  article titles and links without loading scripts, trackers, or page assets.
+  Navigation follows at most three redirects and rejects an HTTPS-to-HTTP
+  downgrade. DuckDuckGo result wrappers are still unwrapped before the request;
+  direct article URLs use Wikipedia's live HTTPS
   REST summary endpoint and render into a bounded scrollable document. The allocation-free
   document core accepts at most 16 KiB, while the native HTTP client retains at
   most the first 14 KiB of a response body; a document contains at most 48
@@ -472,8 +473,8 @@ either and refuses to run without at least two online CPUs.
   absent. The
   browser chrome is Chromium-like; the engine is not Blink/V8 or Chromium
   extension compatible. A
-  verified fetch of `www.youtube.com` may return HTML, but YouTube playback is
-  not supported.
+  YouTube addresses open an immediate bounded compatibility notice; playback
+  is not supported.
 - ExpAudio is a bounded kernel service owned through ASL. Its first backend
   drives the Intel/QEMU-compatible AC'97 PCM-out bus-master interface with one
   below-4-GiB DMA descriptor, persistent volume/mute policy and a 48 kHz stereo
@@ -531,7 +532,7 @@ off-screen window controls, double-buffered presentation
   persistent 60/75/120/144 Hz
 software pacing, opt-in responsive damaged commits and optional VSync, a
 bounded native HTML/CSS/JavaScript Browser with
-  DuckDuckGo non-JavaScript HTML search and a live Wikipedia summary reader,
+  Wikipedia REST search and a live Wikipedia summary reader,
   dual graphical and console login
 selection, durable accounts/preferences, Ayo v3 artifact transactions, and
 capability-gated native RTL8139/ARP/IPv4/ICMP/UDP/DNS/TCP/HTTP/TLS networking,

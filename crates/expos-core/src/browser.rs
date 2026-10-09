@@ -1267,6 +1267,16 @@ impl Document {
         Ok(())
     }
 
+    pub fn set_target_at_node(&mut self, index: usize, value: &str) -> Result<(), ScriptRejection> {
+        let node = self
+            .nodes
+            .get_mut(index)
+            .and_then(Option::as_mut)
+            .ok_or(ScriptRejection::TargetNotFound)?;
+        node.target = BrowserText::script_value(value)?;
+        Ok(())
+    }
+
     pub fn web_api_requests(&self) -> impl Iterator<Item = WebApiRequest> + '_ {
         self.web_requests[..self.web_request_count as usize]
             .iter()
@@ -2908,7 +2918,7 @@ mod tests {
 
     #[test]
     fn parses_a_safe_local_document_and_links() {
-        let document = Document::parse(
+        let mut document = Document::parse(
             "expos://home",
             "<title>Exp Home</title><h1>Welcome</h1><p>Forms make the environment.</p><a href='expos://about'>About</a>",
         )
@@ -2919,6 +2929,13 @@ mod tests {
         let link = document.nodes().last().unwrap();
         assert_eq!(link.kind, NodeKind::Link);
         assert_eq!(link.target.as_str(), "expos://about");
+        document
+            .set_target_at_node(3, "https://en.wikipedia.org/wiki/ExpOS")
+            .unwrap();
+        assert_eq!(
+            document.nodes().last().unwrap().target.as_str(),
+            "https://en.wikipedia.org/wiki/ExpOS"
+        );
         assert_eq!(
             document
                 .nodes()

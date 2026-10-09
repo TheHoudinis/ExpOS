@@ -52,8 +52,13 @@ const IPV4_UNSPECIFIED: [u8; 4] = [0; 4];
 const BROADCAST_MAC: [u8; 6] = [0xFF; 6];
 
 const IO_WAIT_LIMIT: usize = 2_000_000;
-const RECEIVE_WAIT_LIMIT: usize = 12_000_000;
-const TRANSPORT_RETRIES: usize = 3;
+// Interactive Browser and Weather calls share the desktop thread.  Keep every
+// polling phase tightly bounded so a dead DNS/TCP/TLS peer returns an error
+// instead of making the whole graphical session appear frozen. Two short
+// retries still cover an ordinary lost packet; a failed phase now yields in
+// seconds under QEMU instead of pinning the desktop for roughly a minute.
+const RECEIVE_WAIT_LIMIT: usize = 100_000;
+const TRANSPORT_RETRIES: usize = 2;
 const DHCP_RETRIES: usize = 2;
 const DHCP_WAIT_LIMIT: usize = 4_000_000;
 const DHCP_PACKET_CAPACITY: usize = 576;
@@ -72,11 +77,13 @@ const DNS_CACHE_HOST_CAPACITY: usize = 96;
 const HTTP_REQUEST_CAPACITY: usize = 768;
 const HTTP_WIRE_CAPACITY: usize = 16 * 1024;
 pub const HTTP_BODY_CAPACITY: usize = 14 * 1024;
+const BROWSER_WIRE_CAPACITY: usize = HTTP_WIRE_CAPACITY;
 const HTTP_LOCATION_CAPACITY: usize = 512;
 const HTTP_CONTENT_TYPE_CAPACITY: usize = 96;
 const HTTP_COOKIE_CAPACITY: usize = 384;
 const TCP_PAYLOAD_CAPACITY: usize = 1500 - 20 - TCP_HEADER_SIZE;
 const TCP_RECEIVE_WINDOW: u16 = 32 * 1024;
+const TCP_IO_TIMEOUT_SECONDS: u64 = 6;
 
 const TCP_FIN: u8 = 0x01;
 const TCP_SYN: u8 = 0x02;
@@ -1355,6 +1362,10 @@ struct TcpConnection<'a> {
 }
 
 impl TcpConnection<'_> {
+    fn io_deadline_expired(started_at: u64, timeout_cycles: u64) -> bool {
+        crate::hardware::timestamp().wrapping_sub(started_at) >= timeout_cycles
+    }
+
     fn send_segment(
         &mut self,
         sequence: u32,
@@ -1445,10 +1456,17 @@ impl TcpConnection<'_> {
         let sequence = self.local_next;
         let expected_ack = sequence.wrapping_add(written as u32);
         let mut frame = [0_u8; MAX_FRAME_SIZE];
+        let started_at = crate::hardware::timestamp();
+        let timeout_cycles = crate::hardware::clock_info()
+            .tsc_hz
+            .saturating_mul(TCP_IO_TIMEOUT_SECONDS);
 
         for _ in 0..TRANSPORT_RETRIES {
             self.send_segment(sequence, TCP_ACK | TCP_PSH, payload)?;
             for _ in 0..RECEIVE_WAIT_LIMIT {
+                if Self::io_deadline_expired(started_at, timeout_cycles) {
+                    return Err(NetworkError::TcpTimeout);
+                }
                 let Some(length) = self.stack.receive_frame(&mut frame) else {
                     core::hint::spin_loop();
                     continue;
@@ -1493,8 +1511,15 @@ impl TcpConnection<'_> {
         }
 
         let mut frame = [0_u8; MAX_FRAME_SIZE];
+        let started_at = crate::hardware::timestamp();
+        let timeout_cycles = crate::hardware::clock_info()
+            .tsc_hz
+            .saturating_mul(TCP_IO_TIMEOUT_SECONDS);
         for retry in 0..TRANSPORT_RETRIES {
             for _ in 0..RECEIVE_WAIT_LIMIT {
+                if Self::io_deadline_expired(started_at, timeout_cycles) {
+                    return Err(NetworkError::TcpTimeout);
+                }
                 let Some(length) = self.stack.receive_frame(&mut frame) else {
                     core::hint::spin_loop();
                     continue;
@@ -1921,7 +1946,7 @@ pub fn http_get(
 ) -> Result<HttpResponse, NetworkError> {
     authorize_network(broker, handle_id, requester, dimension)?;
     let parsed = parse_http_url(url)?;
-    http_get_authorized(parsed, None, None)
+    http_get_authorized(parsed, None, None, HTTP_WIRE_CAPACITY)
 }
 
 /// Perform a bounded GET with Browser-owned representation and cookie headers.
@@ -1941,7 +1966,12 @@ pub fn browser_get(
     {
         return Err(NetworkError::BadUrl);
     }
-    http_get_authorized(parse_http_url(url)?, Some(accept), cookie)
+    http_get_authorized(
+        parse_http_url(url)?,
+        Some(accept),
+        cookie,
+        BROWSER_WIRE_CAPACITY,
+    )
 }
 
 /// Perform an HTTPS GET whose destination is constrained to an exact host
@@ -1960,7 +1990,7 @@ pub fn https_get_allowlisted(
     if !https_endpoint_allowed(parsed, allowed_hosts) {
         return Err(NetworkError::EndpointDenied);
     }
-    http_get_authorized(parsed, None, None)
+    http_get_authorized(parsed, None, None, HTTP_WIRE_CAPACITY)
 }
 
 fn https_endpoint_allowed(parsed: HttpUrl<'_>, allowed_hosts: &[&str]) -> bool {
@@ -1975,6 +2005,7 @@ fn http_get_authorized(
     parsed: HttpUrl<'_>,
     accept: Option<&str>,
     cookie: Option<&str>,
+    wire_capacity: usize,
 ) -> Result<HttpResponse, NetworkError> {
     let mut request = [0_u8; HTTP_REQUEST_CAPACITY];
     let mut request_length = 0;
@@ -1989,7 +2020,7 @@ fn http_get_authorized(
     append_bytes(
         &mut request,
         &mut request_length,
-        b"\r\nUser-Agent: ExpOS/9.1\r\nAccept: ",
+        b"\r\nUser-Agent: ExpOS/9.2\r\nAccept: ",
     )?;
     append_bytes(
         &mut request,
@@ -2009,13 +2040,27 @@ fn http_get_authorized(
     )?;
 
     let mut network = NETWORK.lock();
+    slog!("EXPOS_HTTP_STAGE stage=dns host={}\r\n", parsed.host);
     let peer = network.dns_lookup(parsed.host)?;
+    slog!("EXPOS_HTTP_STAGE stage=connect host={}\r\n", parsed.host);
     let mut wire = [0_u8; HTTP_WIRE_CAPACITY];
+    let wire_capacity = wire_capacity.clamp(1024, wire.len());
     let (wire_length, wire_truncated) = if parsed.scheme.is_secure() {
         let stream = network.tcp_connect(peer, parsed.port)?;
-        crate::tls::https_exchange(stream, parsed.host, &request[..request_length], &mut wire)?
+        slog!("EXPOS_HTTP_STAGE stage=tls host={}\r\n", parsed.host);
+        crate::tls::https_exchange(
+            stream,
+            parsed.host,
+            &request[..request_length],
+            &mut wire[..wire_capacity],
+        )?
     } else {
-        network.tcp_exchange(peer, parsed.port, &request[..request_length], &mut wire)?
+        network.tcp_exchange(
+            peer,
+            parsed.port,
+            &request[..request_length],
+            &mut wire[..wire_capacity],
+        )?
     };
     parse_http_response(peer, &wire[..wire_length], wire_truncated)
 }

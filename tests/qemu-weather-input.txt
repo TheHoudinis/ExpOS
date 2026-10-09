@@ -1,11 +1,10 @@
 2222
 operator
 expos
-ayo install Timer
+ayo install Weather
 desktop
-~			?
-jjjjjjjjjjjjjjjjjjjji
+~w
 Bishkek
-~								?
+~t
 console
 shutdown

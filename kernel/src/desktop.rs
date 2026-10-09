@@ -38,6 +38,7 @@ const BROWSER_DATA_STATE: &str = "BrowserData.state";
 const DESKTOP_UI_MAGIC_V1: [u8; 4] = *b"DUI1";
 const DESKTOP_UI_MAGIC_V2: [u8; 4] = *b"DUI2";
 const DESKTOP_UI_MAGIC_V3: [u8; 4] = *b"DUI3";
+const DESKTOP_UI_MAGIC_V4: [u8; 4] = *b"DUI4";
 const TERMINAL_HISTORY: usize = 24;
 const TERMINAL_CAPACITY: usize = 96;
 const TERMINAL_SCROLLBACK: usize = 40;
@@ -56,6 +57,57 @@ const LAUNCHER_HEIGHT: u16 = 410;
 const STABLE_FIN: Fin = Fin::from_u128(0x4449_4D00_0000_0000_0000_0000_0000_0001);
 const WEATHER_ALLOWED_HOSTS: [&str; 2] = ["geocoding-api.open-meteo.com", "api.open-meteo.com"];
 const WEATHER_REQUEST_COOLDOWN_SECONDS: u64 = 3;
+const MAX_BROWSER_AUTO_RESOURCES: usize = 4;
+const POWER_ACTION_COUNT: usize = 5;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PowerAction {
+    Lock,
+    Sleep,
+    Suspend,
+    Restart,
+    Shutdown,
+}
+
+impl PowerAction {
+    const ALL: [Self; POWER_ACTION_COUNT] = [
+        Self::Lock,
+        Self::Sleep,
+        Self::Suspend,
+        Self::Restart,
+        Self::Shutdown,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Lock => "Lock",
+            Self::Sleep => "Sleep display",
+            Self::Suspend => "Suspend",
+            Self::Restart => "Restart",
+            Self::Shutdown => "Shut down",
+        }
+    }
+
+    const fn description(self) -> &'static str {
+        match self {
+            Self::Lock => "Require your password before returning",
+            Self::Sleep => "Blank the display until the next input",
+            Self::Suspend => "Idle the CPU and display until input",
+            Self::Restart => "Restart ExpOS",
+            Self::Shutdown => "Safely halt and power off",
+        }
+    }
+
+    const fn glyph(self) -> &'static str {
+        match self {
+            Self::Lock => "L",
+            Self::Sleep => "Z",
+            Self::Suspend => "S",
+            Self::Restart => "R",
+            Self::Shutdown => "P",
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 struct BrowserTab {
@@ -261,15 +313,36 @@ fn taskbar_rect(preferences: DesktopPreferences) -> Rect {
     let width = framebuffer::width() as u16;
     let height = framebuffer::height() as u16;
     let thickness = taskbar_thickness(preferences) as u16;
+    let inset = if preferences.taskbar_style == 1 {
+        8_u16
+    } else {
+        0
+    };
     match preferences.taskbar_placement {
-        TaskbarPlacement::Bottom => {
-            Rect::new(0, height.saturating_sub(thickness) as i16, width, thickness)
-        }
-        TaskbarPlacement::Top => Rect::new(0, 0, width, thickness),
-        TaskbarPlacement::Left => Rect::new(0, 0, thickness, height),
-        TaskbarPlacement::Right => {
-            Rect::new(width.saturating_sub(thickness) as i16, 0, thickness, height)
-        }
+        TaskbarPlacement::Bottom => Rect::new(
+            inset as i16,
+            height.saturating_sub(thickness).saturating_sub(inset) as i16,
+            width.saturating_sub(inset * 2),
+            thickness,
+        ),
+        TaskbarPlacement::Top => Rect::new(
+            inset as i16,
+            inset as i16,
+            width.saturating_sub(inset * 2),
+            thickness,
+        ),
+        TaskbarPlacement::Left => Rect::new(
+            inset as i16,
+            inset as i16,
+            thickness,
+            height.saturating_sub(inset * 2),
+        ),
+        TaskbarPlacement::Right => Rect::new(
+            width.saturating_sub(thickness).saturating_sub(inset) as i16,
+            inset as i16,
+            thickness,
+            height.saturating_sub(inset * 2),
+        ),
     }
 }
 
@@ -330,14 +403,14 @@ fn taskbar_start_rect(preferences: DesktopPreferences) -> Rect {
         let size = (dock.width.saturating_sub(8)).clamp(20, 32);
         Rect::new(
             dock.x + (dock.width as i16 - size as i16) / 2,
-            6,
+            dock.y + 6,
             size,
             size,
         )
     } else {
         let size = (dock.height.saturating_sub(8)).clamp(20, 32);
         Rect::new(
-            8,
+            dock.x + 8,
             dock.y + (dock.height as i16 - size as i16) / 2,
             size,
             size,
@@ -574,8 +647,27 @@ const BROWSER_SYSTEM: &str = "<title>System</title><h1>System</h1><li>480p / 720
 const NETWORK_BLOCKED: &str = "<title>Offline</title><h1>Offline</h1><p>The address could not be loaded.</p><a href='expos://home'>Home</a>";
 const NETWORK_ERROR: &str = "<title>Load failed</title><h1>Could not load page</h1><p>Check the address, connection, and certificate.</p><a href='expos://home'>Home</a>";
 const SEARCH_ERROR: &str = "<title>Search failed</title><h1>Search query is too long</h1><p>Use a shorter query in the address bar.</p><a href='expos://home'>Home</a>";
-const SEARCH_PREFIX: &str = "https://duckduckgo.com/html/?q=";
+const SEARCH_PREFIX: &str = "https://en.wikipedia.org/w/rest.php/v1/search/page?q=";
+const SEARCH_SUFFIX: &str = "&limit=8";
 const MAX_BROWSER_REDIRECTS: usize = 3;
+
+const fn browser_allows_active_content(body_len: usize, truncated: bool) -> bool {
+    !truncated && body_len <= 8 * 1024
+}
+
+fn youtube_compatibility_url(url: &str) -> bool {
+    let authority = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("");
+    authority.eq_ignore_ascii_case("youtube.com")
+        || authority.eq_ignore_ascii_case("www.youtube.com")
+        || authority.eq_ignore_ascii_case("m.youtube.com")
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AppKind {
@@ -682,6 +774,7 @@ impl AppKind {
 enum LauncherItem {
     BuiltIn(AppKind),
     Installed(usize),
+    Power,
 }
 
 fn launcher_item(desktop: &DesktopState, ordinal: usize) -> Option<LauncherItem> {
@@ -704,12 +797,12 @@ fn launcher_item(desktop: &DesktopState, ordinal: usize) -> Option<LauncherItem>
     }
     if desktop.preferences.menu_show_installed {
         let installed_ordinal = ordinal.checked_sub(cursor)?;
-        return desktop
-            .native_apps
-            .installed_at(installed_ordinal)
-            .map(LauncherItem::Installed);
+        if let Some(index) = desktop.native_apps.installed_at(installed_ordinal) {
+            return Some(LauncherItem::Installed(index));
+        }
+        cursor += desktop.native_apps.installed_count();
     }
-    None
+    (ordinal == cursor).then_some(LauncherItem::Power)
 }
 
 fn launcher_item_count(desktop: &DesktopState) -> usize {
@@ -728,6 +821,7 @@ fn launcher_item_count(desktop: &DesktopState) -> usize {
         } else {
             0
         }
+        + 1
 }
 
 fn launcher_columns(preferences: DesktopPreferences) -> usize {
@@ -781,6 +875,9 @@ const CUSTOMIZATION_VALUE_COUNT: usize = state::THEME_PALETTE_CHOICES
     + 2 // translucent panel
     + 2 // application labels
     + 2 // clock seconds
+    + TASKBAR_STYLE_LABELS.len()
+    + TASKBAR_ICON_LABELS.len()
+    + 2 // running indicators
     + state::MENU_ROW_HEIGHTS_PX.len()
     + state::ANIMATION_DURATIONS_MS.len()
     + state::UI_SCALE_PERCENT.len()
@@ -934,7 +1031,7 @@ impl SettingsCategory {
             Self::Performance => 4,
             Self::Input => 5,
             Self::Windows => 9,
-            Self::Taskbar => 13,
+            Self::Taskbar => 16,
             Self::Menu => 9,
             Self::Privacy => 5,
             Self::About => 4,
@@ -1107,6 +1204,8 @@ const SNAP_DISTANCE_LABELS: [&str; 9] = [
 const TASKBAR_SIZE_LABELS: [&str; 9] = [
     "28 px", "32 px", "36 px", "40 px", "44 px", "48 px", "52 px", "60 px", "72 px",
 ];
+const TASKBAR_STYLE_LABELS: [&str; 3] = ["Edge", "Floating", "Accent rail"];
+const TASKBAR_ICON_LABELS: [&str; 3] = ["Compact", "Balanced", "Large"];
 const MENU_DENSITY_LABELS: [&str; 5] = ["Dense", "Compact", "Balanced", "Comfortable", "Large"];
 const ANIMATION_LABELS: [&str; 5] = ["Off", "Fast", "Balanced", "Smooth", "Cinematic"];
 const UI_SCALE_LABELS: [&str; 7] = ["100%", "80%", "90%", "110%", "125%", "150%", "200%"];
@@ -1491,6 +1590,9 @@ struct DesktopPreferences {
     taskbar_autohide: bool,
     taskbar_translucent: bool,
     taskbar_labels: bool,
+    taskbar_style: u8,
+    taskbar_icon_scale: u8,
+    taskbar_indicators: bool,
     clock_seconds: bool,
     window_offscreen_allowance: u8,
     window_snap_distance: u8,
@@ -1659,6 +1761,9 @@ impl DesktopPreferences {
             taskbar_autohide: value.taskbar_autohide,
             taskbar_translucent: value.taskbar_translucent,
             taskbar_labels: value.taskbar_labels,
+            taskbar_style: 0,
+            taskbar_icon_scale: 1,
+            taskbar_indicators: true,
             clock_seconds: value.clock_seconds,
             window_offscreen_allowance: value.window_offscreen_allowance,
             window_snap_distance: value.window_snap_distance,
@@ -1704,7 +1809,8 @@ impl DesktopPreferences {
         if length < 11
             || (bytes[..4] != DESKTOP_UI_MAGIC_V1
                 && bytes[..4] != DESKTOP_UI_MAGIC_V2
-                && bytes[..4] != DESKTOP_UI_MAGIC_V3)
+                && bytes[..4] != DESKTOP_UI_MAGIC_V3
+                && bytes[..4] != DESKTOP_UI_MAGIC_V4)
         {
             return self;
         }
@@ -1718,7 +1824,10 @@ impl DesktopPreferences {
         self.terminal_scale = bytes[8].min(2);
         self.terminal_foreground = bytes[9].min(7);
         self.terminal_background = bytes[10].min(7);
-        if (bytes[..4] == DESKTOP_UI_MAGIC_V2 || bytes[..4] == DESKTOP_UI_MAGIC_V3) && length >= 17
+        if (bytes[..4] == DESKTOP_UI_MAGIC_V2
+            || bytes[..4] == DESKTOP_UI_MAGIC_V3
+            || bytes[..4] == DESKTOP_UI_MAGIC_V4)
+            && length >= 17
         {
             self.timezone = bytes[11].min((TIMEZONE_LABELS.len() - 1) as u8);
             self.clock_24h = bytes[12] != 0;
@@ -1733,22 +1842,28 @@ impl DesktopPreferences {
                     | TASKBAR_WIDGET_AUDIO
                     | TASKBAR_WIDGET_TIMEZONE);
         }
-        if bytes[..4] == DESKTOP_UI_MAGIC_V3 && length >= 22 {
+        if (bytes[..4] == DESKTOP_UI_MAGIC_V3 || bytes[..4] == DESKTOP_UI_MAGIC_V4) && length >= 22
+        {
             self.audio_volume = bytes[17].min(100);
             self.audio_muted = bytes[18] != 0;
             self.reduce_transparency = bytes[19] != 0;
             self.focus_ring = bytes[20] != 0;
             self.window_tiling = bytes[21].min(2);
         }
+        if bytes[..4] == DESKTOP_UI_MAGIC_V4 && length >= 25 {
+            self.taskbar_style = bytes[22].min((TASKBAR_STYLE_LABELS.len() - 1) as u8);
+            self.taskbar_icon_scale = bytes[23].min((TASKBAR_ICON_LABELS.len() - 1) as u8);
+            self.taskbar_indicators = bytes[24] != 0;
+        }
         self
     }
 
-    fn encode_ui_extension(self) -> [u8; 22] {
+    fn encode_ui_extension(self) -> [u8; 25] {
         [
-            DESKTOP_UI_MAGIC_V3[0],
-            DESKTOP_UI_MAGIC_V3[1],
-            DESKTOP_UI_MAGIC_V3[2],
-            DESKTOP_UI_MAGIC_V3[3],
+            DESKTOP_UI_MAGIC_V4[0],
+            DESKTOP_UI_MAGIC_V4[1],
+            DESKTOP_UI_MAGIC_V4[2],
+            DESKTOP_UI_MAGIC_V4[3],
             self.locale,
             self.menu_layout,
             self.terminal_font_face.persisted(),
@@ -1767,6 +1882,9 @@ impl DesktopPreferences {
             u8::from(self.reduce_transparency),
             u8::from(self.focus_ring),
             self.window_tiling,
+            self.taskbar_style,
+            self.taskbar_icon_scale,
+            u8::from(self.taskbar_indicators),
         ]
     }
 
@@ -1795,6 +1913,9 @@ impl DesktopPreferences {
         next.date_format = self.date_format;
         next.week_starts_monday = self.week_starts_monday;
         next.taskbar_widgets = self.taskbar_widgets;
+        next.taskbar_style = self.taskbar_style;
+        next.taskbar_icon_scale = self.taskbar_icon_scale;
+        next.taskbar_indicators = self.taskbar_indicators;
         next.audio_volume = self.audio_volume;
         next.audio_muted = self.audio_muted;
         next.reduce_transparency = self.reduce_transparency;
@@ -2064,6 +2185,12 @@ struct DesktopState {
     launcher_scroll: usize,
     launcher_selection: usize,
     shell_confirmation: bool,
+    power_menu_open: bool,
+    power_selection: usize,
+    locked: bool,
+    lock_password: [u8; 24],
+    lock_password_len: usize,
+    lock_denied: bool,
     fullscreen: bool,
     preferences: DesktopPreferences,
     settings_category: SettingsCategory,
@@ -2087,6 +2214,7 @@ struct DesktopState {
     browser_web_state: BrowserWebState,
     browser_resources: BrowserResourceStats,
     browser_media: Box<BrowserMediaCache>,
+    browser_loading: bool,
     last_weather_request_ticks: u64,
     terminal_line: [u8; TERMINAL_CAPACITY],
     terminal_len: usize,
@@ -2121,6 +2249,7 @@ struct DesktopState {
     deferred_presents: u64,
     full_redraw_requested: bool,
     display_debug_overlay: bool,
+    display_restart_requested: bool,
 }
 
 struct PointerCursor {
@@ -2556,6 +2685,12 @@ impl DesktopState {
             launcher_scroll: 0,
             launcher_selection: 0,
             shell_confirmation: false,
+            power_menu_open: false,
+            power_selection: 0,
+            locked: false,
+            lock_password: [0; 24],
+            lock_password_len: 0,
+            lock_denied: false,
             fullscreen: false,
             preferences,
             settings_category: SettingsCategory::System,
@@ -2581,6 +2716,7 @@ impl DesktopState {
             browser_web_state,
             browser_resources: BrowserResourceStats::default(),
             browser_media: Box::new(BrowserMediaCache::new()),
+            browser_loading: false,
             last_weather_request_ticks: 0,
             terminal_line: [0; TERMINAL_CAPACITY],
             terminal_len: 0,
@@ -2619,6 +2755,7 @@ impl DesktopState {
             deferred_presents: 0,
             full_redraw_requested: false,
             display_debug_overlay: false,
+            display_restart_requested: false,
         };
         state.terminal_push("ExpOS terminal");
         state.terminal_push("Type help for commands. Up/Down recalls history.");
@@ -2792,6 +2929,34 @@ impl DesktopState {
         } else {
             cursor_damage.map_or(PointerRender::None, PointerRender::Cursor)
         }
+    }
+
+    fn handle_power_pointer(&mut self, pointer: PointerEvent) -> Option<PowerAction> {
+        let speed = self.preferences.pointer_speed as i16;
+        self.cursor.move_by(
+            pointer.dx.saturating_mul(speed),
+            pointer.dy.saturating_mul(speed),
+        );
+        let (menu, card_width, card_height) = power_menu_geometry();
+        for index in 0..POWER_ACTION_COUNT {
+            let column = index % 2;
+            let row = index / 2;
+            let card = Rect::new(
+                menu.x + 24 + column as i16 * (card_width as i16 + 16),
+                menu.y + 82 + row as i16 * (card_height as i16 + 10),
+                card_width as u16,
+                card_height as u16,
+            );
+            if contains(card, self.cursor.x, self.cursor.y) {
+                self.power_selection = index;
+                return (pointer.pressed & 1 != 0).then_some(PowerAction::ALL[index]);
+            }
+        }
+        if pointer.pressed & 1 != 0 && !contains(menu, self.cursor.x, self.cursor.y) {
+            self.power_menu_open = false;
+            slog!("EXPOS_POWER_MENU state=closed source=pointer\r\n");
+        }
+        None
     }
 
     fn route_pointer(&mut self, pointer: PointerEvent) {
@@ -3154,6 +3319,12 @@ impl DesktopState {
                 self.focus_existing(AppKind::Apps);
             }
             Some(LauncherItem::Installed(_)) => {}
+            Some(LauncherItem::Power) => {
+                self.close_launcher();
+                self.power_menu_open = true;
+                self.power_selection = 0;
+                slog!("EXPOS_POWER_MENU state=open\r\n");
+            }
             None => {}
         }
     }
@@ -3188,6 +3359,34 @@ impl DesktopState {
         } else {
             self.move_launcher_selection(1);
         }
+    }
+
+    fn select_launcher_shortcut(&mut self, key: u8) -> bool {
+        let key = key.to_ascii_lowercase();
+        let total = launcher_item_count(self);
+        for offset in 1..=total {
+            let ordinal = (self.launcher_selection + offset) % total;
+            let matches = match launcher_item(self, ordinal) {
+                Some(LauncherItem::BuiltIn(app)) => {
+                    app.shortcut().as_bytes()[0].to_ascii_lowercase() == key
+                }
+                Some(LauncherItem::Installed(index)) => crate::apps::package_name(index)
+                    .and_then(|name| name.as_bytes().first().copied())
+                    .is_some_and(|first| first.to_ascii_lowercase() == key),
+                Some(LauncherItem::Power) | None => false,
+            };
+            if matches {
+                self.launcher_selection = ordinal;
+                let capacity = launcher_capacity(self.preferences);
+                if ordinal < self.launcher_scroll {
+                    self.launcher_scroll = ordinal;
+                } else if ordinal >= self.launcher_scroll + capacity {
+                    self.launcher_scroll = ordinal + 1 - capacity;
+                }
+                return true;
+            }
+        }
+        false
     }
 
     fn move_active(&mut self, dx: i16, dy: i16) {
@@ -3434,7 +3633,15 @@ impl DesktopState {
             rejected: manifest.rejected() as u16,
             ..BrowserResourceStats::default()
         };
+        let mut attempted = 0_usize;
         for resource in manifest.entries() {
+            if attempted >= MAX_BROWSER_AUTO_RESOURCES
+                || matches!(resource.kind, ExternalResourceKind::Video)
+            {
+                self.browser_resources.rejected = self.browser_resources.rejected.saturating_add(1);
+                continue;
+            }
+            attempted += 1;
             let mut absolute = [0_u8; 512];
             let Some(length) = resolve_browser_link(base_url, resource.url.as_str(), &mut absolute)
             else {
@@ -3542,6 +3749,7 @@ impl DesktopState {
         let requests = document.drain_web_api_requests();
         let mut origin_buffer = [0_u8; 512];
         let origin = browser_origin(base_url, &mut origin_buffer).unwrap_or("expos://local");
+        let mut fetches = 0_u8;
         for request in requests.iter().flatten().copied() {
             match request {
                 WebApiRequest::StorageSet { area, key, value } => {
@@ -3599,6 +3807,10 @@ impl DesktopState {
                     }
                 }
                 WebApiRequest::Fetch { url, target } => {
+                    if fetches >= 2 {
+                        continue;
+                    }
+                    fetches += 1;
                     let mut absolute = [0_u8; 512];
                     let Some(length) = resolve_browser_link(base_url, url.as_str(), &mut absolute)
                     else {
@@ -3922,8 +4134,106 @@ impl DesktopState {
         );
     }
 
+    fn show_browser_notice(&mut self, title: &str, title_script: &str, message: &str) {
+        // Keep this path allocation-free and in-place. Constructing a second
+        // complete Document while the desktop is live can exhaust the small
+        // kernel stack on real navigation paths.
+        let heading = self
+            .document
+            .styled_nodes()
+            .find(|styled| styled.node.kind == NodeKind::Heading)
+            .map(|styled| styled.index);
+        let paragraph = self
+            .document
+            .styled_nodes()
+            .find(|styled| styled.node.kind == NodeKind::Paragraph)
+            .map(|styled| styled.index);
+        let _ = self.document.execute_script(title_script);
+        if let Some(index) = heading {
+            let _ = self.document.set_text_at_node(index, title);
+        }
+        if let Some(index) = paragraph {
+            let _ = self.document.set_text_at_node(index, message);
+        }
+        self.browser_tabs[self.browser_active_tab].set_title(title);
+        self.browser_tabs[self.browser_active_tab].scroll = 0;
+        self.browser_scroll = 0;
+        self.browser_find_match = None;
+        self.browser_resources = BrowserResourceStats::default();
+        self.browser_media.clear();
+        self.browser_loading = false;
+        self.full_redraw_requested = true;
+        self.log_browser_engine();
+    }
+
+    fn show_youtube_compatibility(&mut self) {
+        self.show_browser_notice(
+            "YouTube limited",
+            "title('YouTube limited')",
+            "Video apps are not supported. ExpOS kept the desktop responsive.",
+        );
+    }
+
+    fn show_browser_load_error(&mut self) {
+        self.show_browser_notice(
+            "Load failed",
+            "title('Load failed')",
+            "The site did not answer in time. Check the address or try again.",
+        );
+    }
+
+    fn apply_wikipedia_search_results(&mut self, json: &[u8]) -> u8 {
+        self.show_browser_notice(
+            "Search results",
+            "title('Search results')",
+            "Fast, bounded results from Wikipedia over verified HTTPS.",
+        );
+        let mut link_nodes = [usize::MAX; 8];
+        let mut link_count = 0;
+        for styled in self.document.styled_nodes() {
+            if styled.node.kind == NodeKind::Link && link_count < link_nodes.len() {
+                link_nodes[link_count] = styled.index;
+                link_count += 1;
+            }
+        }
+        let mut applied = 0_u8;
+        for (ordinal, node_index) in link_nodes[..link_count].iter().copied().enumerate() {
+            let mut key = [0_u8; 384];
+            let mut title = [0_u8; 384];
+            let Some((key_len, title_len)) =
+                wikipedia_search_result(json, ordinal, &mut key, &mut title)
+            else {
+                let _ = self.document.set_text_at_node(node_index, "");
+                let _ = self.document.set_target_at_node(node_index, "");
+                continue;
+            };
+            let mut target = [0_u8; 512];
+            let prefix = b"https://en.wikipedia.org/wiki/";
+            let target_len = prefix.len() + key_len;
+            if target_len > target.len() {
+                continue;
+            }
+            target[..prefix.len()].copy_from_slice(prefix);
+            target[prefix.len()..target_len].copy_from_slice(&key[..key_len]);
+            let target = core::str::from_utf8(&target[..target_len]).unwrap_or("");
+            let title = core::str::from_utf8(&title[..title_len]).unwrap_or("Wikipedia result");
+            if self.document.set_text_at_node(node_index, title).is_ok()
+                && self.document.set_target_at_node(node_index, target).is_ok()
+            {
+                applied += 1;
+            }
+        }
+        self.log_browser_engine();
+        applied
+    }
+
     fn navigate_address(&mut self, address: &str) {
         let address = address.trim();
+        slog!(
+            "EXPOS_BROWSER_NAVIGATION bytes={} youtube_compat={}\r\n",
+            address.len(),
+            youtube_compatibility_url(address)
+        );
         if address.is_empty() {
             self.navigate("expos://home", HOME);
             return;
@@ -3953,11 +4263,14 @@ impl DesktopState {
             };
             let url = core::str::from_utf8(&url[..length]).unwrap_or("");
             slog!(
-                "EXPOS_BROWSER_SEARCH query_bytes={} url_bytes={} provider=duckduckgo-html\r\n",
+                "EXPOS_BROWSER_SEARCH query_bytes={} url_bytes={} provider=wikipedia-rest\r\n",
                 query.len(),
                 length
             );
-            self.navigate_address(url);
+            // Search results reuse the small home document in place, avoiding
+            // a second full DOM allocation while the network frame is live.
+            self.navigate("expos://home", HOME);
+            self.navigate_external_address(url);
             return;
         }
         let mut unwrapped = [0_u8; 512];
@@ -3967,11 +4280,24 @@ impl DesktopState {
                 "EXPOS_BROWSER_UNWRAP provider=duckduckgo target_bytes={}\r\n",
                 length
             );
-            self.navigate_address(target);
+            self.navigate_external_address(target);
+            return;
+        }
+        self.navigate_external_address(address);
+    }
+
+    fn navigate_external_address(&mut self, address: &str) {
+        if youtube_compatibility_url(address) {
+            slog!("EXPOS_BROWSER_COMPAT_VIEW host=youtube.com reason=bounded-media-runtime\r\n");
+            self.show_youtube_compatibility();
             return;
         }
         if !self.network_active() {
-            self.navigate("expos://offline", NETWORK_BLOCKED);
+            self.show_browser_notice(
+                "Offline",
+                "title('Offline')",
+                "Networking is disabled. Enable it in Settings and try again.",
+            );
             slog!("EXPOS_BROWSER_HTTP_ERROR error=CapabilityDenied\r\n");
             return;
         }
@@ -3980,7 +4306,7 @@ impl DesktopState {
         }
         let mut current = [0_u8; 512];
         let Some(current_len) = copy_browser_url(&mut current, address.as_bytes()) else {
-            self.navigate("expos://error", NETWORK_ERROR);
+            self.show_browser_load_error();
             slog!("EXPOS_BROWSER_HTTP_ERROR error=BadUrl\r\n");
             return;
         };
@@ -3996,6 +4322,8 @@ impl DesktopState {
             current_len = summary_len;
             slog!("EXPOS_WIKIPEDIA_READER request_bytes={}\r\n", summary_len);
         }
+        self.browser_loading = true;
+        render_active_window(self);
         for redirect_count in 0..=MAX_BROWSER_REDIRECTS {
             let current_url = core::str::from_utf8(&current[..current_len]).unwrap_or("");
             match self.browser_fetch(
@@ -4005,26 +4333,30 @@ impl DesktopState {
                 Ok(response) => {
                     if is_http_redirect(response.status) {
                         let Some(location) = response.location() else {
-                            self.navigate("expos://error", NETWORK_ERROR);
+                            self.show_browser_load_error();
                             slog!("EXPOS_BROWSER_HTTP_ERROR error=RedirectWithoutLocation\r\n");
+                            self.browser_loading = false;
                             return;
                         };
                         if redirect_count == MAX_BROWSER_REDIRECTS {
-                            self.navigate("expos://error", NETWORK_ERROR);
+                            self.show_browser_load_error();
                             slog!("EXPOS_BROWSER_HTTP_ERROR error=TooManyRedirects\r\n");
+                            self.browser_loading = false;
                             return;
                         }
                         let mut next = [0_u8; 512];
                         let Some(next_len) = resolve_browser_link(current_url, location, &mut next)
                         else {
-                            self.navigate("expos://error", NETWORK_ERROR);
+                            self.show_browser_load_error();
                             slog!("EXPOS_BROWSER_HTTP_ERROR error=BadRedirect\r\n");
+                            self.browser_loading = false;
                             return;
                         };
                         let next_url = core::str::from_utf8(&next[..next_len]).unwrap_or("");
                         if current_url.starts_with("https://") && next_url.starts_with("http://") {
-                            self.navigate("expos://error", NETWORK_ERROR);
+                            self.show_browser_load_error();
                             slog!("EXPOS_BROWSER_HTTP_ERROR error=InsecureRedirect\r\n");
+                            self.browser_loading = false;
                             return;
                         }
                         slog!(
@@ -4036,6 +4368,26 @@ impl DesktopState {
                         current[..next_len].copy_from_slice(&next[..next_len]);
                         current_len = next_len;
                         continue;
+                    }
+                    if current_url.starts_with(SEARCH_PREFIX) {
+                        let count = self.apply_wikipedia_search_results(response.body());
+                        if count == 0 {
+                            self.show_browser_load_error();
+                            slog!("EXPOS_BROWSER_HTTP_ERROR error=InvalidSearchResponse\r\n");
+                        } else {
+                            slog!("EXPOS_SEARCH_RESULTS count={}\r\n", count);
+                            slog!(
+                                "EXPOS_BROWSER_HTTP_OK status={} bytes={} peer={}.{}.{}.{}\r\n",
+                                response.status,
+                                response.body_len,
+                                response.peer[0],
+                                response.peer[1],
+                                response.peer[2],
+                                response.peer[3]
+                            );
+                        }
+                        self.browser_loading = false;
+                        return;
                     }
                     let mut sanitized = Box::new([0_u8; network::HTTP_BODY_CAPACITY]);
                     for (output, byte) in sanitized.iter_mut().zip(response.body().iter().copied())
@@ -4050,10 +4402,22 @@ impl DesktopState {
                     }
                     let source =
                         core::str::from_utf8(&sanitized[..response.body_len]).unwrap_or("");
-                    let projected = Document::parse_duckduckgo_results(current_url, source).ok();
-                    let search_results =
-                        projected.as_ref().map_or(0, |results| results.result_count);
-                    let manifest = if wikipedia_original_len == 0 && projected.is_none() {
+                    // Large modern sites routinely return a truncated shell
+                    // containing dozens of bootstrap scripts. The bounded
+                    // native reader can still project that document, but it
+                    // must not turn one navigation into a serial chain of
+                    // network fetches on the desktop thread.
+                    let allow_active_content =
+                        browser_allows_active_content(response.body_len, response.truncated);
+                    let (projected_document, search_results) =
+                        Document::parse_duckduckgo_results(current_url, source)
+                            .ok()
+                            .map(|results| (Some(results.document), results.result_count))
+                            .unwrap_or((None, 0));
+                    let manifest = if wikipedia_original_len == 0
+                        && projected_document.is_none()
+                        && allow_active_content
+                    {
                         ResourceManifest::scan(source).ok()
                     } else {
                         None
@@ -4067,8 +4431,8 @@ impl DesktopState {
                             .and_then(|length| core::str::from_utf8(&wiki_source[..length]).ok())
                             .ok_or(expos_core::BrowserError::InvalidDocument)
                             .and_then(|source| Document::parse(original, source))
-                    } else if let Some(results) = projected {
-                        Ok(results.document)
+                    } else if let Some(document) = projected_document {
+                        Ok(document)
                     } else {
                         Document::parse(current_url, source)
                     };
@@ -4076,8 +4440,16 @@ impl DesktopState {
                         Ok(mut document) => {
                             if let Some(manifest) = manifest {
                                 self.hydrate_browser_document(&mut document, current_url, manifest);
-                            } else {
+                            } else if allow_active_content {
                                 self.process_document_web_apis(&mut document, current_url);
+                            } else {
+                                self.browser_media.clear();
+                                self.browser_resources = BrowserResourceStats::default();
+                                slog!(
+                                    "EXPOS_BROWSER_ACTIVE_CONTENT_SKIPPED bytes={} truncated={}\r\n",
+                                    response.body_len,
+                                    response.truncated
+                                );
                             }
                             self.set_document(document);
                             if search_results != 0 {
@@ -4107,12 +4479,14 @@ impl DesktopState {
                     }
                 }
                 Err(error) => {
-                    self.navigate("expos://error", NETWORK_ERROR);
+                    self.show_browser_load_error();
                     slog!("EXPOS_BROWSER_HTTP_ERROR error={:?}\r\n", error);
                 }
             }
+            self.browser_loading = false;
             return;
         }
+        self.browser_loading = false;
     }
 
     fn browser_click(&mut self, x: i16, y: i16, rect: Rect) -> bool {
@@ -4732,11 +5106,12 @@ impl DesktopState {
             (SettingsCategory::Display, 0) => {
                 let selected = shift_display_mode(framebuffer::requested_mode(), direction);
                 let _ = framebuffer::request_mode(selected);
+                self.display_restart_requested = true;
                 slog!(
                     "EXPOS_SETTING_CHANGED key=resolution value={}\r\n",
                     selected.label()
                 );
-                self.settings_notice = "Resolution applies when the desktop is reopened.";
+                self.settings_notice = "Applying resolution by safely restarting ExpDisplay.";
             }
             (SettingsCategory::Display, 1) => {
                 self.preferences.refresh_rate =
@@ -5130,6 +5505,31 @@ impl DesktopState {
                         "off"
                     }
                 );
+            }
+            (SettingsCategory::Taskbar, 13) => {
+                self.preferences.taskbar_style = shift_index(
+                    self.preferences.taskbar_style,
+                    TASKBAR_STYLE_LABELS.len() as u8,
+                    direction,
+                );
+                self.sync_desktop_geometry();
+                self.reconstrain_windows();
+                self.full_redraw_requested = true;
+                self.settings_notice = "Taskbar surface style updated.";
+            }
+            (SettingsCategory::Taskbar, 14) => {
+                self.preferences.taskbar_icon_scale = shift_index(
+                    self.preferences.taskbar_icon_scale,
+                    TASKBAR_ICON_LABELS.len() as u8,
+                    direction,
+                );
+                self.full_redraw_requested = true;
+                self.settings_notice = "Taskbar icon scale updated.";
+            }
+            (SettingsCategory::Taskbar, 15) => {
+                self.preferences.taskbar_indicators = !self.preferences.taskbar_indicators;
+                self.full_redraw_requested = true;
+                self.settings_notice = "Running indicators updated.";
             }
             (SettingsCategory::Menu, 0) => {
                 self.preferences.menu_layout = shift_index(
@@ -6432,21 +6832,54 @@ pub fn run_with_network(
     allow_network: bool,
     cfc: CfcFin,
 ) {
-    run_session(
+    let mut start_app = start_browser.then_some(AppKind::Browser);
+    let mut resume_display_settings = false;
+    while run_session(
         input,
-        if start_browser {
-            Some(AppKind::Browser)
-        } else {
-            None
-        },
+        start_app,
         session,
         allow_network,
         cfc,
-    );
+        resume_display_settings,
+    ) {
+        start_app = Some(AppKind::Settings);
+        resume_display_settings = true;
+    }
+    restore_command_environment(input);
 }
 
 pub fn run_games(input: &mut Input, session: crate::session::Session, cfc: CfcFin) {
-    run_session(input, Some(AppKind::Games), session, false, cfc);
+    let mut start_app = Some(AppKind::Games);
+    let mut resume_display_settings = false;
+    while run_session(
+        input,
+        start_app,
+        session,
+        false,
+        cfc,
+        resume_display_settings,
+    ) {
+        start_app = Some(AppKind::Settings);
+        resume_display_settings = true;
+    }
+    restore_command_environment(input);
+}
+
+fn restore_command_environment(input: &mut Input) {
+    // ExpDisplay and the graphical console deliberately use different scanout
+    // modes and PS/2 state. Re-establish both sides of that handoff every time,
+    // including when ExpDisplay was launched from the shell.
+    let keyboard_ready = input.reinitialize_ps2_keyboard();
+    let console_ready = if crate::boot::native_uefi() {
+        crate::graphics_console::enable_console()
+    } else {
+        false
+    };
+    slog!(
+        "EXPOS_COMMAND_ENV_RESTORED keyboard={} console={}\r\n",
+        keyboard_ready,
+        console_ready
+    );
 }
 
 fn run_session(
@@ -6455,15 +6888,22 @@ fn run_session(
     session: crate::session::Session,
     allow_network: bool,
     cfc: CfcFin,
-) {
+    resume_display_settings: bool,
+) -> bool {
     let mouse_ready = input.enable_mouse();
     if !framebuffer::enter() {
         crate::println!("ExpDisplay unavailable: no Bochs/QEMU VBE framebuffer.");
         slog!("EXPOS_DISPLAY_UNAVAILABLE\r\n");
-        return;
+        return false;
     }
 
     let mut desktop = DesktopState::new(start_app, session, allow_network, cfc);
+    if resume_display_settings {
+        desktop.settings_category = SettingsCategory::Display;
+        desktop.settings_row = 0;
+        desktop.settings_notice = "Resolution applied. Display settings remain open.";
+        slog!("EXPOS_DISPLAY_SETTINGS_RESUMED\r\n");
+    }
     // Desktop construction can include capability setup and document parsing;
     // begin presentation timing only when the first frame is ready to draw.
     desktop
@@ -6475,7 +6915,7 @@ fn run_session(
         framebuffer::exit();
         crate::clear_console();
         crate::println!("ExpDisplay could not confirm scanout; command environment restored.");
-        return;
+        return false;
     }
     slog!("EXPOS_DISPLAY_READY surfaces=12 commit=12\r\n");
     let portal = expos_core::display_protocol_info();
@@ -6584,6 +7024,22 @@ fn run_session(
                 let (pointer, merged) = input.coalesce_pointer_motion(pointer);
                 desktop.pointer_packets_merged =
                     desktop.pointer_packets_merged.saturating_add(merged as u64);
+                if desktop.locked {
+                    let speed = desktop.preferences.pointer_speed as i16;
+                    desktop.cursor.move_by(
+                        pointer.dx.saturating_mul(speed),
+                        pointer.dy.saturating_mul(speed),
+                    );
+                    render(&mut desktop);
+                    continue;
+                }
+                if desktop.power_menu_open {
+                    if let Some(action) = desktop.handle_power_pointer(pointer) {
+                        perform_power_action(&mut desktop, input, action);
+                    }
+                    render(&mut desktop);
+                    continue;
+                }
                 match desktop.handle_pointer(pointer) {
                     PointerRender::None => {}
                     PointerRender::Cursor(damage) => {
@@ -6594,6 +7050,81 @@ fn run_session(
                 continue;
             }
         };
+        if desktop.locked {
+            match key {
+                b'\n' => {
+                    if crate::session::verify_session_password(
+                        desktop.session,
+                        &desktop.lock_password[..desktop.lock_password_len],
+                    ) {
+                        crate::crypto::wipe(&mut desktop.lock_password);
+                        desktop.lock_password_len = 0;
+                        desktop.lock_denied = false;
+                        desktop.locked = false;
+                        desktop.full_redraw_requested = true;
+                        slog!(
+                            "EXPOS_SESSION_LOCK state=unlocked user={}\r\n",
+                            desktop.session.name()
+                        );
+                    } else {
+                        crate::crypto::wipe(&mut desktop.lock_password);
+                        desktop.lock_password_len = 0;
+                        desktop.lock_denied = true;
+                        slog!(
+                            "EXPOS_SESSION_LOCK state=denied user={}\r\n",
+                            desktop.session.name()
+                        );
+                    }
+                }
+                0x08 => {
+                    if desktop.lock_password_len != 0 {
+                        desktop.lock_password_len -= 1;
+                        desktop.lock_password[desktop.lock_password_len] = 0;
+                    }
+                    desktop.lock_denied = false;
+                }
+                byte @ 0x20..=0x7E if desktop.lock_password_len < desktop.lock_password.len() => {
+                    desktop.lock_password[desktop.lock_password_len] = byte;
+                    desktop.lock_password_len += 1;
+                    desktop.lock_denied = false;
+                }
+                _ => {}
+            }
+            render(&mut desktop);
+            continue;
+        }
+        if desktop.power_menu_open {
+            match key {
+                0x1B => {
+                    desktop.power_menu_open = false;
+                    slog!("EXPOS_POWER_MENU state=closed\r\n");
+                }
+                KEY_LEFT if !desktop.power_selection.is_multiple_of(2) => {
+                    desktop.power_selection -= 1
+                }
+                KEY_RIGHT
+                    if desktop.power_selection.is_multiple_of(2)
+                        && desktop.power_selection + 1 < POWER_ACTION_COUNT =>
+                {
+                    desktop.power_selection += 1
+                }
+                KEY_UP => desktop.power_selection = desktop.power_selection.saturating_sub(2),
+                KEY_DOWN => {
+                    desktop.power_selection =
+                        (desktop.power_selection + 2).min(POWER_ACTION_COUNT - 1)
+                }
+                b'\t' => {
+                    desktop.power_selection = (desktop.power_selection + 1) % POWER_ACTION_COUNT
+                }
+                b'\n' | b' ' => {
+                    let action = PowerAction::ALL[desktop.power_selection];
+                    perform_power_action(&mut desktop, input, action);
+                }
+                _ => {}
+            }
+            render(&mut desktop);
+            continue;
+        }
         if desktop.shell_confirmation {
             match key.to_ascii_lowercase() {
                 b'y' | b'\n' => {
@@ -6651,7 +7182,9 @@ fn run_session(
                 KEY_RIGHT => desktop.move_launcher_selection(1),
                 b'\t' => desktop.cycle_launcher_selection(),
                 b'\n' | b' ' => desktop.activate_launcher_selection(),
-                _ => {}
+                key => {
+                    let _ = desktop.select_launcher_shortcut(key);
+                }
             }
             render(&mut desktop);
             continue;
@@ -6712,6 +7245,10 @@ fn run_session(
                 render(&mut desktop);
             } else {
                 render_active_window(&mut desktop);
+            }
+            if desktop.display_restart_requested {
+                slog!("EXPOS_DISPLAY_RESTART_REQUESTED source=settings\r\n");
+                break;
             }
             continue;
         }
@@ -6812,10 +7349,16 @@ fn run_session(
         portal.recovered_event_slots,
         portal.dropped_events
     );
+    let restart_display = desktop.display_restart_requested;
     framebuffer::exit();
-    crate::clear_console();
-    crate::println!("ExpDisplay session closed; command environment restored.");
-    slog!("EXPOS_DISPLAY_CLOSED\r\n");
+    if restart_display {
+        slog!("EXPOS_DISPLAY_RESTART mode=expdisplay\r\n");
+    } else {
+        crate::clear_console();
+        crate::println!("ExpDisplay session closed; command environment restored.");
+        slog!("EXPOS_DISPLAY_CLOSED\r\n");
+    }
+    restart_display
 }
 
 fn split_command(command: &[u8]) -> (&[u8], &[u8]) {
@@ -7061,6 +7604,12 @@ fn render(desktop: &mut DesktopState) {
     if desktop.shell_confirmation {
         draw_shell_confirmation(desktop);
     }
+    if desktop.power_menu_open {
+        draw_power_menu(desktop);
+    }
+    if desktop.locked {
+        draw_lock_screen(desktop);
+    }
     if desktop.display_debug_overlay {
         draw_display_debug_overlay(desktop);
     }
@@ -7231,7 +7780,18 @@ fn pace_frame(desktop: &mut DesktopState, damaged_commit: bool) {
         let now = crate::hardware::timestamp();
         match desktop.frame_pacer.decide(now, true) {
             FrameDecision::WaitUntil { deadline } => {
+                let started = crate::hardware::timestamp();
+                let max_wait = crate::hardware::clock_info().tsc_hz.max(1) / 20;
+                let mut polls = 0_u32;
                 while crate::hardware::timestamp() < deadline.not_before_tick() {
+                    let now = crate::hardware::timestamp();
+                    polls = polls.saturating_add(1);
+                    if now < started || now.saturating_sub(started) > max_wait || polls >= 2_000_000
+                    {
+                        desktop.frame_pacer.reset_phase(now);
+                        slog!("EXPOS_FRAME_WAIT_RECOVERED polls={}\r\n", polls);
+                        break;
+                    }
                     core::hint::spin_loop();
                 }
             }
@@ -7963,6 +8523,51 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
         framebuffer::text(x + width - 84, top + 11, "/", color::MUTED, 1);
         draw_number(x + width - 72, top + 11, count as u64, color::MUTED);
         framebuffer::text(x + width - 38, top + 11, "x", color::MUTED, 1);
+    }
+    if desktop.browser_loading {
+        let top = y + browser_content_top(desktop);
+        framebuffer::alpha_rounded_rect(
+            x + 18,
+            top + 8,
+            width - 36,
+            (bottom - top - 34).max(80),
+            12,
+            desktop.preferences.panel_color(),
+            235,
+        );
+        framebuffer::rounded_rect(x + width / 2 - 112, top + 48, 224, 72, 14, 0x0017_2530);
+        framebuffer::text(
+            x + width / 2 - 78,
+            top + 67,
+            "Loading securely",
+            color::INK,
+            1,
+        );
+        framebuffer::text(
+            x + width / 2 - 88,
+            top + 91,
+            "Bounded request in progress",
+            color::MUTED,
+            1,
+        );
+        let phase = (crate::hardware::timestamp()
+            / (crate::hardware::clock_info().tsc_hz.max(1) / 8).max(1))
+            % 4;
+        for dot in 0..4 {
+            framebuffer::rounded_rect(
+                x + width / 2 - 30 + dot * 18,
+                top + 108,
+                7,
+                7,
+                4,
+                if dot as u64 == phase {
+                    desktop.preferences.accent.color()
+                } else {
+                    0x0040_5260
+                },
+            );
+        }
+        return;
     }
     let mut content_y = y + browser_content_top(desktop) - desktop.browser_scroll;
     for styled in desktop.document.styled_nodes() {
@@ -9505,6 +10110,46 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                     },
                 );
             }
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                13,
+                "Panel style",
+                "Choose an edge panel, floating dock, or accent rail",
+                TASKBAR_STYLE_LABELS[desktop.preferences.taskbar_style as usize],
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                14,
+                "Icon scale",
+                "Resize application glyphs independently of panel thickness",
+                TASKBAR_ICON_LABELS[desktop.preferences.taskbar_icon_scale as usize],
+                SettingControl::Choice,
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                15,
+                "Running indicators",
+                "Show or hide the active and minimized app rails",
+                if desktop.preferences.taskbar_indicators {
+                    "On"
+                } else {
+                    "Off"
+                },
+                SettingControl::Toggle {
+                    on: desktop.preferences.taskbar_indicators,
+                    available: true,
+                },
+            );
         }
         SettingsCategory::Menu => {
             settings_row(
@@ -10246,12 +10891,46 @@ fn draw_dock(desktop: &DesktopState) {
     let width = dock.width as i32;
     let height = dock.height as i32;
     let accent = desktop.preferences.accent.color();
+    let floating = desktop.preferences.taskbar_style == 1;
     if desktop.preferences.taskbar_translucent && !desktop.preferences.reduce_transparency {
-        framebuffer::alpha_rect(x, y, width, height, desktop.preferences.panel_color(), 204);
+        if floating {
+            framebuffer::alpha_rounded_rect(
+                x,
+                y,
+                width,
+                height,
+                12,
+                desktop.preferences.panel_color(),
+                220,
+            );
+        } else {
+            framebuffer::alpha_rect(x, y, width, height, desktop.preferences.panel_color(), 204);
+        }
+    } else if floating {
+        framebuffer::rounded_rect(x, y, width, height, 12, desktop.preferences.panel_color());
     } else {
         framebuffer::rect(x, y, width, height, desktop.preferences.panel_color());
     }
-    framebuffer::outline(x, y, width, height, desktop.preferences.border_color(false));
+    if floating {
+        framebuffer::rounded_outline(
+            x,
+            y,
+            width,
+            height,
+            12,
+            desktop.preferences.border_color(false),
+        );
+    } else {
+        framebuffer::outline(x, y, width, height, desktop.preferences.border_color(false));
+    }
+    if desktop.preferences.taskbar_style == 2 {
+        match desktop.preferences.taskbar_placement {
+            TaskbarPlacement::Bottom => framebuffer::rect(x, y, width, 3, accent),
+            TaskbarPlacement::Top => framebuffer::rect(x, y + height - 3, width, 3, accent),
+            TaskbarPlacement::Left => framebuffer::rect(x + width - 3, y, 3, height, accent),
+            TaskbarPlacement::Right => framebuffer::rect(x, y, 3, height, accent),
+        }
+    }
     let start_color = if desktop.launcher_open {
         0x0032_2654
     } else {
@@ -10292,10 +10971,31 @@ fn draw_dock(desktop: &DesktopState) {
                 0x0024_292F,
             );
         }
+        let icon_size = match desktop.preferences.taskbar_icon_scale {
+            0 => 14,
+            2 => 22,
+            _ => 18,
+        }
+        .min(item.height as i32 - 6)
+        .max(12);
         let icon_x = item_x + 5;
-        let icon_y = item_y + (item.height as i32 - 18) / 2;
-        settings_rect(desktop.preferences, icon_x, icon_y, 18, 18, 4, app.accent());
-        framebuffer::text(icon_x + 5, icon_y + 4, app.shortcut(), color::WHITE, 1);
+        let icon_y = item_y + (item.height as i32 - icon_size) / 2;
+        settings_rect(
+            desktop.preferences,
+            icon_x,
+            icon_y,
+            icon_size,
+            icon_size,
+            4,
+            app.accent(),
+        );
+        framebuffer::text(
+            icon_x + (icon_size - 6) / 2,
+            icon_y + (icon_size - 8) / 2,
+            app.shortcut(),
+            color::WHITE,
+            1,
+        );
         if desktop.preferences.taskbar_labels
             && !desktop.preferences.taskbar_placement.vertical()
             && item.width >= 48
@@ -10318,7 +11018,9 @@ fn draw_dock(desktop: &DesktopState) {
         } else {
             accent
         };
-        if desktop.preferences.taskbar_placement.vertical() {
+        if desktop.preferences.taskbar_indicators
+            && desktop.preferences.taskbar_placement.vertical()
+        {
             framebuffer::rect(
                 item_x,
                 item_y + 4,
@@ -10326,7 +11028,7 @@ fn draw_dock(desktop: &DesktopState) {
                 item.height as i32 - 8,
                 indicator_color,
             );
-        } else {
+        } else if desktop.preferences.taskbar_indicators {
             framebuffer::rect(
                 item_x + 5,
                 item_y + item.height as i32 - 2,
@@ -10683,6 +11385,7 @@ fn draw_launcher(desktop: &DesktopState) {
                         && desktop.native_apps.active_index() == index,
                 )
             }
+            LauncherItem::Power => ("Power", "Session", 0x00D9_5D68, "P", false),
         };
         let selected = ordinal == desktop.launcher_selection;
         framebuffer::rounded_rect(
@@ -10842,6 +11545,242 @@ fn draw_shell_confirmation(desktop: &DesktopState) {
     );
 }
 
+fn power_menu_geometry() -> (Rect, i32, i32) {
+    let screen_width = framebuffer::width() as i32;
+    let screen_height = framebuffer::height() as i32;
+    let width = 520_i32.min(screen_width - 28);
+    let height = 330_i32.min(screen_height - 28);
+    let x = (screen_width - width) / 2;
+    let y = (screen_height - height) / 2;
+    (
+        Rect::new(x as i16, y as i16, width as u16, height as u16),
+        (width - 72) / 2,
+        72,
+    )
+}
+
+fn draw_power_menu(desktop: &DesktopState) {
+    let screen_width = framebuffer::width() as i32;
+    let screen_height = framebuffer::height() as i32;
+    let (menu, card_width, card_height) = power_menu_geometry();
+    let width = menu.width as i32;
+    let height = menu.height as i32;
+    let x = menu.x as i32;
+    let y = menu.y as i32;
+    framebuffer::alpha_rect(0, 0, screen_width, screen_height, 0x0000_0308, 188);
+    framebuffer::rounded_rect(x, y, width, height, 18, 0x000D_131B);
+    framebuffer::rounded_outline(x, y, width, height, 18, desktop.preferences.accent.color());
+    framebuffer::text(x + 28, y + 24, "Power & session", color::WHITE, 2);
+    framebuffer::text(
+        x + 30,
+        y + 54,
+        "Choose what ExpOS should do next",
+        color::MUTED,
+        1,
+    );
+    for (index, action) in PowerAction::ALL.iter().copied().enumerate() {
+        let column = index % 2;
+        let row = index / 2;
+        let card_x = x + 24 + column as i32 * (card_width + 16);
+        let card_y = y + 82 + row as i32 * (card_height + 10);
+        let selected = index == desktop.power_selection;
+        framebuffer::rounded_rect(
+            card_x,
+            card_y,
+            card_width,
+            card_height,
+            12,
+            if selected {
+                blend_color(0x0014_1D27, desktop.preferences.accent.color(), 84)
+            } else {
+                0x0014_1D27
+            },
+        );
+        framebuffer::rounded_outline(
+            card_x,
+            card_y,
+            card_width,
+            card_height,
+            12,
+            if selected {
+                desktop.preferences.accent.color()
+            } else {
+                0x0032_4352
+            },
+        );
+        let glyph_color = match action {
+            PowerAction::Shutdown => 0x00D9_5D68,
+            PowerAction::Restart => 0x00E3_AA58,
+            PowerAction::Lock => 0x006F_BF9A,
+            PowerAction::Sleep | PowerAction::Suspend => 0x006F_AEE8,
+        };
+        framebuffer::rounded_rect(card_x + 12, card_y + 13, 42, 42, 12, glyph_color);
+        framebuffer::text(card_x + 29, card_y + 29, action.glyph(), color::WHITE, 1);
+        framebuffer::text(card_x + 66, card_y + 15, action.label(), color::INK, 1);
+        framebuffer::text(
+            card_x + 66,
+            card_y + 37,
+            browser_text_prefix(
+                action.description(),
+                ((card_width - 76) / 6).max(1) as usize,
+            ),
+            color::MUTED,
+            1,
+        );
+    }
+    framebuffer::text(
+        x + 28,
+        y + height - 20,
+        "ARROWS select   ENTER confirm   ESC close",
+        color::MUTED,
+        1,
+    );
+}
+
+fn perform_power_action(desktop: &mut DesktopState, input: &mut Input, action: PowerAction) {
+    desktop.power_menu_open = false;
+    match action {
+        PowerAction::Lock => {
+            desktop.locked = true;
+            desktop.lock_password.fill(0);
+            desktop.lock_password_len = 0;
+            desktop.lock_denied = false;
+            slog!(
+                "EXPOS_SESSION_LOCK state=locked user={}\r\n",
+                desktop.session.name()
+            );
+        }
+        PowerAction::Sleep => {
+            power_sleep(input, false);
+            desktop.full_redraw_requested = true;
+        }
+        PowerAction::Suspend => {
+            desktop.save_preferences();
+            power_sleep(input, true);
+            desktop
+                .frame_pacer
+                .reset_phase(crate::hardware::timestamp());
+            desktop.full_redraw_requested = true;
+        }
+        PowerAction::Restart => {
+            desktop.save_preferences();
+            slog!("EXPOS_POWER_ACTION restart\r\n");
+            crate::port::reboot();
+        }
+        PowerAction::Shutdown => {
+            desktop.save_preferences();
+            slog!("EXPOS_POWER_ACTION shutdown\r\n");
+            crate::port::shutdown();
+        }
+    }
+}
+
+fn draw_lock_screen(desktop: &DesktopState) {
+    let width = framebuffer::width() as i32;
+    let height = framebuffer::height() as i32;
+    let card_width = 410_i32.min(width - 32);
+    let card_height = 238_i32;
+    let x = (width - card_width) / 2;
+    let y = (height - card_height) / 2;
+    framebuffer::vertical_gradient(0, 0, width, height, 0x0005_1019, 0x0013_2030);
+    framebuffer::alpha_rounded_rect(
+        x - 20,
+        y - 20,
+        card_width + 40,
+        card_height + 40,
+        28,
+        desktop.preferences.accent.color(),
+        28,
+    );
+    framebuffer::rounded_rect(x, y, card_width, card_height, 18, 0x000C_121A);
+    framebuffer::rounded_outline(x, y, card_width, card_height, 18, 0x0041_596B);
+    framebuffer::rounded_rect(
+        x + 28,
+        y + 28,
+        54,
+        54,
+        18,
+        desktop.preferences.accent.color(),
+    );
+    framebuffer::text(x + 49, y + 49, "L", color::WHITE, 1);
+    framebuffer::text(x + 100, y + 30, desktop.session.name(), color::WHITE, 2);
+    framebuffer::text(
+        x + 102,
+        y + 59,
+        desktop.session.authority_name(),
+        color::MUTED,
+        1,
+    );
+    framebuffer::text(x + 30, y + 106, "Password", color::MUTED, 1);
+    framebuffer::rounded_rect(x + 28, y + 126, card_width - 56, 44, 9, 0x0015_202B);
+    framebuffer::rounded_outline(
+        x + 28,
+        y + 126,
+        card_width - 56,
+        44,
+        9,
+        if desktop.lock_denied {
+            0x00D9_5D68
+        } else {
+            desktop.preferences.accent.color()
+        },
+    );
+    for index in 0..desktop.lock_password_len {
+        framebuffer::rounded_rect(x + 44 + index as i32 * 13, y + 144, 6, 6, 3, color::INK);
+    }
+    framebuffer::text(
+        x + 30,
+        y + 194,
+        if desktop.lock_denied {
+            "Password incorrect. Try again."
+        } else {
+            "Enter unlocks the session"
+        },
+        if desktop.lock_denied {
+            0x00FF_A2A8
+        } else {
+            color::MUTED
+        },
+        1,
+    );
+}
+
+fn power_sleep(input: &mut Input, suspend: bool) {
+    framebuffer::clear(0x0000_0000);
+    let width = framebuffer::width() as i32;
+    let height = framebuffer::height() as i32;
+    framebuffer::text(
+        width / 2 - 78,
+        height / 2 - 8,
+        if suspend {
+            "SUSPENDED"
+        } else {
+            "DISPLAY ASLEEP"
+        },
+        0x0045_5662,
+        1,
+    );
+    let _ = framebuffer::present(false);
+    slog!(
+        "EXPOS_POWER_STATE mode={} state=entered\r\n",
+        if suspend { "suspend" } else { "sleep" }
+    );
+    loop {
+        if input.poll_event().is_some() {
+            break;
+        }
+        if suspend {
+            crate::port::halt();
+        } else {
+            core::hint::spin_loop();
+        }
+    }
+    slog!(
+        "EXPOS_POWER_STATE mode={} state=resumed\r\n",
+        if suspend { "suspend" } else { "sleep" }
+    );
+}
+
 fn wrapped_text(mut x: i32, mut y: i32, width: i32, value: &str, color: u32, scale: i32) -> i32 {
     let left = x;
     let advance = framebuffer::text_advance(scale);
@@ -10973,6 +11912,80 @@ fn wikipedia_document(json: &[u8], output: &mut [u8]) -> Option<usize> {
     Some(length)
 }
 
+fn wikipedia_search_result(
+    json: &[u8],
+    ordinal: usize,
+    key: &mut [u8],
+    title: &mut [u8],
+) -> Option<(usize, usize)> {
+    let mut cursor = 0;
+    for result_index in 0..=ordinal {
+        let remaining = json.get(cursor..)?;
+        let key_offset = find_bytes_local(remaining, b"\"key\":\"")?;
+        let key_start = cursor + key_offset + b"\"key\":\"".len();
+        let (key_len, key_consumed) = decode_json_string(&json[key_start..], key)?;
+        cursor = key_start + key_consumed;
+        let remaining = json.get(cursor..)?;
+        let title_offset = find_bytes_local(remaining, b"\"title\":\"")?;
+        let title_start = cursor + title_offset + b"\"title\":\"".len();
+        let (title_len, title_consumed) = decode_json_string(&json[title_start..], title)?;
+        cursor = title_start + title_consumed;
+        if key_len == 0
+            || title_len == 0
+            || !key[..key_len].iter().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(
+                        *byte,
+                        b'-' | b'_' | b'.' | b'~' | b'(' | b')' | b',' | b':' | b'%' | b'\''
+                    )
+            })
+        {
+            return None;
+        }
+        if result_index == ordinal {
+            return Some((key_len, title_len));
+        }
+    }
+    None
+}
+
+fn decode_json_string(input: &[u8], output: &mut [u8]) -> Option<(usize, usize)> {
+    let mut source = 0;
+    let mut length = 0;
+    while source < input.len() && length < output.len() {
+        let byte = input[source];
+        source += 1;
+        if byte == b'"' {
+            return Some((length, source));
+        }
+        let decoded = if byte == b'\\' {
+            let escaped = *input.get(source)?;
+            source += 1;
+            match escaped {
+                b'"' | b'\\' | b'/' => escaped,
+                b'n' | b'r' | b't' => b' ',
+                b'u' => {
+                    source = source.checked_add(4)?;
+                    b'?'
+                }
+                _ => return None,
+            }
+        } else if byte.is_ascii() && byte >= b' ' {
+            match byte {
+                b'<' | b'>' | b'&' => b' ',
+                _ => byte,
+            }
+        } else if byte & 0xC0 != 0x80 {
+            b'?'
+        } else {
+            continue;
+        };
+        output[length] = decoded;
+        length += 1;
+    }
+    None
+}
+
 fn json_string_field(json: &[u8], field: &[u8], output: &mut [u8]) -> Option<usize> {
     let mut pattern = [0_u8; 40];
     if field.len() + 4 > pattern.len() {
@@ -10982,40 +11995,7 @@ fn json_string_field(json: &[u8], field: &[u8], output: &mut [u8]) -> Option<usi
     pattern[1..1 + field.len()].copy_from_slice(field);
     pattern[1 + field.len()..4 + field.len()].copy_from_slice(b"\":\"");
     let start = find_bytes_local(json, &pattern[..field.len() + 4])? + field.len() + 4;
-    let mut source = start;
-    let mut length = 0;
-    while source < json.len() && length < output.len() {
-        let byte = json[source];
-        source += 1;
-        if byte == b'"' {
-            return Some(length);
-        }
-        if byte == b'\\' {
-            let escaped = *json.get(source)?;
-            source += 1;
-            let decoded = match escaped {
-                b'"' | b'\\' | b'/' => escaped,
-                b'n' | b'r' | b't' => b' ',
-                b'u' => {
-                    source = source.checked_add(4)?;
-                    b'?'
-                }
-                _ => return None,
-            };
-            output[length] = decoded;
-            length += 1;
-        } else if byte.is_ascii() && byte >= b' ' {
-            output[length] = match byte {
-                b'<' | b'>' | b'&' => b' ',
-                _ => byte,
-            };
-            length += 1;
-        } else if byte & 0xC0 != 0x80 {
-            output[length] = b'?';
-            length += 1;
-        }
-    }
-    None
+    decode_json_string(&json[start..], output).map(|(length, _)| length)
 }
 
 fn append_html(length: &mut usize, output: &mut [u8], bytes: &[u8]) -> Option<()> {
@@ -11061,7 +12041,12 @@ fn encode_search_url(query: &str, output: &mut [u8]) -> Option<usize> {
         output[length..length + count].copy_from_slice(&encoded[..count]);
         length += count;
     }
-    Some(length)
+    let suffix = SEARCH_SUFFIX.as_bytes();
+    if length + suffix.len() > output.len() {
+        return None;
+    }
+    output[length..length + suffix.len()].copy_from_slice(suffix);
+    Some(length + suffix.len())
 }
 
 const fn is_http_redirect(status: u16) -> bool {
@@ -11382,6 +12367,14 @@ mod tests {
         assert_eq!(BROWSER_TAB_CAPACITY, 6);
         assert_eq!(BROWSER_HISTORY_CAPACITY, 12);
         assert_eq!(BROWSER_BOOKMARK_CAPACITY, 8);
+        assert!(browser_allows_active_content(8 * 1024, false));
+        assert!(!browser_allows_active_content(8 * 1024 + 1, false));
+        assert!(!browser_allows_active_content(512, true));
+        assert!(youtube_compatibility_url(
+            "https://www.youtube.com/watch?v=bounded"
+        ));
+        assert!(youtube_compatibility_url("https://m.youtube.com/"));
+        assert!(!youtube_compatibility_url("https://notyoutube.com/"));
         assert!(browser_text_contains("Chromium-like workflow", "CHROMIUM"));
         assert!(!browser_text_contains("ExpOS Browser", "Firefox"));
 
@@ -11427,24 +12420,37 @@ mod tests {
 
     #[test]
     fn customization_pages_expose_more_than_one_thousand_real_values() {
-        assert_eq!(CUSTOMIZATION_VALUE_COUNT, 1_288);
+        assert_eq!(CUSTOMIZATION_VALUE_COUNT, 1_296);
         const { assert!(CUSTOMIZATION_VALUE_COUNT >= 1_000) };
         const { assert!(state::CUSTOMIZATION_SELECTABLE_VALUES >= 1_000) };
         assert_eq!(SettingsCategory::Profiles.row_count(), 8);
         assert_eq!(SettingsCategory::Appearance.row_count(), 8);
         assert_eq!(SettingsCategory::Accessibility.row_count(), 11);
         assert_eq!(SettingsCategory::Windows.row_count(), 9);
-        assert_eq!(SettingsCategory::Taskbar.row_count(), 13);
+        assert_eq!(SettingsCategory::Taskbar.row_count(), 16);
         assert_eq!(SettingsCategory::Menu.row_count(), 9);
         assert_eq!(SettingsCategory::Terminal.row_count(), 5);
         assert_eq!(SettingsCategory::Language.row_count(), 5);
         assert_eq!(SettingsCategory::Time.row_count(), 7);
         let preferences = DesktopPreferences::from_persistent(state::PersistentPreferences::new());
         let extension = preferences.encode_ui_extension();
-        assert_eq!(&extension[..4], b"DUI3");
+        assert_eq!(&extension[..4], b"DUI4");
         assert!(preferences.clock_24h);
         let mut label = [0_u8; 16];
         assert_eq!(format_signed_minutes(345, &mut label), "+05:45");
+    }
+
+    #[test]
+    fn power_menu_exposes_every_bounded_session_action() {
+        assert_eq!(PowerAction::ALL.len(), 5);
+        assert_eq!(PowerAction::ALL[0].label(), "Lock");
+        assert_eq!(PowerAction::ALL[1].label(), "Sleep display");
+        assert_eq!(PowerAction::ALL[2].label(), "Suspend");
+        assert_eq!(PowerAction::ALL[3].label(), "Restart");
+        assert_eq!(PowerAction::ALL[4].label(), "Shut down");
+        assert!(PowerAction::ALL
+            .iter()
+            .all(|action| !action.description().is_empty() && !action.glyph().is_empty()));
     }
 
     #[test]
@@ -11555,12 +12561,29 @@ mod tests {
     }
 
     #[test]
-    fn search_url_uses_duckduckgo_html_and_percent_encoding() {
+    fn search_url_uses_wikipedia_rest_and_percent_encoding() {
         let mut output = [0_u8; 512];
         let length = encode_search_url("rust os + tls", &mut output).unwrap();
         assert_eq!(
             core::str::from_utf8(&output[..length]).unwrap(),
-            "https://duckduckgo.com/html/?q=rust+os+%2B+tls"
+            "https://en.wikipedia.org/w/rest.php/v1/search/page?q=rust+os+%2B+tls&limit=8"
+        );
+    }
+
+    #[test]
+    fn wikipedia_search_json_yields_safe_titles_and_keys() {
+        let json = br#"{"pages":[{"key":"NetBSD","title":"NetBSD"},{"key":"Rust_(programming_language)","title":"Rust programming language"}]}"#;
+        let mut key = [0_u8; 128];
+        let mut title = [0_u8; 128];
+        let (key_len, title_len) =
+            wikipedia_search_result(json, 1, &mut key, &mut title).expect("second result");
+        assert_eq!(
+            core::str::from_utf8(&key[..key_len]).unwrap(),
+            "Rust_(programming_language)"
+        );
+        assert_eq!(
+            core::str::from_utf8(&title[..title_len]).unwrap(),
+            "Rust programming language"
         );
     }
 

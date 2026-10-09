@@ -844,8 +844,32 @@ pub fn active_mode() -> Option<Mode> {
 pub fn enter() -> bool {
     let requested = requested_mode();
     crate::slog!("EXPOS_DISPLAY_ENTER requested={}\r\n", requested.label());
-    if program_firmware_framebuffer() {
-        return true;
+    if let Some(info) = crate::boot::firmware_framebuffer() {
+        let firmware_mode = DisplayMode::from_dimensions(info.width as usize, info.height as usize);
+        if firmware_mode == Some(requested) && program_firmware_framebuffer() {
+            return true;
+        }
+        // OVMF's handoff describes only the mode that was active at
+        // ExitBootServices.  A Bochs/QEMU VBE adapter remains programmable
+        // afterwards, so honor an explicit user request before falling back to
+        // the fixed firmware geometry.  The old order silently ignored every
+        // resolution change on the normal UEFI boot path.
+        if program_mode(requested) {
+            crate::slog!(
+                "EXPOS_DISPLAY_REPROGRAMMED source=uefi-gop target={}\r\n",
+                requested.label()
+            );
+            return true;
+        }
+        crate::slog!(
+            "EXPOS_DISPLAY_FIXED_FALLBACK requested={} firmware={}x{}\r\n",
+            requested.label(),
+            info.width,
+            info.height
+        );
+        if program_firmware_framebuffer() {
+            return true;
+        }
     }
     if program_mode(requested) {
         return true;

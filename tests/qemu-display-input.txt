@@ -41,7 +41,7 @@ j
 j
 j
 j
-~					?
+~t
 help
 neofetch
 status

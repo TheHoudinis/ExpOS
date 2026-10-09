@@ -121,6 +121,19 @@ impl Session {
     }
 }
 
+/// Verify a password against the account represented by an existing session.
+/// This keeps the desktop lock screen scoped to the signed-in identity instead
+/// of allowing an unrelated account to inherit the live session.
+pub fn verify_session_password(session: Session, password: &[u8]) -> bool {
+    ACCOUNTS
+        .lock()
+        .accounts
+        .iter()
+        .find(|account| account.occupied && account.name.as_bytes() == session.name.as_bytes())
+        .copied()
+        .is_some_and(|account| account.verify_password(password))
+}
+
 #[derive(Clone, Copy)]
 struct Account {
     name: Field,

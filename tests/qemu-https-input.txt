@@ -1,9 +1,8 @@
 2222
 operator
 expos
-fetch https://www.youtube.com/
 browser
 /https://www.youtube.com/
-~	?
+~t
 console
 shutdown

@@ -170,10 +170,17 @@ impl fmt::Write for Console {
 static CONSOLE: SpinMutex<Console> = SpinMutex::new(Console::new());
 
 fn enable(title: &str, subtitle: &str) -> bool {
+    let requested = framebuffer::requested_mode();
     let _ = framebuffer::request_mode(framebuffer::DisplayMode::P480);
     if !framebuffer::enter() {
+        let _ = framebuffer::request_mode(requested);
         return false;
     }
+    // The console deliberately uses its stable 480p grid, but it must not
+    // replace the user's desktop request.  Restoring the request here leaves
+    // the active console mode untouched and lets the next desktop entry apply
+    // the saved resolution.
+    let _ = framebuffer::request_mode(requested);
     let mut console = CONSOLE.lock();
     console.reset();
     console.enabled = true;

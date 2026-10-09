@@ -7,6 +7,7 @@
 //! from the RTC, and the leaf name/signature are checked before HTTP is sent.
 
 use crate::{network::NetworkError, port, slog};
+use alloc::boxed::Box;
 use core::{
     arch::x86_64::{__cpuid, _rdrand64_step},
     num::NonZeroU32,
@@ -206,14 +207,27 @@ where
     connection.flush().map_err(map_tls_error)?;
     let mut length = 0;
     let mut truncated = false;
+    // Always give embedded-tls enough room for a complete decrypted record.
+    // Reading directly into a nearly-full HTTP buffer can turn an intentional
+    // response cap into a TLS protocol error when the next record is larger
+    // than the remaining destination slice.
+    let mut application_data = Box::new([0_u8; TLS_RECORD_CAPACITY]);
     loop {
         if length == output.len() {
             truncated = true;
             break;
         }
-        match connection.read(&mut output[length..]) {
+        match connection.read(&mut application_data[..]) {
             Ok(0) | Err(TlsError::ConnectionClosed) => break,
-            Ok(count) => length += count,
+            Ok(count) => {
+                let copied = count.min(output.len() - length);
+                output[length..length + copied].copy_from_slice(&application_data[..copied]);
+                length += copied;
+                if copied != count {
+                    truncated = true;
+                    break;
+                }
+            }
             Err(error) => return Err(map_tls_error(error)),
         }
     }
