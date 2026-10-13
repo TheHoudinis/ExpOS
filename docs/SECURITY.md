@@ -24,11 +24,11 @@ not provide this authenticity guarantee.
 
 | Threat | Implemented control | Important remaining limit |
 |---|---|---|
-| Kernel memory corruption | Rust for normal parsing/state paths; CR0.WP; NXE; SMEP; read-only executable Form code; NX Form data/stack; fixed-capacity protocol records | Hardware drivers and FFI still require `unsafe`; the monolithic kernel and its identity-mapped kernel image are not fully W^X or fault-isolated; no SMAP or IOMMU |
-| Malformed network/TLS input | Driver receive lengths are bounded before copies; IPv4/UDP/TCP/DNS/HTTP/TLS decoders validate nested lengths; response/document sizes are fixed; network initialization can be omitted | Network and TLS still execute in Ring 0; fuzzing and a user-mode driver/network split are not complete |
-| MicroPython escape | Minimal ROM feature set, no external imports/filesystem/network modules, fresh 256 KiB heap, source/stack/step/output limits, non-catchable abort, callback metadata checks, and install-time omission | MicroPython is C running in Ring 0 when enabled; these bounds reduce exposure but do not make interpreter memory corruption harmless |
+| Kernel memory corruption | Rust for normal parsing/state paths; CR0.WP; NXE; SMEP; CPU-supported SMAP; section-aligned RX text, R/NX rodata and RW/NX data/heap/stack/MMIO; unmapped null page; saved-CS fault attribution; read-only executable Form code; NX Form data/stack; fixed-capacity protocol records | Hardware drivers and FFI still require `unsafe`; the monolithic kernel is not fault-isolated; no IOMMU; NX/SMEP/SMAP depend on CPU support |
+| Malformed network/TLS input | The RTL8139 polling driver, private DMA buffers, Ethernet, DHCP, DNS, ICMP, generic UDP, plain TCP/HTTP and authenticated streaming TCP/TLS execute in one sealed Ring 3 worker; HTTP response parsing uses another worker; replies are revalidated; the worker receives only a private writable/NX DMA arena and an exact register/value portal; DMA addresses are kernel-substituted; bus mastering is revoked before arena release; response/document sizes are fixed; network initialization can be omitted | PCI discovery, page pin/translation, the register portal and revocation remain Ring 0; without an IOMMU a malicious or faulty physical device is not confined to the programmed aperture; deterministic mutation campaigns cover network decoders, but coverage-guided/sanitizer fuzzing is not complete |
+| MicroPython escape | Real VM runs in a private Ring 3 service with W^X, read-only input, sealed Execute/reply Handles, fault containment and hardware watchdog; minimal ROM, no filesystem/network imports, fresh 256 KiB heap, source/step/output bounds and install-time omission | The loader, ABI bridge, scheduler and kernel remain trusted; no general user-mode service filesystem/network API yet; worker requires NX |
 | Capability forgery/leak | CFC/requester/target/Dimension/operation/expiry validation; parent-linked revocation; restored children must re-prove strict attenuation; IDs skip collisions; ExpSeal closes new ambient root issuance | Kernel compromise can bypass the broker; durable general seal/context isolation remains incomplete |
-| Package supply chain | HTTPS registries require a pinned Ed25519 public key; SHA-256 verifies artifacts; no package scripts or links; safe bounded extraction, ownership receipts, rollback and atomic state publication | The compiled seed catalog is part of the trusted image; a public transparency log and isolated third-party native loader do not yet exist |
+| Package supply chain | HTTPS registries require a pinned Ed25519 public key; SHA-256 verifies artifacts; no package scripts or links; safe bounded extraction, ownership receipts, rollback and atomic state publication | The compiled seed catalog is part of the trusted image; a public transparency log and automatic native Ayo installation do not yet exist; EXF1 supports bounded contributor code through manual import |
 | Credential guessing | New account records use 100,000-round PBKDF2-HMAC-SHA256; failed logins back off from 250 ms to 2 s; encrypted CFC unlock powers down after five failures; comparisons are constant-time | Login backoff is not durable across reboot; no TPM, FIDO, hardware-backed key or remote attestation |
 
 ## Recovery boundary
@@ -43,11 +43,49 @@ erase.
 
 ## Claims deliberately not made
 
-- ExpPython, Browser, TLS and device drivers are not separate Ring 3 services.
-- Kernel text/rodata/data do not yet have complete section-level W^X mappings.
+- Browser document/UI state and device drivers are not separate Ring 3 services;
+  ExpPython, HTTP parsing and network/TLS protocol state are.
+- Kernel image section W^X is active after early boot on NX-capable CPUs;
+  bootstrap initially uses writable executable huge pages. Unsupported CPUs
+  retain a diagnostic boot path with `wx=false`. The low identity map still
+  covers RAM and MMIO, and kernel code can modify page tables.
+- Executable Form pages still have a supervisor RW/NX backing alias used by the
+  image/capsule loader; strict physical-page W^X for dynamically loaded Forms needs
+  allocator/sealing work. This is separate from kernel image W^X.
+- EXF1 images require NX and receive a bounded CPL3 address space; GS is
+  switched on entry/exit, unowned fast syscall entries are disabled, and
+  floating-point/SIMD instructions fault until owned state saving exists.
+  NMI/IST stacks and general service memory allocation are still missing.
 - Secure Boot, measured boot, TPM sealing, IOMMU DMA isolation and signed kernel
   updates are not implemented.
 - CRC protects unencrypted Architect records from accidental damage, not a
   malicious disk editor.
 - Static tests do not replace hostile packet/parser fuzzing or physical-machine
   validation.
+
+## Loop protection validation
+
+`make isolation-check` builds a separate disposable image with the
+`isolation-self-test` feature. Its narrowly matched exception fixups do not
+exist in normal runtime/Genesis builds. QEMU must actually fault on writes to
+kernel text/rodata, execution from rodata/data, and SMAP-blocked reads of user
+pages. A user-set AC flag must be cleared at kernel entry. Additional Forms
+try writes to code, execution from data, supervisor reads, division by zero and
+invalid instructions; a survivor Form must still run. A separate boot injects
+a supervisor null read while a Form is active and must halt as a kernel fault.
+The suite also boots with NX/SMEP/SMAP disabled and checks the diagnostic path.
+
+ABI requests and replies use the admitted Form slot's supervisor data alias,
+with exact user virtual addresses and bounded lengths validated first. No
+untrusted user pointer is dereferenced and SMAP stays enabled; no STAC window
+is needed for the current fixed-page ABI. Future arbitrary user buffers need
+an explicit validated copy contract.
+
+The AP trampoline is RW/NX during copying and RX before SIPI. Its mailbox is
+on a separate RW/NX page; APs enable NXE before using the shared root. Normal
+Form exceptions carry saved CPL, RIP, error code and CR2. Supervisor faults halt
+instead of unwinding to a Form's saved kernel stack. Double-fault/NMI/machine-
+check IST stacks and a general recoverable kernel-fault model remain open.
+
+`make parser-fuzz` runs host-only seeded mutation campaigns against network,
+WAV and Genesis parsers. See `LOOP_V9_3.md` for scope and reproduction settings.

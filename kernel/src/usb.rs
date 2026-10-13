@@ -1047,6 +1047,9 @@ fn hid_key(usage: u8, modifiers: u8) -> Option<u8> {
     if base == 0x1B && control && shift {
         return Some(crate::input::KEY_DESKTOP_SHELL_CONFIRM);
     }
+    if control && matches!(base, b'r' | b's') {
+        return Some(base - b'a' + 1);
+    }
     let key = crate::input::apply_modifiers(base, shift, false);
     if super_key {
         crate::input::super_binding(key)

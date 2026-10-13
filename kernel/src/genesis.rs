@@ -663,7 +663,7 @@ fn prompt_plan(input: &mut crate::input::Input, encryption: EncryptionProfile) -
             plan.components = COMPONENT_DESKTOP | COMPONENT_BROWSER;
             plan.initial_apps = (1 << 0) | (1 << 2) | (1 << 3);
         }
-        3 => plan.initial_apps = (1_u32 << crate::apps::PACKAGE_COUNT) - 1,
+        3 => plan.initial_apps = crate::apps::PACKAGE_MASK,
         4 => customize_packages(input, &mut plan, encryption),
         _ => unreachable!(),
     }
@@ -1727,7 +1727,6 @@ fn decode_plan(sector: &[u8; 512]) -> Option<GenesisPlan> {
         || components & !(COMPONENT_DESKTOP | COMPONENT_BROWSER | COMPONENT_PYTHON) != 0
         || drivers & !DRIVER_NETWORK != 0
         || sdks & !(SDK_RUST | SDK_C | SDK_GO | SDK_PYTHON) != 0
-        || initial_apps >> crate::apps::PACKAGE_COUNT != 0
         || encryption == EncryptionProfile::Paranoid
             && (drivers & DRIVER_NETWORK != 0
                 || components & (COMPONENT_BROWSER | COMPONENT_PYTHON) != 0)
@@ -1919,6 +1918,30 @@ mod tests {
             storage_envelope: None,
             plan_required: true,
         }
+    }
+
+    #[test]
+    #[ignore = "deterministic mutation campaign; run make parser-fuzz"]
+    fn parser_fuzz_genesis() {
+        let config = config();
+        let manifest = encode_manifest(config);
+        let plan = encode_plan(config.plan);
+        crate::parser_fuzz::campaign("genesis", &[&manifest, &plan], |data| {
+            let mut sector = [0_u8; 512];
+            let copied = sector.len().min(data.len());
+            sector[..copied].copy_from_slice(&data[..copied]);
+            let _ = decode_manifest(&sector);
+            let _ = decode_plan(&sector);
+            // Exercise semantic validation behind the corruption checksum too.
+            let crc = crc32(&sector[..508]);
+            put_u32(&mut sector, 508, crc);
+            if let Some(config) = decode_manifest(&sector) {
+                assert!(decode_manifest(&encode_manifest(config)).is_some());
+            }
+            if let Some(plan) = decode_plan(&sector) {
+                assert_eq!(decode_plan(&encode_plan(plan)), Some(plan));
+            }
+        });
     }
 
     #[test]

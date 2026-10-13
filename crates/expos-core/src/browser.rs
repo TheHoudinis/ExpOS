@@ -1015,6 +1015,16 @@ pub struct Document {
 
 impl Document {
     pub fn parse(url: &str, source: &str) -> Result<Self, BrowserError> {
+        Self::parse_mode(url, source, false)
+    }
+
+    /// Bounded passive preview for pages that exceed the interactive DOM limit.
+    /// Retains the first nodes and never installs CSS, handlers or scripts.
+    pub fn parse_reader(url: &str, source: &str) -> Result<Self, BrowserError> {
+        Self::parse_mode(url, source, true)
+    }
+
+    fn parse_mode(url: &str, source: &str, reader: bool) -> Result<Self, BrowserError> {
         if !url.starts_with("expos://")
             && !url.starts_with("data:text/html,")
             && !url.starts_with("http://")
@@ -1046,9 +1056,15 @@ impl Document {
             web_request_count: 0,
         };
         let mut node_tag_offsets = [0usize; MAX_BROWSER_NODES];
-        document.parse_nodes(source, &mut node_tag_offsets)?;
+        match document.parse_nodes(source, &mut node_tag_offsets) {
+            Err(BrowserError::TooManyNodes) if reader && document.count > 0 => {}
+            result => result?,
+        }
         if document.count == 0 {
             return Err(BrowserError::InvalidDocument);
+        }
+        if reader {
+            return Ok(document);
         }
         document.apply_stylesheets(source)?;
         document.apply_inline_styles(source, &node_tag_offsets);
@@ -2915,6 +2931,19 @@ fn eq_ascii(left: &str, right: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oversized_page_has_passive_reader_preview() {
+        let source = "<p>readable</p>".repeat(MAX_BROWSER_NODES + 3)
+            + "<script>document.title='changed';</script>";
+        assert_eq!(
+            Document::parse("https://example.com/", &source).err(),
+            Some(BrowserError::TooManyNodes)
+        );
+        let reader = Document::parse_reader("https://example.com/", &source).unwrap();
+        assert_eq!(reader.nodes().count(), MAX_BROWSER_NODES);
+        assert_eq!(reader.script_report().scripts_executed, 0);
+    }
 
     #[test]
     fn parses_a_safe_local_document_and_links() {

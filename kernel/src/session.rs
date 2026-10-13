@@ -917,9 +917,9 @@ fn complete_login(session: Session, graphical: bool) -> Session {
     if graphical {
         render_welcome(session);
         let _ = present_graphical("welcome");
-        framebuffer::exit();
+    } else {
+        crate::clear_console();
     }
-    crate::clear_console();
     println!(
         "Signed in as {} with {} authority.",
         session.name(),

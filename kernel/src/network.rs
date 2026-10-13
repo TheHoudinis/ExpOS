@@ -1,16 +1,32 @@
-//! Minimal native IPv4 networking for the transitional x86_64 kernel.
+//! Native IPv4 admission and the confined RTL8139 register/DMA portal.
 //!
-//! The stack is deliberately small and allocation-free: a polling RTL8139
-//! driver, Ethernet/ARP, DHCP-configured IPv4, ICMP echo, checksum-correct UDP, DNS A
-//! queries, a single synchronous TCP client, and bounded HTTP/1.0 GET. TLS 1.3
-//! is layered over the streaming TCP interface in `crate::tls`; IPv6, TCP
-//! servers, and concurrent sockets are not implemented.
+//! Release builds keep DHCP, ARP/IPv4, ICMP, UDP/DNS, TCP and TLS protocol
+//! state, polling driver state and DMA buffers in the restartable Ring 3
+//! network worker. This module retains PCI discovery, a fixed register
+//! allowlist, DMA-address substitution, capability admission, bounded worker
+//! inputs and strict reply revalidation. The legacy in-kernel packet routines
+//! are test-only parser/build corpora. IPv6, TCP servers and concurrent sockets
+//! are absent.
 
 use crate::{port, println, slog};
-use core::sync::atomic::{compiler_fence, Ordering};
+use alloc::boxed::Box;
+use core::sync::atomic::{compiler_fence, AtomicBool, Ordering};
 use expos_core::{CapabilityBroker, Fin, Operations};
+pub use expos_core::{HttpResponse, HTTP_BODY_CAPACITY};
 
 pub const NETWORK_FIN: Fin = Fin::from_u128(0x4E45_5457_4F52_4B00_0000_0000_0000_0001);
+#[cfg(not(test))]
+const DNS_SERVICE_FIN: Fin = Fin::from_u128(0x4E45_5457_4F52_4B44_4E53_0000_0000_0001);
+#[cfg(not(test))]
+const DHCP_SERVICE_FIN: Fin = Fin::from_u128(0x4E45_5457_4F52_4B44_4843_5000_0000_0001);
+#[cfg(not(test))]
+const TCP_SERVICE_FIN: Fin = Fin::from_u128(0x4E45_5457_4F52_4B54_4350_0000_0000_0001);
+#[cfg(not(test))]
+const HTTPS_SERVICE_FIN: Fin = Fin::from_u128(0x4E45_5457_4F52_4B54_4C53_0000_0000_0001);
+#[cfg(not(test))]
+const UDP_SERVICE_FIN: Fin = Fin::from_u128(0x4E45_5457_4F52_4B55_4450_0000_0000_0001);
+#[cfg(not(test))]
+const ICMP_SERVICE_FIN: Fin = Fin::from_u128(0x4E45_5457_4F52_4B49_434D_5000_0000_0001);
 
 const RTL_VENDOR: u16 = 0x10EC;
 const RTL_DEVICE: u16 = 0x8139;
@@ -28,67 +44,99 @@ const RCR: u16 = 0x44;
 const CONFIG1: u16 = 0x52;
 const MEDIA_STATUS: u16 = 0x58;
 
+#[cfg(test)]
 const COMMAND_RX_BUFFER_EMPTY: u8 = 1;
 const COMMAND_TX_ENABLE: u8 = 1 << 2;
 const COMMAND_RX_ENABLE: u8 = 1 << 3;
 const COMMAND_RESET: u8 = 1 << 4;
 
+#[cfg(test)]
 const TX_STATUS_OWN: u32 = 1 << 13;
+#[cfg(test)]
 const TX_STATUS_OK: u32 = 1 << 15;
+#[cfg(test)]
 const TX_STATUS_ABORTED: u32 = 1 << 30;
 
 const RX_RING_SIZE: usize = 8 * 1024;
 const MAX_FRAME_SIZE: usize = 1536;
 const RX_BUFFER_SIZE: usize = RX_RING_SIZE + 16 + MAX_FRAME_SIZE;
 const TX_BUFFER_COUNT: usize = 4;
+#[cfg(test)]
 const ETHERNET_HEADER_SIZE: usize = 14;
 
 const FALLBACK_LOCAL_IP: [u8; 4] = [10, 0, 2, 15];
 const FALLBACK_NETMASK: [u8; 4] = [255, 255, 255, 0];
 const FALLBACK_GATEWAY: [u8; 4] = [10, 0, 2, 2];
 const FALLBACK_DNS_SERVER: [u8; 4] = [10, 0, 2, 3];
+#[cfg(test)]
 const IPV4_BROADCAST: [u8; 4] = [255; 4];
 const IPV4_UNSPECIFIED: [u8; 4] = [0; 4];
+#[cfg(test)]
 const BROADCAST_MAC: [u8; 6] = [0xFF; 6];
 
+#[cfg(test)]
 const IO_WAIT_LIMIT: usize = 2_000_000;
 // Interactive Browser and Weather calls share the desktop thread.  Keep every
 // polling phase tightly bounded so a dead DNS/TCP/TLS peer returns an error
 // instead of making the whole graphical session appear frozen. Two short
 // retries still cover an ordinary lost packet; a failed phase now yields in
 // seconds under QEMU instead of pinning the desktop for roughly a minute.
+#[cfg(test)]
 const RECEIVE_WAIT_LIMIT: usize = 100_000;
+#[cfg(test)]
 const TRANSPORT_RETRIES: usize = 2;
+#[cfg(test)]
 const DHCP_RETRIES: usize = 2;
+#[cfg(test)]
 const DHCP_WAIT_LIMIT: usize = 4_000_000;
+#[cfg(test)]
 const DHCP_PACKET_CAPACITY: usize = 576;
+#[cfg(test)]
 const DHCP_CLIENT_PORT: u16 = 68;
+#[cfg(test)]
 const DHCP_SERVER_PORT: u16 = 67;
+#[cfg(test)]
 const DHCP_DISCOVER: u8 = 1;
+#[cfg(test)]
 const DHCP_OFFER: u8 = 2;
+#[cfg(test)]
 const DHCP_REQUEST: u8 = 3;
+#[cfg(test)]
 const DHCP_ACK: u8 = 5;
+#[cfg(test)]
 const DHCP_NAK: u8 = 6;
 const UDP_HEADER_SIZE: usize = 8;
+#[cfg(test)]
 const TCP_HEADER_SIZE: usize = 20;
+#[cfg(test)]
 const TCP_SYN_HEADER_SIZE: usize = 24;
+#[cfg(test)]
 const DNS_PACKET_CAPACITY: usize = 512;
+#[cfg(test)]
 const DNS_CACHE_HOST_CAPACITY: usize = 96;
 const HTTP_REQUEST_CAPACITY: usize = 768;
 const HTTP_WIRE_CAPACITY: usize = 16 * 1024;
-pub const HTTP_BODY_CAPACITY: usize = 14 * 1024;
 const BROWSER_WIRE_CAPACITY: usize = HTTP_WIRE_CAPACITY;
-const HTTP_LOCATION_CAPACITY: usize = 512;
 const HTTP_CONTENT_TYPE_CAPACITY: usize = 96;
 const HTTP_COOKIE_CAPACITY: usize = 384;
+#[cfg(test)]
+#[cfg(test)]
 const TCP_PAYLOAD_CAPACITY: usize = 1500 - 20 - TCP_HEADER_SIZE;
+#[cfg(test)]
 const TCP_RECEIVE_WINDOW: u16 = 32 * 1024;
+#[cfg(test)]
+#[cfg(test)]
 const TCP_IO_TIMEOUT_SECONDS: u64 = 6;
 
+#[cfg(test)]
 const TCP_FIN: u8 = 0x01;
+#[cfg(test)]
 const TCP_SYN: u8 = 0x02;
+#[cfg(test)]
 const TCP_RST: u8 = 0x04;
+#[cfg(test)]
 const TCP_PSH: u8 = 0x08;
+#[cfg(test)]
 const TCP_ACK: u8 = 0x10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,10 +153,13 @@ pub enum NetworkError {
     TransmitFailed,
     ReplyTimeout,
     DnsTimeout,
+    #[cfg(test)]
     DnsRefused,
+    #[cfg(test)]
     DnsNoAddress,
     MalformedDns,
     DhcpTimeout,
+    #[cfg(test)]
     DhcpNak,
     MalformedDhcp,
     TcpTimeout,
@@ -136,10 +187,13 @@ impl NetworkError {
             Self::TransmitFailed => "RTL8139 transmit failed",
             Self::ReplyTimeout => "network reply timed out",
             Self::DnsTimeout => "DNS reply timed out",
+            #[cfg(test)]
             Self::DnsRefused => "DNS server returned an error",
+            #[cfg(test)]
             Self::DnsNoAddress => "DNS response contains no IPv4 address",
             Self::MalformedDns => "malformed DNS response",
             Self::DhcpTimeout => "DHCP lease negotiation timed out",
+            #[cfg(test)]
             Self::DhcpNak => "DHCP server rejected the requested lease",
             Self::MalformedDhcp => "malformed DHCP response",
             Self::TcpTimeout => "TCP peer timed out",
@@ -194,6 +248,7 @@ impl Ipv4Configuration {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(test)]
 struct DhcpReply {
     message_type: u8,
     address: [u8; 4],
@@ -209,48 +264,6 @@ pub struct UdpReply {
     pub source: [u8; 4],
     pub source_port: u16,
     pub bytes: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HttpResponse {
-    pub status: u16,
-    pub body: [u8; HTTP_BODY_CAPACITY],
-    pub body_len: usize,
-    pub truncated: bool,
-    pub peer: [u8; 4],
-    location: [u8; HTTP_LOCATION_CAPACITY],
-    location_len: usize,
-    content_type: [u8; HTTP_CONTENT_TYPE_CAPACITY],
-    content_type_len: usize,
-    set_cookie: [u8; HTTP_COOKIE_CAPACITY],
-    set_cookie_len: usize,
-}
-
-impl HttpResponse {
-    pub fn body(&self) -> &[u8] {
-        &self.body[..self.body_len]
-    }
-
-    pub fn location(&self) -> Option<&str> {
-        (self.location_len != 0).then(|| {
-            // Header parsing accepts visible ASCII only.
-            unsafe { core::str::from_utf8_unchecked(&self.location[..self.location_len]) }
-        })
-    }
-
-    pub fn content_type(&self) -> Option<&str> {
-        (self.content_type_len != 0).then(|| {
-            // Header parsing accepts visible ASCII only.
-            unsafe { core::str::from_utf8_unchecked(&self.content_type[..self.content_type_len]) }
-        })
-    }
-
-    pub fn set_cookie(&self) -> Option<&str> {
-        (self.set_cookie_len != 0).then(|| {
-            // Header parsing accepts visible ASCII only.
-            unsafe { core::str::from_utf8_unchecked(&self.set_cookie[..self.set_cookie_len]) }
-        })
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -280,6 +293,7 @@ impl HttpScheme {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PingError {
     BadAddress,
@@ -325,12 +339,14 @@ pub struct PingReply {
     pub elapsed_cycles: u64,
 }
 
+#[cfg(test)]
 #[repr(C, align(256))]
 struct DmaBuffers {
     receive: [u8; RX_BUFFER_SIZE],
     transmit: [[u8; MAX_FRAME_SIZE]; TX_BUFFER_COUNT],
 }
 
+#[cfg(test)]
 impl DmaBuffers {
     const fn new() -> Self {
         Self {
@@ -346,22 +362,35 @@ struct NetworkStack {
     pci_bus: u8,
     pci_slot: u8,
     mac: [u8; 6],
+    #[cfg(test)]
     receive_offset: usize,
+    #[cfg(test)]
     transmit_index: usize,
     transmitted_packets: u64,
     received_packets: u64,
     dropped_packets: u64,
+    #[cfg(test)]
     cached_neighbor_ip: [u8; 4],
+    #[cfg(test)]
     cached_neighbor_mac: [u8; 6],
+    #[cfg(test)]
     neighbor_valid: bool,
+    #[cfg(test)]
     next_echo_sequence: u16,
+    #[cfg(test)]
     next_ip_identification: u16,
+    #[cfg(test)]
     next_ephemeral_port: u16,
+    #[cfg(test)]
     next_dns_identifier: u16,
+    #[cfg(test)]
     cached_dns_host: [u8; DNS_CACHE_HOST_CAPACITY],
+    #[cfg(test)]
     cached_dns_host_len: u8,
+    #[cfg(test)]
     cached_dns_address: [u8; 4],
     configuration: Ipv4Configuration,
+    #[cfg(test)]
     dma: DmaBuffers,
 }
 
@@ -373,26 +402,86 @@ impl NetworkStack {
             pci_bus: 0,
             pci_slot: 0,
             mac: [0; 6],
+            #[cfg(test)]
             receive_offset: 0,
+            #[cfg(test)]
             transmit_index: 0,
             transmitted_packets: 0,
             received_packets: 0,
             dropped_packets: 0,
+            #[cfg(test)]
             cached_neighbor_ip: [0; 4],
+            #[cfg(test)]
             cached_neighbor_mac: [0; 6],
+            #[cfg(test)]
             neighbor_valid: false,
+            #[cfg(test)]
             next_echo_sequence: 1,
+            #[cfg(test)]
             next_ip_identification: 1,
+            #[cfg(test)]
             next_ephemeral_port: 49_152,
+            #[cfg(test)]
             next_dns_identifier: 1,
+            #[cfg(test)]
             cached_dns_host: [0; DNS_CACHE_HOST_CAPACITY],
+            #[cfg(test)]
             cached_dns_host_len: 0,
+            #[cfg(test)]
             cached_dns_address: [0; 4],
             configuration: Ipv4Configuration::static_fallback(),
+            #[cfg(test)]
             dma: DmaBuffers::new(),
         }
     }
 
+    fn discover(&mut self) -> bool {
+        if self.initialized {
+            return true;
+        }
+        let Some(device) = find_rtl8139() else {
+            return false;
+        };
+        let bar = pci_read(device.bus, device.slot, 0, 0x10);
+        if bar & 1 == 0 {
+            return false;
+        }
+        let io_base = (bar & 0xFFFC) as u16;
+        if io_base == 0 {
+            return false;
+        }
+        let command_and_status = pci_read(device.bus, device.slot, 0, 0x04);
+        // Discovery enables only I/O decoding. Bus mastering is leased to one
+        // admitted Ring 3 driver invocation and disabled again on teardown.
+        pci_write(
+            device.bus,
+            device.slot,
+            0,
+            0x04,
+            (command_and_status | 1) & !4,
+        );
+        self.io_base = io_base;
+        self.pci_bus = device.bus;
+        self.pci_slot = device.slot;
+        for (index, octet) in self.mac.iter_mut().enumerate() {
+            *octet = unsafe { port::inb(io_base + IDR0 + index as u16) };
+        }
+        if self.mac == [0; 6] || self.mac == [0xFF; 6] {
+            self.io_base = 0;
+            return false;
+        }
+        self.initialized = true;
+        if let Some(function) = crate::pci::function(crate::pci::Location {
+            bus: device.bus,
+            slot: device.slot,
+            function: 0,
+        }) {
+            let _ = crate::asl::claim(function, crate::asl::Owner::ExpNetwork);
+        }
+        true
+    }
+
+    #[cfg(test)]
     fn initialize(&mut self) -> bool {
         if self.initialized {
             return true;
@@ -450,7 +539,10 @@ impl NetworkStack {
 
         self.receive_offset = 0;
         self.transmit_index = 0;
-        self.neighbor_valid = false;
+        #[cfg(test)]
+        {
+            self.neighbor_valid = false;
+        }
         self.dma.receive.fill(0);
         for buffer in &mut self.dma.transmit {
             buffer.fill(0);
@@ -498,6 +590,7 @@ impl NetworkStack {
         self.initialized && self.read8(MEDIA_STATUS) & (1 << 2) == 0
     }
 
+    #[cfg(test)]
     fn send_frame(&mut self, frame: &[u8]) -> bool {
         if !self.initialized || frame.len() > MAX_FRAME_SIZE {
             return false;
@@ -544,6 +637,7 @@ impl NetworkStack {
         sent
     }
 
+    #[cfg(test)]
     fn receive_frame(&mut self, output: &mut [u8; MAX_FRAME_SIZE]) -> Option<usize> {
         if !self.initialized || self.read8(COMMAND) & COMMAND_RX_BUFFER_EMPTY != 0 {
             return None;
@@ -573,6 +667,7 @@ impl NetworkStack {
         valid.then_some(frame_length)
     }
 
+    #[cfg(test)]
     fn resolve_neighbor(&mut self, destination: [u8; 4]) -> Result<[u8; 6], PingError> {
         let configuration = self.configuration;
         let next_hop = if same_subnet(destination, configuration.address, configuration.netmask) {
@@ -619,6 +714,7 @@ impl NetworkStack {
         Err(PingError::ArpTimeout)
     }
 
+    #[cfg(test)]
     fn ping(&mut self, destination: [u8; 4]) -> Result<PingReply, PingError> {
         if !self.initialize() {
             return Err(PingError::NoDevice);
@@ -694,8 +790,9 @@ impl NetworkStack {
         Err(PingError::ReplyTimeout)
     }
 
+    #[cfg(test)]
     fn prepare_transport(&mut self) -> Result<(), NetworkError> {
-        if !self.initialize() {
+        if !self.discover() {
             return Err(NetworkError::NoDevice);
         }
         if !self.link_up() {
@@ -704,18 +801,21 @@ impl NetworkStack {
         Ok(())
     }
 
+    #[cfg(test)]
     fn allocate_ephemeral_port(&mut self) -> u16 {
         let port = self.next_ephemeral_port;
         self.next_ephemeral_port = if port == u16::MAX { 49_152 } else { port + 1 };
         port
     }
 
+    #[cfg(test)]
     fn allocate_dns_identifier(&mut self) -> u16 {
         let identifier = self.next_dns_identifier;
         self.next_dns_identifier = self.next_dns_identifier.wrapping_add(1).max(1);
         identifier
     }
 
+    #[cfg(test)]
     fn send_dhcp_datagram(&mut self, payload: &[u8]) -> Result<(), NetworkError> {
         if payload.len() > 1500 - 20 - UDP_HEADER_SIZE {
             return Err(NetworkError::TransmitFailed);
@@ -755,6 +855,7 @@ impl NetworkStack {
         }
     }
 
+    #[cfg(test)]
     fn exchange_dhcp(
         &mut self,
         request: &[u8],
@@ -785,6 +886,7 @@ impl NetworkStack {
         Err(NetworkError::DhcpTimeout)
     }
 
+    #[cfg(test)]
     fn configure_dhcp(&mut self) -> Result<Ipv4Configuration, NetworkError> {
         self.prepare_transport()?;
         let transaction_id = ((crate::hardware::timestamp() as u32)
@@ -844,6 +946,7 @@ impl NetworkStack {
         Ok(configuration)
     }
 
+    #[cfg(test)]
     fn send_ipv4(
         &mut self,
         destination_mac: [u8; 6],
@@ -880,6 +983,7 @@ impl NetworkStack {
         }
     }
 
+    #[cfg(test)]
     fn udp_exchange(
         &mut self,
         destination: [u8; 4],
@@ -939,6 +1043,7 @@ impl NetworkStack {
         Err(NetworkError::ReplyTimeout)
     }
 
+    #[cfg(test)]
     fn dns_lookup(&mut self, hostname: &str) -> Result<[u8; 4], NetworkError> {
         self.prepare_transport()?;
         if let Some(address) = parse_ipv4(hostname) {
@@ -974,6 +1079,7 @@ impl NetworkStack {
         Ok(address)
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn send_tcp_segment(
         &mut self,
@@ -1021,6 +1127,7 @@ impl NetworkStack {
         self.send_ipv4(destination_mac, destination, 6, &segment[..length])
     }
 
+    #[cfg(test)]
     fn tcp_connect(
         &mut self,
         destination: [u8; 4],
@@ -1108,6 +1215,7 @@ impl NetworkStack {
         })
     }
 
+    #[cfg(test)]
     fn tcp_exchange(
         &mut self,
         destination: [u8; 4],
@@ -1299,6 +1407,7 @@ impl NetworkStack {
         Ok((output_length, truncated))
     }
 
+    #[cfg(test)]
     fn answer_local_requests(&mut self, frame: &[u8]) {
         if frame.len() < 42 || frame[12..14] != [0x08, 0x06] {
             return;
@@ -1323,18 +1432,22 @@ impl NetworkStack {
         unsafe { port::inb(self.io_base + register) }
     }
 
+    #[cfg(test)]
     fn read32(&self, register: u16) -> u32 {
         unsafe { port::inl(self.io_base + register) }
     }
 
+    #[cfg(test)]
     fn write8(&self, register: u16, value: u8) {
         unsafe { port::outb(self.io_base + register, value) }
     }
 
+    #[cfg(test)]
     fn write16(&self, register: u16, value: u16) {
         unsafe { port::outw(self.io_base + register, value) }
     }
 
+    #[cfg(test)]
     fn write32(&self, register: u16, value: u32) {
         unsafe { port::outl(self.io_base + register, value) }
     }
@@ -1346,6 +1459,7 @@ impl NetworkStack {
 /// borrows the stack exclusively for its lifetime. That is enough for TLS and
 /// HTTP while making the transport a real byte stream instead of a single
 /// request/response shortcut.
+#[cfg(test)]
 struct TcpConnection<'a> {
     stack: &'a mut NetworkStack,
     destination_mac: [u8; 6],
@@ -1361,6 +1475,7 @@ struct TcpConnection<'a> {
     local_closed: bool,
 }
 
+#[cfg(test)]
 impl TcpConnection<'_> {
     fn io_deadline_expired(started_at: u64, timeout_cycles: u64) -> bool {
         crate::hardware::timestamp().wrapping_sub(started_at) >= timeout_cycles
@@ -1553,12 +1668,14 @@ impl TcpConnection<'_> {
     }
 }
 
+#[cfg(test)]
 impl Drop for TcpConnection<'_> {
     fn drop(&mut self) {
         self.close_stream();
     }
 }
 
+#[cfg(test)]
 impl embedded_io::Error for NetworkError {
     fn kind(&self) -> embedded_io::ErrorKind {
         match self {
@@ -1574,16 +1691,19 @@ impl embedded_io::Error for NetworkError {
     }
 }
 
+#[cfg(test)]
 impl embedded_io::ErrorType for TcpConnection<'_> {
     type Error = NetworkError;
 }
 
+#[cfg(test)]
 impl embedded_io::Read for TcpConnection<'_> {
     fn read(&mut self, output: &mut [u8]) -> Result<usize, Self::Error> {
         self.read_stream(output)
     }
 }
 
+#[cfg(test)]
 impl embedded_io::Write for TcpConnection<'_> {
     fn write(&mut self, input: &[u8]) -> Result<usize, Self::Error> {
         self.write_stream(input)
@@ -1597,13 +1717,39 @@ impl embedded_io::Write for TcpConnection<'_> {
 static NETWORK: crate::sync::SpinMutex<NetworkStack> =
     crate::sync::SpinMutex::new(NetworkStack::new());
 
-pub fn initialize() -> bool {
-    let mut network = NETWORK.lock();
-    let ready = network.initialize();
+#[derive(Clone, Copy)]
+struct DriverPortal {
+    active: bool,
+    io_base: u16,
+    pci_bus: u8,
+    pci_slot: u8,
+    receive_physical: u32,
+    transmit_physical: [u32; TX_BUFFER_COUNT],
+}
+
+impl DriverPortal {
+    const fn empty() -> Self {
+        Self {
+            active: false,
+            io_base: 0,
+            pci_bus: 0,
+            pci_slot: 0,
+            receive_physical: 0,
+            transmit_physical: [0; TX_BUFFER_COUNT],
+        }
+    }
+}
+
+static DRIVER_PORTAL: crate::sync::SpinMutex<DriverPortal> =
+    crate::sync::SpinMutex::new(DriverPortal::empty());
+static DRIVER_ISOLATION_LOGGED: AtomicBool = AtomicBool::new(false);
+
+pub fn initialize(cfc: expos_core::CfcFin) -> bool {
+    let ready = NETWORK.lock().discover();
     if ready {
-        let mac = network.mac;
+        let mac = NETWORK.lock().mac;
         slog!(
-            "EXPOS_NET_READY driver=rtl8139 mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\r\n",
+            "EXPOS_NET_READY driver=rtl8139-ring3 mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\r\n",
             mac[0],
             mac[1],
             mac[2],
@@ -1611,7 +1757,7 @@ pub fn initialize() -> bool {
             mac[4],
             mac[5]
         );
-        match network.configure_dhcp() {
+        match configure_dhcp_isolated(cfc) {
             Ok(configuration) => slog!(
                 "EXPOS_DHCP_BOUND address={}.{}.{}.{} gateway={}.{}.{}.{} dns={}.{}.{}.{} lease={}\r\n",
                 configuration.address[0],
@@ -1628,19 +1774,74 @@ pub fn initialize() -> bool {
                 configuration.dns_server[3],
                 configuration.lease_seconds
             ),
-            Err(error) => slog!(
-                "EXPOS_DHCP_FALLBACK error={:?} address={}.{}.{}.{}\r\n",
-                error,
-                network.configuration.address[0],
-                network.configuration.address[1],
-                network.configuration.address[2],
-                network.configuration.address[3]
-            ),
+            Err(error) => {
+                let fallback = NETWORK.lock().configuration;
+                slog!(
+                    "EXPOS_DHCP_FALLBACK error={:?} address={}.{}.{}.{}\r\n",
+                    error,
+                    fallback.address[0],
+                    fallback.address[1],
+                    fallback.address[2],
+                    fallback.address[3]
+                );
+            }
         }
     } else {
         slog!("EXPOS_NET_UNAVAILABLE driver=rtl8139\r\n");
     }
     ready
+}
+
+fn configure_dhcp_isolated(cfc: expos_core::CfcFin) -> Result<Ipv4Configuration, NetworkError> {
+    #[cfg(not(test))]
+    {
+        const IMAGE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/network-service.elf"));
+        let report = crate::service::run_network(IMAGE, &[2], cfc, DHCP_SERVICE_FIN, 8000)
+            .map_err(|error| {
+                slog!("EXPOS_NETWORK_DHCP_SERVICE_ERROR error={:?}\r\n", error);
+                NetworkError::DhcpTimeout
+            })?;
+        if report.result != 0 || report.output.length != 24 {
+            slog!(
+                "EXPOS_NETWORK_DHCP_SERVICE_REJECT result={} bytes={}\r\n",
+                report.result,
+                report.output.length
+            );
+            return Err(NetworkError::DhcpTimeout);
+        }
+        let bytes = &report.output.bytes[..24];
+        let configuration = Ipv4Configuration {
+            address: bytes[0..4].try_into().unwrap(),
+            netmask: bytes[4..8].try_into().unwrap(),
+            gateway: bytes[8..12].try_into().unwrap(),
+            dns_server: bytes[12..16].try_into().unwrap(),
+            server: bytes[16..20].try_into().unwrap(),
+            lease_seconds: u32::from_be_bytes(bytes[20..24].try_into().unwrap()),
+            origin: Ipv4Origin::Dhcp,
+        };
+        if configuration.address == IPV4_UNSPECIFIED
+            || configuration.netmask == IPV4_UNSPECIFIED
+            || configuration.gateway == IPV4_UNSPECIFIED
+            || configuration.dns_server == IPV4_UNSPECIFIED
+        {
+            return Err(NetworkError::MalformedDhcp);
+        }
+        let mut network = NETWORK.lock();
+        network.configuration = configuration;
+        slog!(
+            "EXPOS_NETWORK_DHCP_ISOLATED address={}.{}.{}.{} ring=3\r\n",
+            configuration.address[0],
+            configuration.address[1],
+            configuration.address[2],
+            configuration.address[3]
+        );
+        Ok(configuration)
+    }
+    #[cfg(test)]
+    {
+        let _ = cfc;
+        NETWORK.lock().configure_dhcp()
+    }
 }
 
 pub fn available() -> bool {
@@ -1691,7 +1892,7 @@ pub fn print_configuration() {
         configuration.lease_seconds
     );
     println!(
-        "        mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} mtu=1500 driver=rtl8139-poll",
+        "        mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} mtu=1500 driver=rtl8139-ring3",
         network.mac[0],
         network.mac[1],
         network.mac[2],
@@ -1710,7 +1911,7 @@ pub fn print_statistics() {
     }
     println!("DRIVER       LINK  TX-PACKETS  RX-PACKETS  DROPPED");
     println!(
-        "rtl8139-poll {:<4}  {:<10}  {:<10}  {}",
+        "rtl8139-ring3 {:<4}  {:<10}  {:<10}  {}",
         if network.link_up() { "up" } else { "down" },
         network.transmitted_packets,
         network.received_packets,
@@ -1728,7 +1929,215 @@ pub fn renew_dhcp(
     dimension: Fin,
 ) -> Result<Ipv4Configuration, NetworkError> {
     authorize_network(broker, handle_id, requester, dimension)?;
-    NETWORK.lock().configure_dhcp()
+    configure_dhcp_isolated(broker.cfc())
+}
+
+/// Pin one service-private DMA aperture for the admitted Ring 3 RTL8139
+/// driver. The arena is physically contiguous, writable/NX, below 4 GiB and
+/// discarded after the device has been quiesced. No caller chooses a bus
+/// address: register writes substitute these validated addresses.
+pub fn service_driver_acquire(
+    physical: usize,
+    aperture_bytes: usize,
+    receive_bytes: usize,
+    transmit_bytes: usize,
+    transmit_count: usize,
+) -> Result<(), NetworkError> {
+    if !physical.is_multiple_of(256)
+        || receive_bytes != RX_BUFFER_SIZE
+        || transmit_bytes != MAX_FRAME_SIZE
+        || transmit_count != TX_BUFFER_COUNT
+        || aperture_bytes < receive_bytes + transmit_bytes * transmit_count
+        || physical
+            .checked_add(aperture_bytes)
+            .is_none_or(|end| end > u32::MAX as usize)
+    {
+        return Err(NetworkError::EndpointDenied);
+    }
+    let network = NETWORK.lock();
+    if !network.initialized || network.io_base == 0 {
+        return Err(NetworkError::NoDevice);
+    }
+    let mut portal = DRIVER_PORTAL.lock();
+    if portal.active {
+        return Err(NetworkError::TransmitFailed);
+    }
+    let mut transmit_physical = [0_u32; TX_BUFFER_COUNT];
+    for (index, address) in transmit_physical.iter_mut().enumerate() {
+        *address = (physical + receive_bytes + index * transmit_bytes) as u32;
+    }
+    let command = pci_read(network.pci_bus, network.pci_slot, 0, 0x04);
+    pci_write(
+        network.pci_bus,
+        network.pci_slot,
+        0,
+        0x04,
+        command | 0x0000_0005,
+    );
+    *portal = DriverPortal {
+        active: true,
+        io_base: network.io_base,
+        pci_bus: network.pci_bus,
+        pci_slot: network.pci_slot,
+        receive_physical: physical as u32,
+        transmit_physical,
+    };
+    drop(portal);
+    drop(network);
+    if !DRIVER_ISOLATION_LOGGED.swap(true, Ordering::AcqRel) {
+        slog!(
+            "EXPOS_NETWORK_DRIVER_ISOLATED ring=3 dma=service-private portal=register-allowlist iommu=absent\r\n"
+        );
+    }
+    Ok(())
+}
+
+pub fn service_driver_read(register: u16, width: u8) -> Result<u32, NetworkError> {
+    let portal = DRIVER_PORTAL.lock();
+    if !portal.active {
+        return Err(NetworkError::NoDevice);
+    }
+    let allowed = match width {
+        1 => (IDR0..IDR0 + 6).contains(&register) || matches!(register, COMMAND | MEDIA_STATUS),
+        2 => register == ISR,
+        4 => {
+            (TSD0..TSD0 + (TX_BUFFER_COUNT as u16 * 4)).contains(&register)
+                && (register - TSD0).is_multiple_of(4)
+        }
+        _ => false,
+    };
+    if !allowed {
+        return Err(NetworkError::EndpointDenied);
+    }
+    let port = portal.io_base + register;
+    let value = unsafe {
+        match width {
+            1 => port::inb(port) as u32,
+            2 => port::inw(port) as u32,
+            4 => port::inl(port),
+            _ => unreachable!(),
+        }
+    };
+    Ok(value)
+}
+
+pub fn service_driver_write(register: u16, width: u8, requested: u32) -> Result<(), NetworkError> {
+    let portal = DRIVER_PORTAL.lock();
+    if !portal.active {
+        return Err(NetworkError::NoDevice);
+    }
+    let value = driver_write_value(*portal, register, width, requested)
+        .ok_or(NetworkError::EndpointDenied)?;
+    let port = portal.io_base + register;
+    unsafe {
+        match width {
+            1 => port::outb(port, value as u8),
+            2 => port::outw(port, value as u16),
+            4 => port::outl(port, value),
+            _ => unreachable!(),
+        }
+    }
+    drop(portal);
+    let mut network = NETWORK.lock();
+    if width == 4 && (TSD0..TSD0 + (TX_BUFFER_COUNT as u16 * 4)).contains(&register) {
+        network.transmitted_packets = network.transmitted_packets.saturating_add(1);
+    } else if register == CAPR {
+        network.received_packets = network.received_packets.saturating_add(1);
+    }
+    Ok(())
+}
+
+fn driver_write_value(
+    portal: DriverPortal,
+    register: u16,
+    width: u8,
+    requested: u32,
+) -> Option<u32> {
+    match (register, width) {
+        (CONFIG1, 1) if requested == 0 => Some(0),
+        (COMMAND, 1)
+            if [
+                0,
+                COMMAND_RESET,
+                COMMAND_RX_ENABLE,
+                COMMAND_TX_ENABLE,
+                COMMAND_RX_ENABLE | COMMAND_TX_ENABLE,
+            ]
+            .contains(&(requested as u8)) =>
+        {
+            Some(requested)
+        }
+        (RBSTART, 4) if requested == 0 => Some(portal.receive_physical),
+        (register, 4)
+            if (TSAD0..TSAD0 + (TX_BUFFER_COUNT as u16 * 4)).contains(&register)
+                && (register - TSAD0).is_multiple_of(4)
+                && requested == 0 =>
+        {
+            Some(portal.transmit_physical[((register - TSAD0) / 4) as usize])
+        }
+        (IMR, 2) if requested == 0 => Some(0),
+        (ISR, 2) if requested == 0xFFFF => Some(0xFFFF),
+        (TCR, 4) if requested == 0x0300_0000 => Some(requested),
+        (RCR, 4) if requested == (7 << 13) | (7 << 8) | (1 << 3) | (1 << 1) => Some(requested),
+        (CAPR, 2) if requested == 0xFFF0 || requested < RX_RING_SIZE as u32 => Some(requested),
+        (register, 4)
+            if (TSD0..TSD0 + (TX_BUFFER_COUNT as u16 * 4)).contains(&register)
+                && (register - TSD0).is_multiple_of(4)
+                && requested & 0xFFFF_0000 == 32 << 16
+                && (60..=MAX_FRAME_SIZE as u32).contains(&(requested & 0x1FFF)) =>
+        {
+            Some(requested)
+        }
+        _ => None,
+    }
+}
+
+/// Quiesce DMA before the service arena can be dropped. This executes on
+/// success, fault and ExpBudget termination.
+pub fn service_driver_release() {
+    let mut portal = DRIVER_PORTAL.lock();
+    if !portal.active {
+        return;
+    }
+    unsafe {
+        port::outw(portal.io_base + IMR, 0);
+        port::outb(portal.io_base + COMMAND, 0);
+    }
+    compiler_fence(Ordering::SeqCst);
+    let command = pci_read(portal.pci_bus, portal.pci_slot, 0, 0x04);
+    pci_write(
+        portal.pci_bus,
+        portal.pci_slot,
+        0,
+        0x04,
+        command & !0x0000_0004,
+    );
+    *portal = DriverPortal::empty();
+    slog!("EXPOS_NETWORK_DMA_REVOKED bus_master=false\r\n");
+}
+
+/// Return the interface identity/configuration to the sealed Ring 3 network
+/// worker. Octets are packed from least to most significant byte so the ABI
+/// remains independent of Rust layout and the worker can decode it directly.
+pub fn service_configuration() -> Result<[u64; 4], NetworkError> {
+    let network = NETWORK.lock();
+    if !network.initialized || network.io_base == 0 {
+        return Err(NetworkError::NoDevice);
+    }
+    let pack = |bytes: &[u8]| {
+        bytes
+            .iter()
+            .enumerate()
+            .fold(0_u64, |value, (index, byte)| {
+                value | ((*byte as u64) << (index * 8))
+            })
+    };
+    Ok([
+        pack(&network.mac),
+        pack(&network.configuration.address) | (pack(&network.configuration.netmask) << 32),
+        pack(&network.configuration.gateway) | (pack(&network.configuration.dns_server) << 32),
+        network.link_up() as u64,
+    ])
 }
 
 pub fn ping_text(
@@ -1788,8 +2197,8 @@ pub fn ping_text(
         address[0], address[1], address[2], address[3], count
     );
     let mut received = 0_u16;
-    for _ in 0..count {
-        match NETWORK.lock().ping(address) {
+    for index in 0..count {
+        match ping_isolated(broker.cfc(), address, index + 1) {
             Ok(reply) => {
                 received += 1;
                 println!(
@@ -1825,6 +2234,67 @@ pub fn ping_text(
         count,
         received
     );
+}
+
+fn ping_isolated(
+    cfc: expos_core::CfcFin,
+    destination: [u8; 4],
+    sequence: u16,
+) -> Result<PingReply, PingError> {
+    #[cfg(not(test))]
+    {
+        const IMAGE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/network-service.elf"));
+        let mut input = [0_u8; 7];
+        input[0] = 6;
+        input[1..5].copy_from_slice(&destination);
+        input[5..7].copy_from_slice(&sequence.to_be_bytes());
+        let started = crate::hardware::timestamp();
+        let report = crate::service::run_network(IMAGE, &input, cfc, ICMP_SERVICE_FIN, 4000)
+            .map_err(|error| {
+                slog!("EXPOS_NETWORK_ICMP_SERVICE_ERROR error={:?}\r\n", error);
+                PingError::ReplyTimeout
+            })?;
+        if report.result != 0 || report.output.length != 9 {
+            slog!(
+                "EXPOS_NETWORK_ICMP_SERVICE_REJECT result={} bytes={}\r\n",
+                report.result,
+                report.output.length
+            );
+            return Err(match report.result {
+                2 => PingError::LinkDown,
+                20 => PingError::ArpTimeout,
+                21 => PingError::TransmitFailed,
+                _ => PingError::ReplyTimeout,
+            });
+        }
+        let bytes = &report.output.bytes[..9];
+        let address = [bytes[0], bytes[1], bytes[2], bytes[3]];
+        let reply_sequence = u16::from_be_bytes([bytes[6], bytes[7]]);
+        if address != destination || reply_sequence != sequence {
+            return Err(PingError::ReplyTimeout);
+        }
+        let reply = PingReply {
+            address,
+            bytes: u16::from_be_bytes([bytes[4], bytes[5]]) as usize,
+            sequence: reply_sequence,
+            ttl: bytes[8],
+            elapsed_cycles: crate::hardware::timestamp().wrapping_sub(started),
+        };
+        slog!(
+            "EXPOS_NETWORK_ICMP_ISOLATED peer={}.{}.{}.{} sequence={} ring=3\r\n",
+            address[0],
+            address[1],
+            address[2],
+            address[3],
+            sequence
+        );
+        Ok(reply)
+    }
+    #[cfg(test)]
+    {
+        let _ = (cfc, sequence);
+        NETWORK.lock().ping(destination)
+    }
 }
 
 fn authorize_network(
@@ -1863,9 +2333,90 @@ pub fn udp_exchange(
     response: &mut [u8],
 ) -> Result<UdpReply, NetworkError> {
     authorize_network(broker, handle_id, requester, dimension)?;
-    NETWORK
-        .lock()
-        .udp_exchange(destination, destination_port, request, response)
+    udp_exchange_isolated(
+        broker.cfc(),
+        destination,
+        destination_port,
+        request,
+        response,
+    )
+}
+
+fn udp_exchange_isolated(
+    cfc: expos_core::CfcFin,
+    destination: [u8; 4],
+    destination_port: u16,
+    request: &[u8],
+    response: &mut [u8],
+) -> Result<UdpReply, NetworkError> {
+    if destination_port == 0 || request.len() > 1500 - 20 - UDP_HEADER_SIZE || response.is_empty() {
+        return Err(NetworkError::BadAddress);
+    }
+    #[cfg(not(test))]
+    {
+        const IMAGE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/network-service.elf"));
+        let response_capacity = response.len().min(1500 - 20 - UDP_HEADER_SIZE);
+        let mut input = [0_u8; 19 + 1500 - 20 - UDP_HEADER_SIZE];
+        input[0] = 5;
+        input[1..5].copy_from_slice(&destination);
+        input[5..7].copy_from_slice(&destination_port.to_be_bytes());
+        input[7..9].copy_from_slice(&(response_capacity as u16).to_be_bytes());
+        input[9..11].copy_from_slice(&(request.len() as u16).to_be_bytes());
+        input[11..19].copy_from_slice(&crate::hardware::timestamp().to_be_bytes());
+        input[19..19 + request.len()].copy_from_slice(request);
+        let report = crate::service::run_network(
+            IMAGE,
+            &input[..19 + request.len()],
+            cfc,
+            UDP_SERVICE_FIN,
+            4000,
+        )
+        .map_err(|error| {
+            slog!("EXPOS_NETWORK_UDP_SERVICE_ERROR error={:?}\r\n", error);
+            NetworkError::ReplyTimeout
+        })?;
+        if report.result != 0
+            || report.output.length == 0
+            || report.output.length > response_capacity + 1
+            || report.output.bytes[0] > 1
+        {
+            slog!(
+                "EXPOS_NETWORK_UDP_SERVICE_REJECT result={} bytes={}\r\n",
+                report.result,
+                report.output.length
+            );
+            return Err(match report.result {
+                2 => NetworkError::LinkDown,
+                20 => NetworkError::ArpTimeout,
+                21 => NetworkError::TransmitFailed,
+                _ => NetworkError::ReplyTimeout,
+            });
+        }
+        let copied = report.output.length - 1;
+        response[..copied].copy_from_slice(&report.output.bytes[1..report.output.length]);
+        slog!(
+            "EXPOS_NETWORK_UDP_ISOLATED peer={}.{}.{}.{} port={} bytes={} truncated={} ring=3\r\n",
+            destination[0],
+            destination[1],
+            destination[2],
+            destination[3],
+            destination_port,
+            copied,
+            report.output.bytes[0] != 0
+        );
+        Ok(UdpReply {
+            source: destination,
+            source_port: destination_port,
+            bytes: copied,
+        })
+    }
+    #[cfg(test)]
+    {
+        let _ = cfc;
+        NETWORK
+            .lock()
+            .udp_exchange(destination, destination_port, request, response)
+    }
 }
 
 /// Resolve one IPv4 address with the QEMU/SLiRP DNS service at `10.0.2.3`.
@@ -1877,7 +2428,64 @@ pub fn dns_lookup(
     hostname: &str,
 ) -> Result<[u8; 4], NetworkError> {
     authorize_network(broker, handle_id, requester, dimension)?;
-    NETWORK.lock().dns_lookup(hostname)
+    dns_lookup_isolated(broker.cfc(), hostname)
+}
+
+fn dns_lookup_isolated(cfc: expos_core::CfcFin, hostname: &str) -> Result<[u8; 4], NetworkError> {
+    if let Some(address) = parse_ipv4(hostname) {
+        return Ok(address);
+    }
+    #[cfg(not(test))]
+    {
+        const IMAGE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/network-service.elf"));
+        let mut input = [0_u8; 97];
+        input[0] = 1;
+        let hostname_bytes = hostname.as_bytes();
+        if hostname_bytes.is_empty() || hostname_bytes.len() > input.len() - 1 {
+            return Err(NetworkError::BadHostname);
+        }
+        input[1..hostname_bytes.len() + 1].copy_from_slice(hostname_bytes);
+        let report = crate::service::run_network(
+            IMAGE,
+            &input[..hostname_bytes.len() + 1],
+            cfc,
+            DNS_SERVICE_FIN,
+            2000,
+        )
+        .map_err(|error| {
+            slog!("EXPOS_NETWORK_DNS_SERVICE_ERROR error={:?}\r\n", error);
+            NetworkError::DnsTimeout
+        })?;
+        if report.result != 0 || report.output.length != 4 {
+            slog!(
+                "EXPOS_NETWORK_DNS_SERVICE_REJECT result={} bytes={}\r\n",
+                report.result,
+                report.output.length
+            );
+            return Err(match report.result {
+                1 => NetworkError::BadHostname,
+                2 => NetworkError::LinkDown,
+                _ => NetworkError::DnsTimeout,
+            });
+        }
+        let address: [u8; 4] = report.output.bytes[..4]
+            .try_into()
+            .map_err(|_| NetworkError::MalformedDns)?;
+        slog!(
+            "EXPOS_NETWORK_DNS_ISOLATED host={} address={}.{}.{}.{} ring=3\r\n",
+            hostname,
+            address[0],
+            address[1],
+            address[2],
+            address[3]
+        );
+        Ok(address)
+    }
+    #[cfg(test)]
+    {
+        let _ = cfc;
+        NETWORK.lock().dns_lookup(hostname)
+    }
 }
 
 /// Parse the intentionally narrow URL syntax accepted by the native client.
@@ -1943,10 +2551,10 @@ pub fn http_get(
     requester: Fin,
     dimension: Fin,
     url: &str,
-) -> Result<HttpResponse, NetworkError> {
+) -> Result<Box<HttpResponse>, NetworkError> {
     authorize_network(broker, handle_id, requester, dimension)?;
     let parsed = parse_http_url(url)?;
-    http_get_authorized(parsed, None, None, HTTP_WIRE_CAPACITY)
+    http_get_authorized(broker.cfc(), parsed, None, None, HTTP_WIRE_CAPACITY)
 }
 
 /// Perform a bounded GET with Browser-owned representation and cookie headers.
@@ -1959,7 +2567,7 @@ pub fn browser_get(
     url: &str,
     accept: &str,
     cookie: Option<&str>,
-) -> Result<HttpResponse, NetworkError> {
+) -> Result<Box<HttpResponse>, NetworkError> {
     authorize_network(broker, handle_id, requester, dimension)?;
     if !safe_header_value(accept, HTTP_CONTENT_TYPE_CAPACITY)
         || cookie.is_some_and(|value| !safe_header_value(value, HTTP_COOKIE_CAPACITY))
@@ -1967,6 +2575,7 @@ pub fn browser_get(
         return Err(NetworkError::BadUrl);
     }
     http_get_authorized(
+        broker.cfc(),
         parse_http_url(url)?,
         Some(accept),
         cookie,
@@ -1984,13 +2593,13 @@ pub fn https_get_allowlisted(
     dimension: Fin,
     url: &str,
     allowed_hosts: &[&str],
-) -> Result<HttpResponse, NetworkError> {
+) -> Result<Box<HttpResponse>, NetworkError> {
     authorize_network(broker, handle_id, requester, dimension)?;
     let parsed = parse_http_url(url)?;
     if !https_endpoint_allowed(parsed, allowed_hosts) {
         return Err(NetworkError::EndpointDenied);
     }
-    http_get_authorized(parsed, None, None, HTTP_WIRE_CAPACITY)
+    http_get_authorized(broker.cfc(), parsed, None, None, HTTP_WIRE_CAPACITY)
 }
 
 fn https_endpoint_allowed(parsed: HttpUrl<'_>, allowed_hosts: &[&str]) -> bool {
@@ -2002,11 +2611,12 @@ fn https_endpoint_allowed(parsed: HttpUrl<'_>, allowed_hosts: &[&str]) -> bool {
 }
 
 fn http_get_authorized(
+    cfc: expos_core::CfcFin,
     parsed: HttpUrl<'_>,
     accept: Option<&str>,
     cookie: Option<&str>,
     wire_capacity: usize,
-) -> Result<HttpResponse, NetworkError> {
+) -> Result<Box<HttpResponse>, NetworkError> {
     let mut request = [0_u8; HTTP_REQUEST_CAPACITY];
     let mut request_length = 0;
     append_bytes(&mut request, &mut request_length, b"GET ")?;
@@ -2020,7 +2630,7 @@ fn http_get_authorized(
     append_bytes(
         &mut request,
         &mut request_length,
-        b"\r\nUser-Agent: ExpOS/9.2\r\nAccept: ",
+        b"\r\nUser-Agent: ExpOS/9.3\r\nAccept: ",
     )?;
     append_bytes(
         &mut request,
@@ -2039,30 +2649,197 @@ fn http_get_authorized(
         b"\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
     )?;
 
-    let mut network = NETWORK.lock();
     slog!("EXPOS_HTTP_STAGE stage=dns host={}\r\n", parsed.host);
-    let peer = network.dns_lookup(parsed.host)?;
+    let peer = dns_lookup_isolated(cfc, parsed.host)?;
     slog!("EXPOS_HTTP_STAGE stage=connect host={}\r\n", parsed.host);
-    let mut wire = [0_u8; HTTP_WIRE_CAPACITY];
+    let mut wire = Box::new([0_u8; HTTP_WIRE_CAPACITY]);
     let wire_capacity = wire_capacity.clamp(1024, wire.len());
     let (wire_length, wire_truncated) = if parsed.scheme.is_secure() {
-        let stream = network.tcp_connect(peer, parsed.port)?;
         slog!("EXPOS_HTTP_STAGE stage=tls host={}\r\n", parsed.host);
-        crate::tls::https_exchange(
-            stream,
+        https_exchange_isolated(
+            cfc,
+            peer,
+            parsed.port,
             parsed.host,
             &request[..request_length],
             &mut wire[..wire_capacity],
         )?
     } else {
-        network.tcp_exchange(
+        tcp_exchange_isolated(
+            cfc,
             peer,
             parsed.port,
             &request[..request_length],
             &mut wire[..wire_capacity],
         )?
     };
-    parse_http_response(peer, &wire[..wire_length], wire_truncated)
+    parse_http_isolated(cfc, peer, &wire[..wire_length], wire_truncated)
+}
+
+fn https_exchange_isolated(
+    cfc: expos_core::CfcFin,
+    peer: [u8; 4],
+    port: u16,
+    hostname: &str,
+    request: &[u8],
+    output: &mut [u8],
+) -> Result<(usize, bool), NetworkError> {
+    if port == 0
+        || hostname.is_empty()
+        || hostname.len() > 96
+        || request.is_empty()
+        || request.len() > HTTP_REQUEST_CAPACITY
+        || output.is_empty()
+        || output.len() > HTTP_WIRE_CAPACITY
+    {
+        return Err(NetworkError::BadAddress);
+    }
+    #[cfg(not(test))]
+    {
+        const IMAGE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/network-service.elf"));
+        let unix_time = crate::tls::rtc_unix_time().ok_or(NetworkError::TlsCertificate)?;
+        let request_offset = 28 + hostname.len();
+        let mut input = [0_u8; 28 + 96 + HTTP_REQUEST_CAPACITY];
+        input[0] = 4;
+        input[1..5].copy_from_slice(&peer);
+        input[5..7].copy_from_slice(&port.to_be_bytes());
+        input[7..9].copy_from_slice(&(output.len() as u16).to_be_bytes());
+        input[9..11].copy_from_slice(&(request.len() as u16).to_be_bytes());
+        input[11..19].copy_from_slice(&crate::hardware::timestamp().to_be_bytes());
+        input[19..27].copy_from_slice(&unix_time.to_be_bytes());
+        input[27] = hostname.len() as u8;
+        input[28..request_offset].copy_from_slice(hostname.as_bytes());
+        input[request_offset..request_offset + request.len()].copy_from_slice(request);
+        let report = crate::service::run_network(
+            IMAGE,
+            &input[..request_offset + request.len()],
+            cfc,
+            HTTPS_SERVICE_FIN,
+            30_000,
+        )
+        .map_err(|error| {
+            slog!("EXPOS_NETWORK_HTTPS_SERVICE_ERROR error={:?}\r\n", error);
+            NetworkError::TlsHandshake
+        })?;
+        if report.result != 0
+            || report.output.length < 2
+            || report.output.length > output.len() + 2
+            || report.output.bytes[0] > 1
+        {
+            slog!(
+                "EXPOS_NETWORK_HTTPS_SERVICE_REJECT result={} bytes={}\r\n",
+                report.result,
+                report.output.length
+            );
+            return Err(match report.result {
+                60 => NetworkError::EntropyUnavailable,
+                62 => NetworkError::TcpTimeout,
+                63 => NetworkError::TcpReset,
+                65 => NetworkError::TlsCertificate,
+                66 => NetworkError::TlsProtocol,
+                _ => NetworkError::TlsHandshake,
+            });
+        }
+        let (expected_trust, trust_label) = crate::tls::expected_trust_anchor(hostname);
+        if report.output.bytes[1] != expected_trust {
+            return Err(NetworkError::TlsCertificate);
+        }
+        let wire_length = report.output.length - 2;
+        output[..wire_length].copy_from_slice(&report.output.bytes[2..report.output.length]);
+        let truncated = report.output.bytes[0] != 0;
+        slog!(
+            "EXPOS_TLS_VERIFIED host={} version=1.3 suite=AES_128_GCM_SHA256 trust={} ring=3\r\n",
+            hostname,
+            trust_label
+        );
+        slog!(
+            "EXPOS_NETWORK_HTTPS_ISOLATED peer={}.{}.{}.{} port={} bytes={} truncated={} ring=3\r\n",
+            peer[0],
+            peer[1],
+            peer[2],
+            peer[3],
+            port,
+            wire_length,
+            truncated
+        );
+        Ok((wire_length, truncated))
+    }
+    #[cfg(test)]
+    {
+        let _ = (cfc, peer, hostname, request, output);
+        Err(NetworkError::TlsHandshake)
+    }
+}
+
+fn tcp_exchange_isolated(
+    cfc: expos_core::CfcFin,
+    peer: [u8; 4],
+    port: u16,
+    request: &[u8],
+    output: &mut [u8],
+) -> Result<(usize, bool), NetworkError> {
+    if port == 0
+        || request.is_empty()
+        || request.len() > HTTP_REQUEST_CAPACITY
+        || output.is_empty()
+        || output.len() > HTTP_WIRE_CAPACITY
+    {
+        return Err(NetworkError::BadAddress);
+    }
+    #[cfg(not(test))]
+    {
+        const IMAGE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/network-service.elf"));
+        let mut input = [0_u8; 19 + HTTP_REQUEST_CAPACITY];
+        input[0] = 3;
+        input[1..5].copy_from_slice(&peer);
+        input[5..7].copy_from_slice(&port.to_be_bytes());
+        input[7..9].copy_from_slice(&(output.len() as u16).to_be_bytes());
+        input[9..11].copy_from_slice(&(request.len() as u16).to_be_bytes());
+        input[11..19].copy_from_slice(&crate::hardware::timestamp().to_be_bytes());
+        input[19..19 + request.len()].copy_from_slice(request);
+        let report = crate::service::run_network(
+            IMAGE,
+            &input[..19 + request.len()],
+            cfc,
+            TCP_SERVICE_FIN,
+            8000,
+        )
+        .map_err(|error| {
+            slog!("EXPOS_NETWORK_TCP_SERVICE_ERROR error={:?}\r\n", error);
+            NetworkError::TcpTimeout
+        })?;
+        if report.result != 0
+            || report.output.length == 0
+            || report.output.length > output.len() + 1
+            || report.output.bytes[0] > 1
+        {
+            slog!(
+                "EXPOS_NETWORK_TCP_SERVICE_REJECT result={} bytes={}\r\n",
+                report.result,
+                report.output.length
+            );
+            return Err(NetworkError::TcpTimeout);
+        }
+        let wire_length = report.output.length - 1;
+        output[..wire_length].copy_from_slice(&report.output.bytes[1..report.output.length]);
+        let truncated = report.output.bytes[0] != 0;
+        slog!(
+            "EXPOS_NETWORK_TCP_ISOLATED peer={}.{}.{}.{} port={} bytes={} truncated={} ring=3\r\n",
+            peer[0],
+            peer[1],
+            peer[2],
+            peer[3],
+            port,
+            wire_length,
+            truncated
+        );
+        Ok((wire_length, truncated))
+    }
+    #[cfg(test)]
+    {
+        let _ = cfc;
+        NETWORK.lock().tcp_exchange(peer, port, request, output)
+    }
 }
 
 fn safe_header_value(value: &str, capacity: usize) -> bool {
@@ -2100,6 +2877,7 @@ fn append_decimal_u16(
     append_bytes(output, length, &digits[cursor..])
 }
 
+#[cfg(test)]
 fn build_ipv4_header(
     output: &mut [u8],
     total_length: usize,
@@ -2122,6 +2900,7 @@ fn build_ipv4_header(
     output[10..12].copy_from_slice(&checksum.to_be_bytes());
 }
 
+#[cfg(test)]
 fn nonzero_checksum(checksum: u16) -> u16 {
     if checksum == 0 {
         u16::MAX
@@ -2130,6 +2909,7 @@ fn nonzero_checksum(checksum: u16) -> u16 {
     }
 }
 
+#[cfg(test)]
 fn checksum_sum(bytes: &[u8]) -> u32 {
     let mut sum = 0_u32;
     let mut index = 0;
@@ -2143,6 +2923,7 @@ fn checksum_sum(bytes: &[u8]) -> u32 {
     sum
 }
 
+#[cfg(test)]
 fn finish_checksum(mut sum: u32) -> u16 {
     while sum >> 16 != 0 {
         sum = (sum & 0xFFFF) + (sum >> 16);
@@ -2150,6 +2931,7 @@ fn finish_checksum(mut sum: u32) -> u16 {
     !(sum as u16)
 }
 
+#[cfg(test)]
 fn transport_checksum(source: [u8; 4], destination: [u8; 4], protocol: u8, segment: &[u8]) -> u16 {
     let pseudo_header = [
         source[0],
@@ -2168,6 +2950,7 @@ fn transport_checksum(source: [u8; 4], destination: [u8; 4], protocol: u8, segme
     finish_checksum(checksum_sum(&pseudo_header) + checksum_sum(segment))
 }
 
+#[cfg(test)]
 fn build_dhcp_message(
     message_type: u8,
     transaction_id: u32,
@@ -2206,6 +2989,7 @@ fn build_dhcp_message(
     Ok(cursor + 1)
 }
 
+#[cfg(test)]
 fn append_dhcp_option(
     output: &mut [u8],
     cursor: &mut usize,
@@ -2225,6 +3009,7 @@ fn append_dhcp_option(
     Ok(())
 }
 
+#[cfg(test)]
 fn parse_dhcp_reply(frame: &[u8], transaction_id: u32, mac: [u8; 6]) -> Option<DhcpReply> {
     if frame.len() < ETHERNET_HEADER_SIZE + 20 + UDP_HEADER_SIZE + 240 || frame[12..14] != [0x08, 0]
     {
@@ -2317,10 +3102,12 @@ fn parse_dhcp_reply(frame: &[u8], transaction_id: u32, mac: [u8; 6]) -> Option<D
     })
 }
 
+#[cfg(test)]
 fn copy_ipv4(bytes: &[u8]) -> [u8; 4] {
     [bytes[0], bytes[1], bytes[2], bytes[3]]
 }
 
+#[cfg(test)]
 struct Ipv4Packet<'a> {
     source: [u8; 4],
     destination: [u8; 4],
@@ -2328,6 +3115,7 @@ struct Ipv4Packet<'a> {
     payload: &'a [u8],
 }
 
+#[cfg(test)]
 fn parse_ipv4_packet(frame: &[u8], local_address: [u8; 4]) -> Option<Ipv4Packet<'_>> {
     if frame.len() < ETHERNET_HEADER_SIZE + 20 || frame[12..14] != [0x08, 0] {
         return None;
@@ -2364,12 +3152,14 @@ fn parse_ipv4_packet(frame: &[u8], local_address: [u8; 4]) -> Option<Ipv4Packet<
     })
 }
 
+#[cfg(test)]
 struct ParsedUdp<'a> {
     source: [u8; 4],
     source_port: u16,
     payload: &'a [u8],
 }
 
+#[cfg(test)]
 fn parse_udp_packet<'a>(
     frame: &'a [u8],
     local_address: [u8; 4],
@@ -2403,6 +3193,7 @@ fn parse_udp_packet<'a>(
     })
 }
 
+#[cfg(test)]
 struct ParsedTcp<'a> {
     sequence: u32,
     acknowledgement: u32,
@@ -2410,6 +3201,7 @@ struct ParsedTcp<'a> {
     payload: &'a [u8],
 }
 
+#[cfg(test)]
 fn parse_tcp_packet<'a>(
     frame: &'a [u8],
     local_address: [u8; 4],
@@ -2464,6 +3256,7 @@ fn validate_hostname(hostname: &str) -> Result<(), NetworkError> {
     Ok(())
 }
 
+#[cfg(test)]
 fn build_dns_query(
     identifier: u16,
     hostname: &str,
@@ -2495,6 +3288,7 @@ fn build_dns_query(
     Ok(length + 4)
 }
 
+#[cfg(test)]
 fn skip_dns_name(packet: &[u8], mut offset: usize) -> Option<usize> {
     for _ in 0..128 {
         let length = *packet.get(offset)?;
@@ -2518,6 +3312,7 @@ fn skip_dns_name(packet: &[u8], mut offset: usize) -> Option<usize> {
     None
 }
 
+#[cfg(test)]
 fn parse_dns_a_response(identifier: u16, packet: &[u8]) -> Result<[u8; 4], NetworkError> {
     if packet.len() < 12 || u16::from_be_bytes([packet[0], packet[1]]) != identifier {
         return Err(NetworkError::MalformedDns);
@@ -2566,198 +3361,17 @@ fn parse_dns_a_response(identifier: u16, packet: &[u8]) -> Result<[u8; 4], Netwo
     Err(NetworkError::DnsNoAddress)
 }
 
-fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() {
-        return Some(0);
-    }
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
-}
-
-fn parse_ascii_usize(bytes: &[u8]) -> Option<usize> {
-    let mut value = 0_usize;
-    let mut found = false;
-    for byte in bytes.iter().copied() {
-        if byte == b' ' || byte == b'\t' {
-            continue;
-        }
-        if !byte.is_ascii_digit() {
-            return None;
-        }
-        found = true;
-        value = value.checked_mul(10)?.checked_add((byte - b'0') as usize)?;
-    }
-    found.then_some(value)
-}
-
-fn parse_chunk_size(line: &[u8]) -> Option<usize> {
-    let value = line.split(|byte| *byte == b';').next()?;
-    let mut result = 0_usize;
-    let mut found = false;
-    for byte in value.iter().copied() {
-        if byte == b' ' || byte == b'\t' {
-            continue;
-        }
-        let digit = match byte {
-            b'0'..=b'9' => byte - b'0',
-            b'a'..=b'f' => byte - b'a' + 10,
-            b'A'..=b'F' => byte - b'A' + 10,
-            _ => return None,
-        };
-        found = true;
-        result = result.checked_mul(16)?.checked_add(digit as usize)?;
-    }
-    found.then_some(result)
-}
-
-fn decode_chunked(input: &[u8], output: &mut [u8]) -> Result<(usize, bool), NetworkError> {
-    let mut input_offset = 0;
-    let mut output_length = 0;
-    loop {
-        let line_end = find_bytes(&input[input_offset..], b"\r\n")
-            .map(|relative| input_offset + relative)
-            .ok_or(NetworkError::MalformedHttp)?;
-        let chunk_length =
-            parse_chunk_size(&input[input_offset..line_end]).ok_or(NetworkError::MalformedHttp)?;
-        input_offset = line_end + 2;
-        if chunk_length == 0 {
-            return Ok((output_length, false));
-        }
-        let chunk_end = input_offset
-            .checked_add(chunk_length)
-            .filter(|end| end.checked_add(2).is_some_and(|tail| tail <= input.len()))
-            .ok_or(NetworkError::MalformedHttp)?;
-        if input[chunk_end..chunk_end + 2] != *b"\r\n" {
-            return Err(NetworkError::MalformedHttp);
-        }
-        let remaining = output.len().saturating_sub(output_length);
-        let copied = chunk_length.min(remaining);
-        output[output_length..output_length + copied]
-            .copy_from_slice(&input[input_offset..input_offset + copied]);
-        output_length += copied;
-        if copied != chunk_length {
-            return Ok((output_length, true));
-        }
-        input_offset = chunk_end + 2;
-    }
-}
-
+#[cfg(test)]
 fn parse_http_response(
     peer: [u8; 4],
     wire: &[u8],
-    wire_truncated: bool,
+    truncated: bool,
 ) -> Result<HttpResponse, NetworkError> {
-    let header_end = find_bytes(wire, b"\r\n\r\n").ok_or(NetworkError::MalformedHttp)?;
-    let first_line_end = find_bytes(&wire[..header_end], b"\r\n").unwrap_or(header_end);
-    let status_line = &wire[..first_line_end];
-    if !status_line.starts_with(b"HTTP/1.") {
-        return Err(NetworkError::MalformedHttp);
-    }
-    let first_space = status_line
-        .iter()
-        .position(|byte| *byte == b' ')
-        .ok_or(NetworkError::MalformedHttp)?;
-    let status_bytes = status_line
-        .get(first_space + 1..first_space + 4)
-        .ok_or(NetworkError::MalformedHttp)?;
-    if !status_bytes.iter().all(u8::is_ascii_digit) {
-        return Err(NetworkError::MalformedHttp);
-    }
-    let status = ((status_bytes[0] - b'0') as u16) * 100
-        + ((status_bytes[1] - b'0') as u16) * 10
-        + (status_bytes[2] - b'0') as u16;
-
-    let mut content_length = None;
-    let mut chunked = false;
-    let mut location = [0_u8; HTTP_LOCATION_CAPACITY];
-    let mut location_len = 0;
-    let mut content_type = [0_u8; HTTP_CONTENT_TYPE_CAPACITY];
-    let mut content_type_len = 0;
-    let mut set_cookie = [0_u8; HTTP_COOKIE_CAPACITY];
-    let mut set_cookie_len = 0;
-    let mut cursor = first_line_end.saturating_add(2);
-    while cursor < header_end {
-        let line_length =
-            find_bytes(&wire[cursor..header_end], b"\r\n").unwrap_or(header_end - cursor);
-        let line = &wire[cursor..cursor + line_length];
-        if let Some(colon) = line.iter().position(|byte| *byte == b':') {
-            let name = &line[..colon];
-            let value = &line[colon + 1..];
-            if name.eq_ignore_ascii_case(b"content-length") {
-                content_length = Some(parse_ascii_usize(value).ok_or(NetworkError::MalformedHttp)?);
-            } else if name.eq_ignore_ascii_case(b"location") {
-                let value = value.trim_ascii();
-                if value.is_empty()
-                    || value.len() > location.len()
-                    || !value.iter().all(|byte| (0x21..=0x7E).contains(byte))
-                {
-                    return Err(NetworkError::MalformedHttp);
-                }
-                location[..value.len()].copy_from_slice(value);
-                location_len = value.len();
-            } else if name.eq_ignore_ascii_case(b"content-type") {
-                let value = value.trim_ascii();
-                if value.is_empty()
-                    || value.len() > content_type.len()
-                    || !value.iter().all(|byte| (0x20..=0x7E).contains(byte))
-                {
-                    return Err(NetworkError::MalformedHttp);
-                }
-                content_type[..value.len()].copy_from_slice(value);
-                content_type_len = value.len();
-            } else if name.eq_ignore_ascii_case(b"set-cookie") && set_cookie_len == 0 {
-                let value = value.trim_ascii();
-                if value.is_empty()
-                    || value.len() > set_cookie.len()
-                    || !value.iter().all(|byte| (0x20..=0x7E).contains(byte))
-                {
-                    return Err(NetworkError::MalformedHttp);
-                }
-                set_cookie[..value.len()].copy_from_slice(value);
-                set_cookie_len = value.len();
-            } else if name.eq_ignore_ascii_case(b"transfer-encoding")
-                && value
-                    .windows(7)
-                    .any(|part| part.eq_ignore_ascii_case(b"chunked"))
-            {
-                chunked = true;
-            }
-        }
-        cursor += line_length + 2;
-    }
-
-    let encoded_body = &wire[header_end + 4..];
-    let mut response = HttpResponse {
-        status,
-        body: [0; HTTP_BODY_CAPACITY],
-        body_len: 0,
-        truncated: false,
-        peer,
-        location,
-        location_len,
-        content_type,
-        content_type_len,
-        set_cookie,
-        set_cookie_len,
-    };
-    if chunked {
-        let (length, truncated) = decode_chunked(encoded_body, &mut response.body)?;
-        response.body_len = length;
-        response.truncated = truncated || wire_truncated;
-    } else {
-        let expected = content_length.unwrap_or(encoded_body.len());
-        if encoded_body.len() < expected && !wire_truncated {
-            return Err(NetworkError::MalformedHttp);
-        }
-        let available = expected.min(encoded_body.len());
-        response.body_len = available.min(response.body.len());
-        response.body[..response.body_len].copy_from_slice(&encoded_body[..response.body_len]);
-        response.truncated = expected > response.body.len()
-            || available < expected
-            || (content_length.is_none() && wire_truncated);
-    }
-    Ok(response)
+    expos_core::parse_http_response(peer, wire, truncated).map_err(|_| NetworkError::MalformedHttp)
+}
+#[cfg(test)]
+fn decode_chunked(input: &[u8], output: &mut [u8]) -> Result<(usize, bool), NetworkError> {
+    expos_core::decode_http_chunked(input, output).map_err(|_| NetworkError::MalformedHttp)
 }
 
 #[derive(Clone, Copy)]
@@ -2825,10 +3439,12 @@ fn parse_ipv4(value: &str) -> Option<[u8; 4]> {
     parts.next().is_none().then_some(result)
 }
 
+#[cfg(test)]
 fn same_subnet(left: [u8; 4], right: [u8; 4], mask: [u8; 4]) -> bool {
     (0..4).all(|index| left[index] & mask[index] == right[index] & mask[index])
 }
 
+#[cfg(test)]
 fn arp_reply(
     frame: &[u8],
     expected_ip: [u8; 4],
@@ -2853,6 +3469,7 @@ fn arp_reply(
     Some((sender_ip, sender_mac))
 }
 
+#[cfg(test)]
 fn icmp_echo_reply(
     frame: &[u8],
     expected_ip: [u8; 4],
@@ -2895,6 +3512,7 @@ fn icmp_echo_reply(
     Some((source, frame[ip_start + 8], total_length - header_length))
 }
 
+#[cfg(test)]
 fn internet_checksum(bytes: &[u8]) -> u16 {
     let mut sum = 0_u32;
     let mut index = 0;
@@ -2911,6 +3529,7 @@ fn internet_checksum(bytes: &[u8]) -> u16 {
     !(sum as u16)
 }
 
+#[cfg(test)]
 fn read_wrapped_u16(buffer: &[u8; RX_BUFFER_SIZE], offset: usize) -> u16 {
     u16::from_le_bytes([
         buffer[offset % RX_RING_SIZE],
@@ -2918,6 +3537,7 @@ fn read_wrapped_u16(buffer: &[u8; RX_BUFFER_SIZE], offset: usize) -> u16 {
     ])
 }
 
+#[cfg(test)]
 fn copy_wrapped(buffer: &[u8; RX_BUFFER_SIZE], offset: usize, output: &mut [u8]) {
     for (index, byte) in output.iter_mut().enumerate() {
         *byte = buffer[(offset + index) % RX_RING_SIZE];
@@ -2927,6 +3547,48 @@ fn copy_wrapped(buffer: &[u8; RX_BUFFER_SIZE], offset: usize, output: &mut [u8])
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rtl8139_portal_substitutes_dma_addresses_and_rejects_escape() {
+        let portal = DriverPortal {
+            active: true,
+            io_base: 0xc000,
+            pci_bus: 0,
+            pci_slot: 3,
+            receive_physical: 0x0123_4000,
+            transmit_physical: [0x0123_7000, 0x0123_7600, 0x0123_7c00, 0x0123_8200],
+        };
+
+        assert_eq!(driver_write_value(portal, RBSTART, 4, 0), Some(0x0123_4000));
+        assert_eq!(
+            driver_write_value(portal, TSAD0 + 8, 4, 0),
+            Some(0x0123_7c00)
+        );
+        assert_eq!(
+            driver_write_value(
+                portal,
+                COMMAND,
+                1,
+                (COMMAND_RX_ENABLE | COMMAND_TX_ENABLE) as u32,
+            ),
+            Some((COMMAND_RX_ENABLE | COMMAND_TX_ENABLE) as u32)
+        );
+        assert_eq!(driver_write_value(portal, CAPR, 2, 0xfff0), Some(0xfff0));
+        assert_eq!(
+            driver_write_value(portal, TSD0, 4, (32 << 16) | 60),
+            Some((32 << 16) | 60)
+        );
+
+        assert_eq!(driver_write_value(portal, RBSTART, 4, 0xdead_beef), None);
+        assert_eq!(driver_write_value(portal, TSAD0, 4, 0xdead_beef), None);
+        assert_eq!(
+            driver_write_value(portal, CAPR, 2, RX_RING_SIZE as u32),
+            None
+        );
+        assert_eq!(driver_write_value(portal, COMMAND, 1, 0xff), None);
+        assert_eq!(driver_write_value(portal, 0x5c, 4, 0), None);
+        assert_eq!(driver_write_value(portal, TSD0, 2, 60), None);
+    }
 
     fn dhcp_reply_frame(
         transaction_id: u32,
@@ -2969,6 +3631,52 @@ mod tests {
         let checksum = transport_checksum(server, IPV4_BROADCAST, 17, udp);
         udp[6..8].copy_from_slice(&nonzero_checksum(checksum).to_be_bytes());
         (frame, frame_length)
+    }
+
+    #[test]
+    #[ignore = "deterministic mutation campaign; run make parser-fuzz"]
+    fn parser_fuzz_network() {
+        let local = [10, 0, 2, 15];
+        let peer = [10, 0, 2, 2];
+        let dns = b"\x12\x34\x81\x80\0\x01\0\x01\0\0\0\0\x01a\0\0\x01\0\x01\xc0\x0c\0\x01\0\x01\0\0\0\x3c\0\x04\x01\x02\x03\x04";
+        assert_eq!(parse_dns_a_response(0x1234, dns).unwrap(), [1, 2, 3, 4]);
+        let http = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+        assert_eq!(parse_http_response(peer, http, false).unwrap().body_len, 5);
+        let mac = [0x52, 0x54, 0, 0x12, 0x34, 0x56];
+        let (dhcp, dhcp_len) = dhcp_reply_frame(0x12345678, mac, 2);
+        crate::parser_fuzz::campaign(
+            "network",
+            &[
+                dns,
+                http,
+                &dhcp[..dhcp_len],
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+                b"ffffffffffffffff\r\nx\r\n",
+                b"https://example.org:443/path?q=loop",
+            ],
+            |data| {
+                let _ = parse_dhcp_reply(data, 0x12345678, mac);
+                if let Some(ip) = parse_ipv4_packet(data, local) {
+                    assert!(ip.payload.len() <= data.len());
+                }
+                let _ = parse_udp_packet(data, local, peer, 67, 68);
+                let _ = parse_tcp_packet(data, local, peer, 80, 49152);
+                let _ = parse_dns_a_response(0x1234, data);
+                for truncated in [false, true] {
+                    if let Ok(response) = parse_http_response(peer, data, truncated) {
+                        assert!(response.body_len <= response.body.len());
+                        assert!(response.location().is_none_or(|value| value.len() <= 512));
+                    }
+                }
+                let mut body = [0_u8; 128];
+                if let Ok((length, _)) = decode_chunked(data, &mut body) {
+                    assert!(length <= body.len());
+                }
+                if let Ok(text) = core::str::from_utf8(data) {
+                    let _ = parse_http_url(text);
+                }
+            },
+        );
     }
 
     #[test]
@@ -3066,5 +3774,43 @@ mod tests {
                 &allowed
             ));
         }
+    }
+}
+
+fn parse_http_isolated(
+    cfc: expos_core::CfcFin,
+    peer: [u8; 4],
+    wire: &[u8],
+    truncated: bool,
+) -> Result<Box<HttpResponse>, NetworkError> {
+    #[cfg(not(test))]
+    {
+        const IMAGE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/http-service.elf"));
+        let mut input = alloc::vec::Vec::with_capacity(5 + wire.len());
+        input.extend_from_slice(&peer);
+        input.push(truncated as u8);
+        input.extend_from_slice(wire);
+        let report = crate::service::run(
+            IMAGE,
+            &input,
+            cfc,
+            Fin::from_u128(0x48545450534552564943450000000001),
+            1000,
+        )
+        .map_err(|error| {
+            slog!("EXPOS_NETWORK_SERVICE_ERROR error={:?}\r\n", error);
+            NetworkError::MalformedHttp
+        })?;
+        if report.result != 0 {
+            return Err(NetworkError::MalformedHttp);
+        }
+        HttpResponse::decode(&report.output.bytes[..report.output.length])
+            .map(Box::new)
+            .map_err(|_| NetworkError::MalformedHttp)
+    }
+    #[cfg(test)]
+    {
+        let _ = cfc;
+        parse_http_response(peer, wire, truncated).map(Box::new)
     }
 }

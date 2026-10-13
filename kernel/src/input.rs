@@ -416,6 +416,9 @@ impl Input {
         if base == 0x1B && self.control && self.shift {
             return Some(KEY_DESKTOP_SHELL_CONFIRM);
         }
+        if self.control && matches!(base, b'r' | b's') {
+            return Some(base - b'a' + 1);
+        }
         let key = apply_modifiers(base, self.shift, self.caps_lock);
         if self.super_key {
             super_binding(key)

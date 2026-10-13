@@ -496,6 +496,20 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "deterministic mutation campaign; run make parser-fuzz"]
+    fn parser_fuzz_wave() {
+        let mono = wave(8, 1, 24_000, &[0, 128, 255, 128]);
+        let stereo = wave(16, 2, 48_000, &[0; 8]);
+        let mut output = [0_i16; MAX_SAMPLE_WORDS];
+        crate::parser_fuzz::campaign("wave", &[&mono, &stereo], |data| {
+            if let Ok(info) = decode_wave_to_stereo_48k(data, &mut output) {
+                assert!(info.output_frames > 0 && info.output_frames * 2 <= output.len());
+                assert!(matches!(info.channels, 1 | 2));
+            }
+        });
+    }
+
+    #[test]
     fn pcm_wave_decoder_converts_mono_and_resamples() {
         let bytes = wave(8, 1, 24_000, &[0, 128, 255, 128]);
         let mut output = [0_i16; MAX_SAMPLE_WORDS];

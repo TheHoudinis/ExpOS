@@ -1,11 +1,21 @@
-# ExpOS v9.2-dev “Mole”
+# ExpOS v9.3-dev “Loop”
 
-**Mole** is the in-development v9.2 desktop reliability and interaction update.
-It bounds failed Browser and Weather requests, safely reapplies display modes,
-hardens shell/desktop transitions, adds persisted taskbar styles and icon
-sizing, refreshes Browser and Weather presentation, and introduces a styled
-Power & session menu with lock, display sleep, interrupt-driven suspend,
-restart, and shutdown. This checkout is development work, not a v9.2 release.
+**Loop** builds on v9.2 **Mole** (commit `7121551`). This is an active
+development increment of the isolation, hardware, Genesis, Ayo and
+ExpDisplay roadmap in [`docs/LOOP_V9_3.md`](docs/LOOP_V9_3.md), not a finished
+v9.3 release. It adds kernel section permissions, CPU-supported SMAP, stricter
+fault attribution and repeatable parser mutation campaigns. MicroPython and
+HTTP response parsing run in isolated Ring 3 workers. The sealed built-in
+network worker owns the RTL8139 polling driver, its service-private DMA buffers,
+Ethernet, DHCP, DNS, ICMP, generic UDP, plain TCP/HTTP and authenticated
+streaming TCP/TLS. Ring 0 exposes only PCI discovery, an exact register/value
+allowlist, validated DMA-address substitution and a short bus-master lease that
+is revoked before the worker arena is released. There is no hardware IOMMU.
+Optional Ayo apps Cliptick and Writer add 4 KiB source editing,
+native Python, and bounded on-device C/Rust/Go profile compilation to EXF1.
+
+Mole's Browser/Weather request bounds, display-mode handling, desktop/session
+reliability, taskbar styles and Power & session menu remain part of this baseline.
 
 ExpOS is the Form-native operating system described by
 [`docs/PHILOSOPHY.txt`](docs/PHILOSOPHY.txt). The current image contains:
@@ -195,7 +205,8 @@ make run-genesis     # safely install or boot the persistent QEMU disk
 make run-uefi       # boot the native firmware path with OVMF
 make bootmode-check # verify single-user account/service restrictions
 make startup-check  # verify visible UEFI/BIOS screens and real keyboard login
-make python-check   # verify Python scripts and limits inside the kernel
+make editors-check  # PS/2 editing, Python, link clicks and persisted settings
+make python-check   # verify isolated native Python scripts and limits
 make ring3-check    # verify CPL3, per-Form CR3, ABI calls and timer quotas
 make iso            # build the fallback build/expos.iso
 make check          # boot and exercise the command environment
@@ -396,12 +407,14 @@ server and lease through DHCP. A conservative QEMU-user fallback remains if no
 DHCP server replies. Network I/O and manual `dhcp` renewal are authorized at
 the Driver Form boundary with a requester-bound Network Handle.
 
-The native stack supports:
+The native stack supports the following bounded protocols in a restartable
+Ring 3 worker, through the kernel's confined RTL8139 register/DMA portal:
 
-- RTL8139 polling DMA, Ethernet and ARP;
+- a Ring 3 RTL8139 polling driver with private writable/NX RX/TX DMA buffers;
+- Ethernet/ARP over that user-mode driver;
 - DHCP-configured IPv4 and ICMP echo;
-- checksum-validated UDP and DNS A records;
-- one synchronous, bounded outbound TCP connection;
+- checksum-validated generic UDP and DNS A records;
+- one synchronous, bounded outbound TCP connection per worker invocation;
 - bounded HTTP/1.0 GET requests and Browser rendering for `http://` URLs;
 - authenticated TLS 1.3 and `https://` GET with hardware RDRAND entropy, SNI
   and hostname checks, RTC certificate-validity checks, and certificate-chain
@@ -462,7 +475,14 @@ graphical Terminal (`audio`, `audiotest`, `audiostop`) expose real backend and
 playback state. This is full end-to-end PCM output, not a claim of universal
 sound-card support or compressed-media/video codec coverage.
 
-IPv6, physical Wi-Fi drivers, a USB host/Bluetooth data path, concurrent
+The worker cannot access kernel memory or ambient Handles. It can access only
+its private DMA arena and a narrow RTL8139 register/value allowlist; Ring 0
+validates and substitutes every DMA bus address and disables bus mastering on
+all worker exits. PCI discovery, page pin/translation, that allowlist and lease
+revocation remain trusted kernel code. Without an IOMMU, a malicious or faulty
+physical device is not hardware-confined to the advertised aperture. IPv6,
+physical Wi-Fi drivers, a USB
+host/Bluetooth data path, concurrent
 sockets, TCP servers and downloads are also absent. HTTP, TLS record and
 certificate-chain buffers are fixed and bounded. The embedded Web PKI store is
 not a general CA bundle: GlobalSign Root R1 is the default anchor, DigiCert
@@ -504,12 +524,15 @@ Ayo. Kernel-private Rust layouts are explicitly outside the ABI.
 ```
 
 The project driver supports fixed Rust, Go, and C recipes and emits a
-deterministic Ayo tar artifact plus SHA-256 receipt. `run` is a host-development
-run. The kernel now dispatches `PACKAGE_TRANSACTION` through the frozen native
-call gate and a requester-owned Package Handle. Its bounded executable capsule
-crosses the same gate from CPL3 through a context-owned shared page; general
-third-party image loading and grants for other buffer-bearing calls remain
-unfinished.
+deterministic Ayo tar artifact plus SHA-256 receipt. `run` launches host builds.
+Loop adds a freestanding C/Rust/Go target, `expos-x86_64`, that produces real EXF1
+executables and bounded console import commands. The kernel validates and runs
+these images in CPL3 with requester-owned Handles. EXF1 and ExpFS Form content
+are limited to 4,096 bytes; the Go path is the documented freestanding ExpOS
+profile, not the upstream Go runtime or standard library. Larger services,
+general buffer grants and native Ayo installation remain unfinished. See the
+[native executable guide](docs/NATIVE_IMAGES.md) and runnable
+[sample](sdk/examples/native-hello/hello.c).
 
 ## Console
 

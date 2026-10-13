@@ -5,9 +5,10 @@ whoami
 safevideo
 displayreset
 desktop
-~	?
+~t
 console
 view MyNotes
+inspect MyNotes
 execute MyNotes
 checkpoints
 shutdown

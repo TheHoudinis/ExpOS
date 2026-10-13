@@ -1,0 +1,12 @@
+[package]
+name = "NativeGo"
+version = "0.1.0"
+language = "go"
+
+[form]
+kind = "executable"
+architectures = ["x86_64"]
+
+[build]
+target = "expos-x86_64"
+entry = "main.go"

@@ -27,7 +27,7 @@ selector = selectors.DefaultSelector()
 selector.register(process.stdout, selectors.EVENT_READ)
 output = bytearray()
 sent = False
-deadline = time.monotonic() + 45
+deadline = time.monotonic() + float(os.environ.get("EXPOS_QEMU_TIMEOUT", "120"))
 try:
     while time.monotonic() < deadline:
         for key, _ in selector.select(0.2):

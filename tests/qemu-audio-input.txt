@@ -1,12 +1,11 @@
 1111
 operator
 expos
-~
-open settings
+~s
 6
 j
 j
 j
-~
+~t
 audio
 shutdown

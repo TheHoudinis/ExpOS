@@ -18,7 +18,7 @@ use expos_core::{
 const MAX_LINE: usize = 128;
 const MAX_FORMS: usize = 12;
 const MAX_HANDLES: usize = 16;
-const MAX_CONTENT: usize = 512;
+const MAX_CONTENT: usize = crate::expfs_store::FORM_CONTENT_CAPACITY;
 const MAX_DIMENSIONS: usize = 6;
 const MAX_HISTORY: usize = 8;
 const AYO_FIN: Fin = Fin::from_u128(0x4159_4F00_0000_0000_0000_0000_0000_0001);
@@ -30,6 +30,7 @@ pub fn run(report: BootReport, mut input: Input, session: Session) -> ! {
     let mut length = 0;
     let mut history_cursor = None;
 
+    crate::console_style::load(shell.report.cfc_fin);
     shell.welcome();
     slog!("EXPOS_SHELL_READY\r\n");
     prompt(shell.session);
@@ -649,7 +650,7 @@ impl Shell {
                                     &self.content[index].bytes
                                         [..self.content[index].length as usize],
                                 ) {
-                                    crate::python::execute(source);
+                                    crate::python::execute(source, self.report.cfc_fin);
                                 }
                             } else {
                                 println!("ExpPython: Form is not active.");
@@ -658,7 +659,7 @@ impl Shell {
                             println!("ExpPython: unknown Form.");
                         }
                     } else {
-                        crate::python::execute(args);
+                        crate::python::execute(args, self.report.cfc_fin);
                     }
                 }
                 true
@@ -717,13 +718,28 @@ impl Shell {
                 self.fetch(args);
                 true
             }
-            "dmesg" | "bootlog" => {
-                println!("[ok] x86_64 long mode, VGA, COM1");
-                println!("[ok] Root Form + Stable Dimension");
-                println!("[ok] PIMP/DIESE + Handle #1 + ExpFS journal #1");
-                println!("[ok] Ayo Package Form + typed relationship graph");
-                println!("[ok] bounded tunables, event queue, and resource limits");
-                println!("[ok] interactive command environment");
+            #[cfg(feature = "isolation-self-test")]
+            "servicetest" => {
+                crate::isolation_self_test::services(self.report.cfc_fin);
+                true
+            }
+            "serviceinfo" => {
+                crate::service::statistics(|line| println!("{}", line));
+                true
+            }
+            "style" => {
+                println!(
+                    "{}",
+                    crate::console_style::configure(
+                        self.report.cfc_fin,
+                        self.session.authority(),
+                        args
+                    )
+                );
+                true
+            }
+            "bootlog" | "trace" => {
+                crate::diagnostics::print(args);
                 true
             }
             "mode" => {
@@ -848,7 +864,7 @@ impl Shell {
                 );
                 println!("SDKs: sdk/rust sdk/go sdk/c sdk/python (host contracts tested)");
                 println!(
-                    "native user-mode ABI transport: not connected; scheduler/loader work remains"
+                    "Ring 3: EXF1 images and capsules; Log, Authorize, Time, Yield, Exit; other calls unsupported"
                 );
                 true
             }
@@ -968,6 +984,10 @@ impl Shell {
                     .and_then(|value| value.parse::<usize>().ok())
                     .unwrap_or(10);
                 self.view_content(identity, Some(lines));
+                true
+            }
+            "writehex" => {
+                self.write_hex(args);
                 true
             }
             "write" => {
@@ -1212,7 +1232,9 @@ impl Shell {
         println!("  DISPLAY    desktop browser displayinfo displaydiag safevideo displayreset");
         println!("  RUNTIME    python/python3 ayo formabi games arcade legacy");
         println!("  SYSTEM     date clock timers cpuinfo features kernelcaps lspci asl neofetch");
-        println!("             sysinfo mem free env uptime ps kstat dmesg bootlog stateinfo diag");
+        println!(
+            "             sysinfo mem free env uptime ps kstat bootlog trace style serviceinfo stateinfo diag"
+        );
         println!("  NETWORK    ifconfig dhcp netstat ping dns fetch mode");
         println!("  CONTROL    sysctl kqueue/kevent expbudget");
         println!("  UTILITIES  calc len hex reverse tolower toupper factor rand sleep true false");
@@ -1222,23 +1244,8 @@ impl Shell {
 
     fn welcome(&self) {
         set_shell_color(vga::Color::White);
-        println!();
-        set_shell_color(vga::Color::LightCyan);
-        println!("+----------------------------------------------------------------------------+");
-        println!("|  ExpOS COMMAND DECK  //  FORM-NATIVE SHELL                                 |");
-        println!("+----------------------------------------------------------------------------+");
-        set_shell_color(vga::Color::White);
-        println!(
-            "  {}  |  Stable  |  {} / {}",
-            self.report.cfc_name,
-            self.session.name(),
-            self.session.authority_name()
-        );
-        shell_muted(
-            "  Type 'help' for the command index. Authority is explicit; Handles are revocable.",
-        );
-        set_shell_color(vga::Color::White);
-        println!();
+        println!("ExpOS / {} / {}", self.report.cfc_name, self.session.name());
+        shell_muted("Type help for commands.");
     }
 
     fn status(&self) {
@@ -2237,14 +2244,17 @@ impl Shell {
             .position(|candidate| candidate.is_some_and(|candidate| candidate.fin == form.fin))
             .expect("scheduled Form remains registered");
         let content = self.content[index];
-        let Some(mut prepared) = crate::form_runtime::prepare(
+        let mut prepared = match crate::form_runtime::prepare(
             form.fin,
             execute_handle,
             log_handle,
             &content.bytes[..content.length as usize],
-        ) else {
-            println!("No isolated native address-space slot is available.");
-            return;
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                println!("Native launch denied: {}.", error.message());
+                return;
+            }
         };
         let address_space = prepared.address_space();
         let mut context = match ExecutionContext::new(execution_identity, address_space, 256) {
@@ -2492,14 +2502,17 @@ impl Shell {
             .position(|candidate| candidate.is_some_and(|candidate| candidate.fin == form.fin))
             .expect("parallel Form remains registered");
         let content = self.content[index];
-        let Some(prepared) = crate::form_runtime::prepare(
+        let prepared = match crate::form_runtime::prepare(
             form.fin,
             execute_handle,
             log_handle,
             &content.bytes[..content.length as usize],
-        ) else {
-            println!("No isolated native address-space slot is available.");
-            return None;
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                println!("Native launch denied: {}.", error.message());
+                return None;
+            }
         };
         let address_space = prepared.address_space();
         let identity_key =
@@ -2756,6 +2769,71 @@ impl Shell {
         println!("Dimension=Stable");
         let index = self.find_form_index(identity).unwrap();
         println!("content={} bytes", self.content[index].length);
+    }
+
+    // Bounded binary import. Offset zero replaces; subsequent chunks must append
+    // exactly, preventing holes and accidental retries from duplicating bytes.
+    fn write_hex(&mut self, args: &str) {
+        let mut words = args.split_ascii_whitespace();
+        let (Some(identity), Some(offset), Some(hex), None) =
+            (words.next(), words.next(), words.next(), words.next())
+        else {
+            println!("usage: writehex <Form-name> <offset> <hex-bytes>");
+            return;
+        };
+        let Some(index) = self.find_form_index(identity) else {
+            println!("No Form named '{}'.", identity);
+            return;
+        };
+        if self.forms[index]
+            .as_ref()
+            .is_some_and(|form| form.lifecycle != Lifecycle::Active)
+        {
+            println!("DIESE denied: the Form is not active.");
+            return;
+        }
+        let old_length = self.content[index].length as usize;
+        let Ok(offset) = offset.parse::<usize>() else {
+            println!("Invalid binary offset; nothing changed.");
+            return;
+        };
+        if (offset != 0 && offset != old_length)
+            || hex.len() % 2 != 0
+            || hex.is_empty()
+            || offset > MAX_CONTENT
+            || hex.len() / 2 > MAX_CONTENT - offset
+        {
+            println!("Invalid binary range; nothing changed.");
+            return;
+        }
+        let mut decoded = [0_u8; MAX_CONTENT];
+        for (out, pair) in decoded.iter_mut().zip(hex.as_bytes().as_chunks::<2>().0) {
+            let (Some(high), Some(low)) = (
+                (pair[0] as char).to_digit(16),
+                (pair[1] as char).to_digit(16),
+            ) else {
+                println!("Invalid hex bytes; nothing changed.");
+                return;
+            };
+            *out = ((high << 4) | low) as u8;
+        }
+        let length = hex.len() / 2;
+        let end = offset + length;
+        if let Err(error) = self.kernel_controls.resize_form_content(old_length, end) {
+            println!("Form content denied: {}; nothing changed.", error.message());
+            return;
+        }
+        self.content[index].bytes[offset..end].copy_from_slice(&decoded[..length]);
+        self.content[index].bytes[end..].fill(0);
+        self.content[index].length = end as u16;
+        if let Some(form) = self.forms[index].as_mut() {
+            form.revision += 1;
+        }
+        self.commit_action();
+        println!(
+            "Wrote {} binary bytes at {}; revision committed.",
+            length, offset
+        );
     }
 
     fn write_content(&mut self, args: &str, append: bool) {
@@ -3516,7 +3594,10 @@ fn is_shell_command(name: &str) -> bool {
             | "ping"
             | "dns"
             | "fetch"
-            | "dmesg"
+            | "servicetest"
+            | "serviceinfo"
+            | "style"
+            | "trace"
             | "bootlog"
             | "mode"
             | "displayinfo"
@@ -3539,6 +3620,7 @@ fn is_shell_command(name: &str) -> bool {
             | "view"
             | "cat"
             | "head"
+            | "writehex"
             | "write"
             | "append"
             | "delete"
@@ -3582,6 +3664,7 @@ fn is_mutating_command(name: &str) -> bool {
             | "restorepoint"
             | "restorebaseline"
             | "mkform"
+            | "writehex"
             | "write"
             | "append"
             | "delete"
@@ -3613,6 +3696,7 @@ fn is_form_mutation(name: &str) -> bool {
         name,
         "makedim"
             | "mkform"
+            | "writehex"
             | "write"
             | "append"
             | "delete"
@@ -3776,21 +3860,25 @@ const fn relationship_name(kind: RelationshipKind) -> &'static str {
 }
 
 fn prompt(session: Session) {
-    set_shell_color(vga::Color::LightCyan);
-    print!("[");
     set_shell_color(vga::Color::White);
-    print!("{}", session.name());
-    set_shell_color(vga::Color::DarkGray);
-    print!("@");
-    set_shell_color(vga::Color::LightGreen);
-    print!("Stable");
-    set_shell_color(vga::Color::LightCyan);
-    print!("]");
-    set_shell_color(vga::Color::White);
-    print!(" > ");
+    match crate::console_style::current().prompt {
+        1 => print!("> "),
+        2 => print!("Stable:/ > "),
+        _ => print!("[{}@Stable] > ", session.name()),
+    }
 }
 
 fn set_shell_color(foreground: vga::Color) {
+    let foreground = if matches!(foreground, vga::Color::White) {
+        match crate::console_style::current().color {
+            1 => vga::Color::LightGreen,
+            2 => vga::Color::Yellow,
+            3 => vga::Color::LightCyan,
+            _ => foreground,
+        }
+    } else {
+        foreground
+    };
     vga::WRITER.lock().set_color(foreground, vga::Color::Black);
 }
 

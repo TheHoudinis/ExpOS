@@ -7,6 +7,7 @@ ENTRY(_start)
 PHDRS
 {
     text PT_LOAD FLAGS(5); /* read + execute */
+    rodata PT_LOAD FLAGS(4); /* read, never execute */
     data PT_LOAD FLAGS(6); /* read + write */
 }
 
@@ -19,17 +20,23 @@ SECTIONS
         KEEP(*(.multiboot_header))
     } :text
 
+    . = ALIGN(4K);
+    __kernel_text_start = .;
     .text :
     {
         *(.text .text.*)
     } :text
 
+    . = ALIGN(4K);
+    __kernel_text_end = .;
+    __kernel_rodata_start = .;
     .rodata :
     {
         *(.rodata .rodata.*)
-    } :text
+    } :rodata
 
     . = ALIGN(4K);
+    __kernel_rodata_end = .;
     .data :
     {
         *(.data .data.*)

@@ -8,7 +8,10 @@ use crate::{framebuffer, hardware, network};
 use expos_core::Rect;
 use framebuffer::color;
 
-pub const PACKAGE_COUNT: usize = 30;
+pub const PACKAGE_COUNT: usize = 32;
+pub const CLIPTICK: usize = 30;
+pub const WRITER: usize = 31;
+pub const PACKAGE_MASK: u32 = u32::MAX;
 const INPUT_CAPACITY: usize = 96;
 const PAGE_SIZE: usize = 8;
 const TASK_CAPACITY: usize = 6;
@@ -205,6 +208,18 @@ const APPS: [PackageApp; PACKAGE_COUNT] = [
         name: "UUIDGen",
         category: "Developer tools",
         summary: "Create random RFC 4122 version 4 UUIDs",
+        accent: color::PURPLE,
+    },
+    PackageApp {
+        name: "Cliptick",
+        category: "Developer tools",
+        summary: "Code editor with isolated Python execution",
+        accent: color::CYAN,
+    },
+    PackageApp {
+        name: "Writer",
+        category: "Utilities",
+        summary: "Edit text and source files",
         accent: color::PURPLE,
     },
 ];
@@ -616,7 +631,7 @@ impl NativeApps {
             return state;
         }
         let installed = u32::from_le_bytes(bytes[4..8].try_into().unwrap_or([0; 4]));
-        state.installed = installed & ((1_u32 << PACKAGE_COUNT) - 1);
+        state.installed = installed & PACKAGE_MASK;
         state.active = (bytes[8] as usize).min(PACKAGE_COUNT - 1);
         if !state.is_installed(state.active) {
             state.active = (0..PACKAGE_COUNT)
@@ -2941,8 +2956,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ecosystem_has_thirty_distinct_native_apps() {
-        assert_eq!(APPS.len(), 30);
+    fn ecosystem_has_thirty_two_distinct_native_apps() {
+        assert_eq!(APPS.len(), 32);
         assert_eq!(NativeApps::new().installed_count(), 0);
         for (index, app) in APPS.iter().enumerate() {
             assert!(!app.name.is_empty());
@@ -2965,9 +2980,13 @@ mod tests {
     #[test]
     fn durable_app_state_roundtrips_without_restoring_transient_input() {
         let mut apps = NativeApps::new();
+        apps.selected = WRITER;
+        apps.commit_install_selected();
+        apps.selected = CLIPTICK;
+        apps.commit_install_selected();
         apps.selected = 6;
         apps.commit_install_selected();
-        assert_eq!(apps.installed_count(), 1);
+        assert_eq!(apps.installed_count(), 3);
         assert_eq!(apps.installed_at(0), Some(6));
         assert!(apps.activate_installed(6));
         assert_eq!(apps.active_index(), 6);
@@ -2985,6 +3004,8 @@ mod tests {
         let length = apps.encode_state(&mut wire);
         let restored = NativeApps::restore_state(&wire[..length]);
         assert!(restored.is_installed(6));
+        assert!(restored.is_installed(CLIPTICK));
+        assert!(restored.is_installed(WRITER));
         assert_eq!(restored.active, 6);
         assert_eq!(restored.pixels, 0x55AA);
         assert_eq!(restored.counter, 42);

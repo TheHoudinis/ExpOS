@@ -1,36 +1,10 @@
-//! Verified TLS 1.3 client used by the native HTTPS fetch path.
+//! Kernel-side HTTPS admission metadata.
 //!
-//! The transport remains synchronous and fixed-capacity, but it does not skip
-//! the security properties that distinguish HTTPS from plain TCP: ClientHello
-//! entropy comes from RDRAND, the server name is sent with SNI, the certificate
-//! chain is validated against an embedded public root, validity dates come
-//! from the RTC, and the leaf name/signature are checked before HTTP is sent.
+//! TLS records, cryptography, certificate parsing and streaming TCP state run
+//! in the sealed Ring 3 network worker. The kernel supplies a trusted RTC time
+//! and revalidates the worker's host-scoped trust-anchor identifier.
 
-use crate::{network::NetworkError, port, slog};
-use alloc::boxed::Box;
-use core::{
-    arch::x86_64::{__cpuid, _rdrand64_step},
-    num::NonZeroU32,
-};
-use embedded_io::Write as _;
-use embedded_tls::blocking::{
-    Aes128GcmSha256, Certificate, CryptoProvider, TlsConfig, TlsConnection, TlsContext, TlsVerifier,
-};
-use embedded_tls::{pki::CertVerifier, TlsError};
-use rand_core::{CryptoRng, RngCore};
-
-const TLS_RECORD_CAPACITY: usize = 16_640;
-const TLS_WRITE_CAPACITY: usize = 4_096;
-const TLS_CERTIFICATE_CAPACITY: usize = 12 * 1024;
-
-// The deliberately small trust set only contains anchors needed by the native
-// browser's supported HTTPS services. Keeping selection host-scoped avoids
-// silently treating either certificate as a general-purpose root store.
-const GLOBAL_SIGN_ROOT_R1: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/global_sign_root_r1.der"));
-const DIGICERT_GLOBAL_ROOT_G2: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/digicert_global_root_g2.der"));
-const ISRG_ROOT_X1: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/isrg_root_x1.der"));
+use crate::port;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TrustAnchor {
@@ -40,11 +14,11 @@ enum TrustAnchor {
 }
 
 impl TrustAnchor {
-    const fn certificate(self) -> &'static [u8] {
+    const fn id(self) -> u8 {
         match self {
-            Self::GlobalSignRootR1 => GLOBAL_SIGN_ROOT_R1,
-            Self::DigiCertGlobalRootG2 => DIGICERT_GLOBAL_ROOT_G2,
-            Self::IsrgRootX1 => ISRG_ROOT_X1,
+            Self::GlobalSignRootR1 => 1,
+            Self::DigiCertGlobalRootG2 => 2,
+            Self::IsrgRootX1 => 3,
         }
     }
 
@@ -55,6 +29,11 @@ impl TrustAnchor {
             Self::IsrgRootX1 => "ISRG_Root_X1",
         }
     }
+}
+
+pub(crate) fn expected_trust_anchor(hostname: &str) -> (u8, &'static str) {
+    let anchor = trust_anchor_for(hostname);
+    (anchor.id(), anchor.label())
 }
 
 fn trust_anchor_for(hostname: &str) -> TrustAnchor {
@@ -82,181 +61,6 @@ fn trust_anchor_for(hostname: &str) -> TrustAnchor {
     }
 }
 
-struct RtcClock;
-
-impl embedded_tls::blocking::TlsClock for RtcClock {
-    fn now() -> Option<u64> {
-        rtc_unix_time()
-    }
-}
-
-struct HardwareRng;
-
-impl HardwareRng {
-    fn available() -> bool {
-        // CPUID.01H:ECX.RDRAND[bit 30].
-        __cpuid(1).ecx & (1 << 30) != 0
-    }
-
-    fn word() -> Option<u64> {
-        if !Self::available() {
-            return None;
-        }
-        for _ in 0..64 {
-            let mut value = 0_u64;
-            // SAFETY: the CPUID feature bit was checked immediately above.
-            if unsafe { _rdrand64_step(&mut value) } == 1 {
-                return Some(value);
-            }
-            core::hint::spin_loop();
-        }
-        None
-    }
-
-    fn failure() -> rand_core::Error {
-        rand_core::Error::from(
-            NonZeroU32::new(rand_core::Error::CUSTOM_START)
-                .expect("rand_core custom error code is non-zero"),
-        )
-    }
-}
-
-impl RngCore for HardwareRng {
-    fn next_u32(&mut self) -> u32 {
-        self.next_u64() as u32
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        Self::word().expect("RDRAND failed after availability check")
-    }
-
-    fn fill_bytes(&mut self, destination: &mut [u8]) {
-        self.try_fill_bytes(destination)
-            .expect("RDRAND failed after availability check");
-    }
-
-    fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), rand_core::Error> {
-        for chunk in destination.chunks_mut(8) {
-            let bytes = Self::word().ok_or_else(Self::failure)?.to_ne_bytes();
-            chunk.copy_from_slice(&bytes[..chunk.len()]);
-        }
-        Ok(())
-    }
-}
-
-impl CryptoRng for HardwareRng {}
-
-struct VerifiedProvider<'a> {
-    rng: HardwareRng,
-    verifier: CertVerifier<'a, Aes128GcmSha256, RtcClock, TLS_CERTIFICATE_CAPACITY>,
-}
-
-impl CryptoProvider for VerifiedProvider<'_> {
-    type CipherSuite = Aes128GcmSha256;
-    type Signature = &'static [u8];
-
-    fn rng(&mut self) -> impl embedded_tls::CryptoRngCore {
-        &mut self.rng
-    }
-
-    fn verifier(&mut self) -> Result<&mut impl TlsVerifier<Aes128GcmSha256>, TlsError> {
-        Ok(&mut self.verifier)
-    }
-}
-
-/// Exchange one HTTP request over an authenticated TLS 1.3 stream.
-pub fn https_exchange<Socket>(
-    socket: Socket,
-    hostname: &str,
-    request: &[u8],
-    output: &mut [u8],
-) -> Result<(usize, bool), NetworkError>
-where
-    Socket: embedded_io::Read<Error = NetworkError> + embedded_io::Write<Error = NetworkError>,
-{
-    if !HardwareRng::available() {
-        return Err(NetworkError::EntropyUnavailable);
-    }
-    // Refuse to turn a missing/broken RTC into silently timeless PKI.
-    if rtc_unix_time().is_none() {
-        return Err(NetworkError::TlsCertificate);
-    }
-
-    let mut read_records = [0_u8; TLS_RECORD_CAPACITY];
-    let mut write_records = [0_u8; TLS_WRITE_CAPACITY];
-    let config = TlsConfig::new()
-        .with_server_name(hostname)
-        .enable_rsa_signatures();
-    let trust_anchor = trust_anchor_for(hostname);
-    let provider = VerifiedProvider {
-        rng: HardwareRng,
-        verifier: CertVerifier::new(Certificate::X509(trust_anchor.certificate())),
-    };
-    let mut connection =
-        TlsConnection::<_, Aes128GcmSha256>::new(socket, &mut read_records, &mut write_records);
-    connection
-        .open(TlsContext::new(&config, provider))
-        .map_err(map_tls_error)?;
-    slog!(
-        "EXPOS_TLS_VERIFIED host={} version=1.3 suite=AES_128_GCM_SHA256 trust={}\r\n",
-        hostname,
-        trust_anchor.label()
-    );
-
-    connection.write_all(request).map_err(map_tls_error)?;
-    connection.flush().map_err(map_tls_error)?;
-    let mut length = 0;
-    let mut truncated = false;
-    // Always give embedded-tls enough room for a complete decrypted record.
-    // Reading directly into a nearly-full HTTP buffer can turn an intentional
-    // response cap into a TLS protocol error when the next record is larger
-    // than the remaining destination slice.
-    let mut application_data = Box::new([0_u8; TLS_RECORD_CAPACITY]);
-    loop {
-        if length == output.len() {
-            truncated = true;
-            break;
-        }
-        match connection.read(&mut application_data[..]) {
-            Ok(0) | Err(TlsError::ConnectionClosed) => break,
-            Ok(count) => {
-                let copied = count.min(output.len() - length);
-                output[length..length + copied].copy_from_slice(&application_data[..copied]);
-                length += copied;
-                if copied != count {
-                    truncated = true;
-                    break;
-                }
-            }
-            Err(error) => return Err(map_tls_error(error)),
-        }
-    }
-    // `close_notify` and the TCP FIN are best effort after a complete HTTP
-    // response. Verification/read failures above are never hidden.
-    let _ = connection.close();
-    Ok((length, truncated))
-}
-
-fn map_tls_error(error: TlsError) -> NetworkError {
-    match error {
-        TlsError::InvalidCertificate
-        | TlsError::InvalidCertificateEntry
-        | TlsError::InvalidCertificateRequest
-        | TlsError::InvalidSignature
-        | TlsError::InvalidSignatureScheme => NetworkError::TlsCertificate,
-        TlsError::Io(embedded_io::ErrorKind::TimedOut) => NetworkError::TcpTimeout,
-        TlsError::Io(embedded_io::ErrorKind::ConnectionReset) | TlsError::ConnectionClosed => {
-            NetworkError::TcpReset
-        }
-        TlsError::InvalidRecord
-        | TlsError::UnknownContentType
-        | TlsError::InvalidApplicationData
-        | TlsError::DecodeError
-        | TlsError::ParseError(_) => NetworkError::TlsProtocol,
-        _ => NetworkError::TlsHandshake,
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RtcDateTime {
     year: u16,
@@ -267,7 +71,7 @@ struct RtcDateTime {
     second: u8,
 }
 
-fn rtc_unix_time() -> Option<u64> {
+pub(crate) fn rtc_unix_time() -> Option<u64> {
     let first = read_rtc()?;
     let second = read_rtc()?;
     if first != second {

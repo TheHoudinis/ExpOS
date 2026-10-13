@@ -16,6 +16,9 @@ mod execution;
 mod expfs;
 mod fin;
 mod form;
+mod http;
+mod native_compiler;
+mod native_image;
 mod pimp;
 mod protection;
 mod recovery;
@@ -53,10 +56,22 @@ pub use execution::{
     MAX_EXECUTION_CONTEXTS,
 };
 pub use expfs::{
-    ExpFs, RecordKey, RecordKind, StorageError, SystemRecord, Transaction, SYSTEM_RECORD_CAPACITY,
+    ExpFs, RecordKey, RecordKind, StorageError, SystemRecord, Transaction, FORM_CONTENT_CAPACITY,
+    SYSTEM_RECORD_CAPACITY,
 };
 pub use fin::Fin;
 pub use form::{Dimension, Form, FormKind, FormRegistry, Lifecycle, Visibility};
+pub use http::{
+    decode_chunked as decode_http_chunked, parse_http_response, HttpError, HttpResponse,
+    HTTP_BODY_CAPACITY,
+};
+pub use native_compiler::{
+    compile as compile_native_source, CompileError as NativeCompileError, CompiledNative,
+    NativeLanguage,
+};
+pub use native_image::{
+    NativeImage, NativeImageError, NATIVE_IMAGE_HEADER, NATIVE_IMAGE_LIMIT, NATIVE_IMAGE_MAGIC,
+};
 pub use pimp::{NetworkPolicy, PimpScope, PimpSpec, PimpValue, SpecKey};
 pub use protection::{
     AeadSuite, Argon2idParameters, BootSupportPolicy, ContentProtection, EncryptedStoragePolicy,

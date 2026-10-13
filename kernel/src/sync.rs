@@ -28,6 +28,13 @@ impl<T> SpinMutex<T> {
         }
         SpinGuard { mutex: self }
     }
+
+    pub fn try_lock(&self) -> Option<SpinGuard<'_, T>> {
+        self.locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| SpinGuard { mutex: self })
+    }
 }
 
 pub struct SpinGuard<'a, T> {

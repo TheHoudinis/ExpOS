@@ -105,6 +105,8 @@ func Builtin() Catalog {
 		{Name: "SubnetCalc", Version: "1.0.0", Summary: "IPv4 network mask and broadcast calculator", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"SubnetCalcInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
 		{Name: "Morse", Version: "1.0.0", Summary: "International Morse code encoder", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"MorseInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
 		{Name: "UUIDGen", Version: "1.0.0", Summary: "Random RFC 4122 version 4 UUID generator", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"UUIDGenInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
+		{Name: "Cliptick", Version: "0.1.0", Summary: "Native source editor with isolated Python execution", Capabilities: []string{"render", "input", "read", "configure", "execute"}, ProvidedForms: []string{"CliptickInterface"}, Dependencies: []string{"PrismDE@>=1.2.0", "ExpPython@>=1.0.0"}},
+		{Name: "Writer", Version: "0.1.0", Summary: "Native text and source Data Form editor", Capabilities: []string{"render", "input", "read", "configure"}, ProvidedForms: []string{"WriterInterface"}, Dependencies: []string{"PrismDE@>=1.2.0"}},
 		{Name: "Breakout", Version: "1.0.0", Summary: "Block Forms native arcade game", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"BreakoutGame"}, Dependencies: []string{"GameHub@>=1.0.0"}},
 		{Name: "Memory", Version: "1.0.0", Summary: "Form pairs native memory game", Capabilities: []string{"render", "input"}, ProvidedForms: []string{"MemoryGame"}, Dependencies: []string{"GameHub@>=1.0.0"}},
 	}}
@@ -247,9 +249,9 @@ func (catalog Catalog) Search(query string) []Package {
 
 func builtinCategory(name string) string {
 	switch name {
-	case "ExpEdit", "TextLab", "TextCase", "WordCount", "MarkdownPad", "TextDiff":
+	case "ExpEdit", "TextLab", "TextCase", "WordCount", "MarkdownPad", "TextDiff", "Writer":
 		return "Editors"
-	case "GoSDK", "RustSDK", "CSDK", "PythonSDK", "DeveloperKit", "FormMap", "BaseConvert", "JsonInspect", "HashLab", "UUIDGen":
+	case "GoSDK", "RustSDK", "CSDK", "PythonSDK", "DeveloperKit", "FormMap", "BaseConvert", "JsonInspect", "HashLab", "UUIDGen", "Cliptick":
 		return "Developer tools"
 	case "ExpPython":
 		return "Languages"

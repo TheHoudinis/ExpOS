@@ -10,10 +10,10 @@ use crate::interrupts::Platform;
 
 pub const MAX_CPUS: usize = 8;
 const AP_TRAMPOLINE: usize = 0x8000;
-const AP_MAILBOX_CR3: *mut u64 = 0x8F00 as *mut u64;
-const AP_MAILBOX_STACK: *mut u64 = 0x8F08 as *mut u64;
-const AP_MAILBOX_ENTRY: *mut u64 = 0x8F10 as *mut u64;
-const AP_MAILBOX_SLOT: *mut u64 = 0x8F18 as *mut u64;
+const AP_MAILBOX_CR3: *mut u64 = 0x9000 as *mut u64;
+const AP_MAILBOX_STACK: *mut u64 = 0x9008 as *mut u64;
+const AP_MAILBOX_ENTRY: *mut u64 = 0x9010 as *mut u64;
+const AP_MAILBOX_SLOT: *mut u64 = 0x9018 as *mut u64;
 const AP_STACK_BYTES: usize = 64 * 1024;
 
 #[repr(C, align(16))]
@@ -63,6 +63,7 @@ pub fn initialize(platform: Platform) -> usize {
             trampoline_size,
         );
     }
+    crate::paging::seal_ap_trampoline();
     let cr3 = read_cr3();
     for (slot, apic_id) in ids[..count].iter().copied().enumerate() {
         if apic_id == platform.bootstrap_id || slot == 0 {

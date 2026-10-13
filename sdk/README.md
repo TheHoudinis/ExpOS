@@ -35,8 +35,42 @@ and prints the exact `ayo slap` command with the artifact SHA-256. The tool has
 fixed Rust, Go, and C build recipes and does not execute arbitrary package
 hooks from the manifest.
 
-`run` is explicitly a host-development run today. The kernel now has a native
-CPL3 call gate, per-Form address spaces and a bounded capsule loader, but the
-project driver does not yet package Rust/Go/C output into that native image
-format. Host execution therefore does not claim that an SDK binary ran inside
-ExpOS.
+`run` launches host development builds. For a real integer-only CPL3 executable,
+set `[build] target = "expos-x86_64"` in a C, freestanding Rust, or bounded
+native Go project. The driver produces a validated EXF1 image within the
+current 4096-byte persisted Form limit.
+
+```sh
+./sdk/bin/expos --manifest sdk/examples/native-hello/expos.toml build
+./sdk/bin/expos --manifest sdk/examples/native-hello/expos.toml import-script --no-build
+```
+
+Run the emitted commands in the ExpOS console. The sample logs from Ring 3 and
+exits with result 42. `package` preserves the executable bytes and declares
+`implementation_format: "exf1"`; automatic native Ayo installation is still
+pending. See [native image format, bootstrap and limitations](../docs/NATIVE_IMAGES.md).
+
+
+Freestanding Rust is also supported (integer-only, `no_std`, `no_main`, no heap
+or standard library). `build.entry` names a single Rust source file; the SDK
+sets `EXPOS_SDK` for including `sdk/rust/native.rs`. The sample uses that exact
+ABI-page transport and exits with result 43:
+
+```sh
+./sdk/bin/expos --manifest sdk/examples/native-rust/expos.toml build
+./sdk/bin/expos --manifest sdk/examples/native-rust/expos.toml import-script --no-build
+```
+
+Cliptick can run an imported executable from a `.c`, `.rs` or `.go` source tab
+and can compile its bounded freestanding source profile directly on-device.
+Local mode saves the source plus generated executable Form; sandbox mode does
+not persist either. Python runs source directly. The on-device profile is not a
+replacement for GCC, rustc, or upstream Go: it supports one entry point,
+bounded logging and an integer exit result. Host C/Rust builds retain their
+full freestanding compilers, while host native Go intentionally emits the same
+small runtime-free profile as Cliptick.
+
+```sh
+./sdk/bin/expos --manifest sdk/examples/native-go/expos.toml build
+./sdk/bin/expos --manifest sdk/examples/native-go/expos.toml import-script --no-build
+```

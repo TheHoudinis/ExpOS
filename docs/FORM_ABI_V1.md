@@ -96,3 +96,73 @@ The Rust, Go, C, and Python contract tests assert the shared call numbers and
 record sizes. `make ring3-check` is the native proof: it observes CPL3 ABI
 traffic, distinct CR3 roots, timer preemption, and forced ExpBudget exhaustion
 for a Form that never yields. Host emulators remain contract tests only.
+
+## Loop executable bootstrap
+
+The separate [EXF1 format](NATIVE_IMAGES.md) defines entry registers, fixed
+segment addresses and the initial Handle/FIN request. This does not change
+Form ABI v1 wire records or reserve any new call numbers. The C native transport
+and sample are in `sdk/c/expos_native.h` and `sdk/examples/native-hello/`.
+
+
+## Built-in service reply transport (Loop)
+
+The isolated Python/HTTP workers use call 5 (`IPC_SEND`) with a sealed reply
+Handle. `arguments[0]` is a byte offset in the fixed ABI data page, at least 256;
+`arguments[1]` is a length at most 512; the range must remain within that 4096-byte
+page. Valid bytes append to the current invocation's capture (at most 32768
+bytes). An invalid range or exhausted capture returns a non-OK status. Neither
+field is an arbitrary user pointer. The broker validates the requester and
+Execute right before the copy. `IPC_RECEIVE` is still unsupported. External
+capsules/EXF1 images do not receive a service reply capture and call 5 remains
+unsupported for those contexts. This is an internal built-in service protocol,
+not a new ABI version or general message queue implementation.
+
+Built-in ELF64 services have a private region starting at `0x400000200000`.
+The loader accepts only checked, non-overlapping page-aligned R, RX or RW
+segments, requires an RX entry point, and supplies RO/NX input at offset
+`0x180000` and a RW/NX stack at `0x1c0000`. R8/R9 carry the input pointer/length;
+RDI/RSI carry the fixed ABI request/response addresses and RDX/RCX carry Execute
+and reply Handle IDs. Each invocation is freshly allocated and discarded.
+These trusted build artifacts are separate from persisted EXF1 Forms.
+
+## Built-in raw network portal (Loop)
+
+Calls 35 and 36 now have one kernel transport for a sealed built-in network
+worker. The seventh SysV entry argument supplies its Network Handle (R10 also
+contains it for the fixed service bootstrap); applications, EXF1 contributors,
+MicroPython and the HTTP parser are never issued that Handle.
+
+For the sealed worker only, `NETWORK_RECEIVE` with `arguments[2] = 1` returns
+the MAC, IPv4 address/netmask, gateway, DNS server and link state in four packed
+ABI values. No packet buffer is copied in this mode. This is interface metadata,
+not ambient access to the kernel network stack.
+
+The same sealed worker uses `NETWORK_RECEIVE` mode 2 once per invocation to
+pin one service-private, writable/NX, contiguous RTL8139 DMA aperture. Ring 0
+validates the mapped pages, sizes, alignment and below-4-GiB range. Mode 3 reads
+only the MAC, command/link/interrupt status and four transmit-status registers.
+`NETWORK_SEND` mode 3 writes only the audited initialization, RX-consumer and
+TX-submit registers with exact widths and bounded values. RBSTART/TSAD writes
+must request zero: the kernel substitutes addresses from the validated private
+aperture, so the worker never supplies a bus address. Bus mastering is enabled
+only for the active lease and is disabled before its arena can be freed. The
+former raw-frame copy modes are unsupported in production.
+
+DNS lookup now crosses this boundary: the worker implements bounded ARP,
+IPv4/UDP construction and DNS A parsing and returns only a four-byte address.
+DHCP Discover/Offer/Request/Ack also crosses this boundary and returns one
+validated 24-byte address/netmask/gateway/DNS/server/lease record. The
+bounded transport operations pass a peer, port, fresh connection seed and at
+most 768 HTTP request bytes to the worker. Plain TCP performs ARP, handshake,
+ordered receive, acknowledgements, retransmission and close. HTTPS additionally
+receives immutable trusted RTC time and a hostname, then performs TLS 1.3 SNI,
+certificate-chain/validity/signature verification and record protection before
+returning decrypted HTTP bytes. Both return a truncation flag and at most 16 KiB
+in 512-byte reply chunks. Generic UDP and ICMP echo use dedicated operations
+with checksum and peer/sequence validation. The production kernel no longer
+constructs or parses DHCP, DNS, ICMP, UDP, TCP or TLS packets. The remaining
+network isolation boundary is the trusted PCI/page-validation and register
+portal. The polling driver and DMA buffers execute in Ring 3, but IOMMU
+isolation is not implemented; a malicious or faulty DMA-capable device can
+therefore escape the software-programmed aperture.

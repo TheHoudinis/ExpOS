@@ -844,6 +844,22 @@ pub fn active_mode() -> Option<Mode> {
 pub fn enter() -> bool {
     let requested = requested_mode();
     crate::slog!("EXPOS_DISPLAY_ENTER requested={}\r\n", requested.label());
+    let active_matches = active_display_mode() == Some(requested)
+        && FRONT_CONTENT_VISIBLE.load(Ordering::Acquire)
+        && if GOP_ACTIVE.load(Ordering::Acquire) {
+            true
+        } else {
+            let aperture_bytes = LFB_DEVICE_BYTES.load(Ordering::Acquire);
+            active_mode()
+                .is_some_and(|mode| mode_fits_aperture(requested, mode, aperture_bytes))
+        };
+    if active_matches {
+        crate::slog!(
+            "EXPOS_DISPLAY_REUSED target={} reason=active-scanout\r\n",
+            requested.label()
+        );
+        return true;
+    }
     if let Some(info) = crate::boot::firmware_framebuffer() {
         let firmware_mode = DisplayMode::from_dimensions(info.width as usize, info.height as usize);
         if firmware_mode == Some(requested) && program_firmware_framebuffer() {

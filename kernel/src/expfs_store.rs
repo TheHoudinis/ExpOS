@@ -5,26 +5,33 @@
 //! cannot replace the previous valid generation with a partial transaction.
 
 use crate::{crypto, println, slog, storage};
+use alloc::{
+    alloc::{alloc_zeroed, Layout},
+    boxed::Box,
+    vec::Vec,
+};
 use expos_core::{
-    CfcFin, Dimension, Fin, Form, FormHandle, FormKind, Lifecycle, NetworkPolicy, Operations,
-    Relationship, RelationshipKind, Text,
+    CfcFin, Dimension, Fin, Form, FormHandle, FormKind, Lifecycle, NativeImage, NetworkPolicy,
+    Operations, Relationship, RelationshipKind, Text,
 };
 
 pub const MAX_STORED_FORMS: usize = 12;
 pub const MAX_STORED_DIMENSIONS: usize = 6;
 pub const MAX_STORED_RELATIONSHIPS: usize = 48;
 pub const MAX_STORED_HANDLES: usize = 16;
-pub const FORM_CONTENT_CAPACITY: usize = 512;
+pub const FORM_CONTENT_CAPACITY: usize = expos_core::FORM_CONTENT_CAPACITY;
 pub const SETTINGS_RECORD_CAPACITY: usize = 32;
 pub const ACCOUNTS_RECORD_CAPACITY: usize = 12 * 80;
 pub const CHECKPOINT_CAPACITY: usize = 8;
 
 const MAGIC: [u8; 8] = *b"EXPFSDB1";
-const FORMAT_VERSION: u16 = 2;
+const FORMAT_VERSION: u16 = 3;
 const HEADER_LEN: usize = 64;
-const SLOT_SECTORS: usize = 24;
+const LEGACY_FORM_CONTENT_CAPACITY: usize = 512;
+const LEGACY_SLOT_SECTORS: usize = 24;
+const LEGACY_SLOT_LEN: usize = LEGACY_SLOT_SECTORS * storage::SECTOR_SIZE;
+const SLOT_SECTORS: usize = 128;
 const SLOT_LEN: usize = SLOT_SECTORS * storage::SECTOR_SIZE;
-const PAYLOAD_LEN: usize = SLOT_LEN - HEADER_LEN;
 // GPT reserves LBAs 0..33. Genesis stores its immutable identity manifest at
 // LBA 40, so the transactional ExpFS region begins at 64 and remains outside
 // the EFI System Partition, which begins at LBA 2048.
@@ -33,6 +40,10 @@ const SLOT_B_LBA: u32 = SLOT_A_LBA + SLOT_SECTORS as u32;
 const CHECKPOINT_LBA: u32 = SLOT_B_LBA + SLOT_SECTORS as u32;
 const BASELINE_LBA: u32 = CHECKPOINT_LBA + (CHECKPOINT_CAPACITY * SLOT_SECTORS) as u32;
 const MINIMUM_DISK_SECTORS: u32 = BASELINE_LBA + SLOT_SECTORS as u32;
+const LEGACY_SLOT_B_LBA: u32 = SLOT_A_LBA + LEGACY_SLOT_SECTORS as u32;
+const LEGACY_CHECKPOINT_LBA: u32 = LEGACY_SLOT_B_LBA + LEGACY_SLOT_SECTORS as u32;
+const LEGACY_BASELINE_LBA: u32 =
+    LEGACY_CHECKPOINT_LBA + (CHECKPOINT_CAPACITY * LEGACY_SLOT_SECTORS) as u32;
 
 #[derive(Clone, Copy)]
 pub struct StoredForm {
@@ -121,6 +132,7 @@ struct RuntimeStore {
     active_slot: u8,
     checkpoints: [Option<CheckpointInfo>; CHECKPOINT_CAPACITY],
     baseline: BaselineState,
+    baseline_lba: u32,
     storage_key: Option<[u8; crypto::STORAGE_KEY_LEN]>,
 }
 
@@ -136,6 +148,7 @@ impl RuntimeStore {
             active_slot: 1,
             checkpoints: [None; CHECKPOINT_CAPACITY],
             baseline: BaselineState::Missing,
+            baseline_lba: BASELINE_LBA,
             storage_key: None,
         }
     }
@@ -156,6 +169,7 @@ pub struct CheckpointInfo {
     pub state_id: u64,
     pub journal_sequence: u32,
     pub slot: u8,
+    legacy: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,11 +210,13 @@ pub fn initialize(
     };
 
     let first = read_slot(device, 0, storage_key.as_ref())
+        .or_else(|_| read_legacy_slot(device, 0, storage_key.as_ref()))
         .ok()
         .filter(|slot| {
             slot.snapshot.cfc == cfc && slot.snapshot.primary_dimension == primary_dimension
         });
     let second = read_slot(device, 1, storage_key.as_ref())
+        .or_else(|_| read_legacy_slot(device, 1, storage_key.as_ref()))
         .ok()
         .filter(|slot| {
             slot.snapshot.cfc == cfc && slot.snapshot.primary_dimension == primary_dimension
@@ -214,12 +230,23 @@ pub fn initialize(
     store.storage_key = storage_key;
     store.checkpoints = [None; CHECKPOINT_CAPACITY];
     for index in 0..CHECKPOINT_CAPACITY {
-        if let Ok(checkpoint) = read_at(
+        let mut legacy = false;
+        let checkpoint = read_at(
             device,
             checkpoint_lba(index),
             index as u8,
             storage_key.as_ref(),
-        ) {
+        )
+        .or_else(|_| {
+            legacy = true;
+            read_legacy_at(
+                device,
+                LEGACY_CHECKPOINT_LBA + (index * LEGACY_SLOT_SECTORS) as u32,
+                index as u8,
+                storage_key.as_ref(),
+            )
+        });
+        if let Ok(checkpoint) = checkpoint {
             if checkpoint.snapshot.cfc == cfc
                 && checkpoint.snapshot.primary_dimension == primary_dimension
             {
@@ -227,11 +254,22 @@ pub fn initialize(
                     state_id: checkpoint.generation,
                     journal_sequence: checkpoint.snapshot.journal_sequence,
                     slot: index as u8,
+                    legacy,
                 });
             }
         }
     }
-    store.baseline = match read_at(device, BASELINE_LBA, u8::MAX, storage_key.as_ref()) {
+    let mut legacy_baseline = false;
+    let baseline = read_at(device, BASELINE_LBA, u8::MAX, storage_key.as_ref()).or_else(|_| {
+        legacy_baseline = true;
+        read_legacy_at(device, LEGACY_BASELINE_LBA, u8::MAX, storage_key.as_ref())
+    });
+    store.baseline_lba = if legacy_baseline {
+        LEGACY_BASELINE_LBA
+    } else {
+        BASELINE_LBA
+    };
+    store.baseline = match baseline {
         Ok(baseline)
             if baseline.snapshot.cfc == cfc
                 && baseline.snapshot.primary_dimension == primary_dimension =>
@@ -374,7 +412,7 @@ pub fn seed_genesis_plan(
     Ok(generation)
 }
 
-/// Load the first active Data Form whose name ends in `.txt`.
+/// Load the first active supported text Data Form.
 ///
 /// Notes uses the same generic Form records as the shell rather than a private
 /// side file, so saved text remains visible to every ExpFS-aware tool.
@@ -383,7 +421,7 @@ pub fn load_text_form(cfc: CfcFin) -> Option<(Text, [u8; FORM_CONTENT_CAPACITY],
     snapshot.forms.iter().flatten().find_map(|stored| {
         (stored.form.kind == FormKind::Data
             && stored.form.lifecycle == Lifecycle::Active
-            && stored.form.name.as_str().ends_with(".txt"))
+            && is_text_name(stored.form.name.as_str()))
         .then_some((
             stored.form.name,
             stored.content,
@@ -402,9 +440,15 @@ pub fn load_data_form(cfc: CfcFin, name: &str) -> Option<([u8; FORM_CONTENT_CAPA
     })
 }
 
+pub fn is_text_name(name: &str) -> bool {
+    [".txt", ".sys", ".py", ".rs", ".go", ".c", ".h"]
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
+}
+
 /// Atomically create or revise a named text Data Form in the active CFC.
 pub fn save_text_form(cfc: CfcFin, name: &str, bytes: &[u8]) -> Result<(Fin, u32), StoreError> {
-    if !name.ends_with(".txt") {
+    if !is_text_name(name) {
         return Err(StoreError::InvalidSnapshot);
     }
     save_data_form(cfc, name, bytes)
@@ -413,6 +457,26 @@ pub fn save_text_form(cfc: CfcFin, name: &str, bytes: &[u8]) -> Result<(Fin, u32
 /// Commit application state through the same generic Data Form transaction
 /// used by text documents and shell-created data.
 pub fn save_data_form(cfc: CfcFin, name: &str, bytes: &[u8]) -> Result<(Fin, u32), StoreError> {
+    save_named_form(cfc, name, FormKind::Data, bytes)
+}
+
+/// Persist a compiler-produced EXF1 image as an executable Form. Validation is
+/// repeated here so a caller cannot relabel arbitrary bytes as executable.
+pub fn save_executable_form(
+    cfc: CfcFin,
+    name: &str,
+    bytes: &[u8],
+) -> Result<(Fin, u32), StoreError> {
+    NativeImage::parse(bytes).map_err(|_| StoreError::InvalidSnapshot)?;
+    save_named_form(cfc, name, FormKind::Executable, bytes)
+}
+
+fn save_named_form(
+    cfc: CfcFin,
+    name: &str,
+    kind: FormKind,
+    bytes: &[u8],
+) -> Result<(Fin, u32), StoreError> {
     if bytes.len() > FORM_CONTENT_CAPACITY {
         return Err(StoreError::InvalidSnapshot);
     }
@@ -424,9 +488,16 @@ pub fn save_data_form(cfc: CfcFin, name: &str, bytes: &[u8]) -> Result<(Fin, u32
     let mut snapshot = store
         .snapshot
         .unwrap_or_else(|| Snapshot::empty(store.cfc, store.cfc_name, store.primary_dimension));
-    let existing = snapshot.forms.iter().position(|entry| {
-        entry.is_some_and(|stored| stored.form.kind == FormKind::Data && stored.form.name == name)
-    });
+    let named = snapshot
+        .forms
+        .iter()
+        .position(|entry| entry.is_some_and(|stored| stored.form.name == name));
+    if named
+        .is_some_and(|index| snapshot.forms[index].is_some_and(|stored| stored.form.kind != kind))
+    {
+        return Err(StoreError::InvalidSnapshot);
+    }
+    let existing = named;
     let slot = existing.or_else(|| snapshot.forms.iter().position(Option::is_none));
     let index = slot.ok_or(StoreError::Full)?;
     let (fin, revision) = if let Some(stored) = snapshot.forms[index] {
@@ -439,7 +510,7 @@ pub fn save_data_form(cfc: CfcFin, name: &str, bytes: &[u8]) -> Result<(Fin, u32
     };
     let mut content = [0_u8; FORM_CONTENT_CAPACITY];
     content[..bytes.len()].copy_from_slice(bytes);
-    let mut form = Form::new(fin, name.as_str(), FormKind::Data);
+    let mut form = Form::new(fin, name.as_str(), kind);
     form.revision = revision;
     snapshot.forms[index] = Some(StoredForm {
         form,
@@ -514,21 +585,16 @@ pub fn establish_baseline() -> Result<BaselineInfo, StoreError> {
     let snapshot = store.snapshot.ok_or(StoreError::NoCurrentState)?;
     let device = store.device.ok_or(StoreError::Unavailable)?;
     let generation = store.generation.max(1);
-    let mut encoded = [0_u8; SLOT_LEN];
-    encode_slot(
+    let mut encoded = boxed_slot()?;
+    let encoded_len = encode_slot(
         &snapshot,
         generation,
         store.storage_key.as_ref(),
         BASELINE_LBA,
         &mut encoded,
     )?;
-    write_at(device, BASELINE_LBA, &encoded)?;
-    let verified = read_at(device, BASELINE_LBA, u8::MAX, store.storage_key.as_ref())?;
-    if verified.generation != generation
-        || verified.snapshot.cfc != snapshot.cfc
-        || verified.snapshot.primary_dimension != snapshot.primary_dimension
-        || verified.snapshot.journal_sequence != snapshot.journal_sequence
-    {
+    write_at(device, BASELINE_LBA, &encoded, encoded_len)?;
+    if verify_write(device, BASELINE_LBA, &encoded, encoded_len).is_err() {
         store.baseline = BaselineState::Damaged;
         return Err(StoreError::VerificationFailed);
     }
@@ -537,6 +603,7 @@ pub fn establish_baseline() -> Result<BaselineInfo, StoreError> {
         journal_sequence: snapshot.journal_sequence,
     };
     store.baseline = BaselineState::Ready(info);
+    store.baseline_lba = BASELINE_LBA;
     slog!(
         "EXPOS_EXPFS_BASELINE_READY generation={} sequence={} source=created\r\n",
         info.generation,
@@ -553,7 +620,12 @@ pub fn restore_baseline() -> Result<u64, StoreError> {
         BaselineState::Ready(_) => {}
     }
     let device = store.device.ok_or(StoreError::Unavailable)?;
-    let mut snapshot = read_at(device, BASELINE_LBA, u8::MAX, store.storage_key.as_ref())?.snapshot;
+    let baseline_lba = store.baseline_lba;
+    let mut snapshot = if baseline_lba == LEGACY_BASELINE_LBA {
+        read_legacy_at(device, baseline_lba, u8::MAX, store.storage_key.as_ref())?.snapshot
+    } else {
+        read_at(device, baseline_lba, u8::MAX, store.storage_key.as_ref())?.snapshot
+    };
     if let Some(current) = store.snapshot {
         snapshot.journal_sequence = current.journal_sequence.wrapping_add(1).max(1);
     }
@@ -593,31 +665,21 @@ pub fn record_checkpoint() -> Result<CheckpointInfo, StoreError> {
                 .map(|(index, _)| index)
         })
         .ok_or(StoreError::VerificationFailed)?;
-    let mut encoded = [0_u8; SLOT_LEN];
-    encode_slot(
+    let mut encoded = boxed_slot()?;
+    let encoded_len = encode_slot(
         &snapshot,
         state_id,
         store.storage_key.as_ref(),
         checkpoint_lba(slot),
         &mut encoded,
     )?;
-    write_at(device, checkpoint_lba(slot), &encoded)?;
-    let verified = read_at(
-        device,
-        checkpoint_lba(slot),
-        slot as u8,
-        store.storage_key.as_ref(),
-    )?;
-    if verified.generation != state_id
-        || verified.snapshot.cfc != snapshot.cfc
-        || verified.snapshot.journal_sequence != snapshot.journal_sequence
-    {
-        return Err(StoreError::VerificationFailed);
-    }
+    write_at(device, checkpoint_lba(slot), &encoded, encoded_len)?;
+    verify_write(device, checkpoint_lba(slot), &encoded, encoded_len)?;
     let checkpoint = CheckpointInfo {
         state_id,
         journal_sequence: snapshot.journal_sequence,
         slot: slot as u8,
+        legacy: false,
     };
     store.checkpoints[slot] = Some(checkpoint);
     slog!(
@@ -639,13 +701,23 @@ pub fn restore_checkpoint(state_id: u64) -> Result<u64, StoreError> {
         .copied()
         .ok_or(StoreError::CheckpointNotFound)?;
     let device = store.device.ok_or(StoreError::Unavailable)?;
-    let mut snapshot = read_at(
-        device,
-        checkpoint_lba(checkpoint.slot as usize),
-        checkpoint.slot,
-        store.storage_key.as_ref(),
-    )?
-    .snapshot;
+    let mut snapshot = if checkpoint.legacy {
+        read_legacy_at(
+            device,
+            LEGACY_CHECKPOINT_LBA + checkpoint.slot as u32 * LEGACY_SLOT_SECTORS as u32,
+            checkpoint.slot,
+            store.storage_key.as_ref(),
+        )?
+        .snapshot
+    } else {
+        read_at(
+            device,
+            checkpoint_lba(checkpoint.slot as usize),
+            checkpoint.slot,
+            store.storage_key.as_ref(),
+        )?
+        .snapshot
+    };
     if let Some(current) = store.snapshot {
         snapshot.journal_sequence = current.journal_sequence.wrapping_add(1).max(1);
     }
@@ -701,27 +773,16 @@ fn commit_locked(store: &mut RuntimeStore, snapshot: Snapshot) -> Result<u64, St
     let generation = store.generation.wrapping_add(1).max(1);
     let target_slot = store.active_slot ^ 1;
     let base = slot_lba(target_slot);
-    let mut encoded = [0_u8; SLOT_LEN];
-    encode_slot(
+    let mut encoded = boxed_slot()?;
+    let encoded_len = encode_slot(
         &snapshot,
         generation,
         store.storage_key.as_ref(),
         base,
         &mut encoded,
     )?;
-    write_at(device, base, &encoded)?;
-    let verified = read_at(device, base, target_slot, store.storage_key.as_ref()).map_err(
-        |error| match error {
-            StoreError::Disk(error) => StoreError::Disk(error),
-            _ => StoreError::VerificationFailed,
-        },
-    )?;
-    if verified.generation != generation
-        || verified.snapshot.cfc != snapshot.cfc
-        || verified.snapshot.journal_sequence != snapshot.journal_sequence
-    {
-        return Err(StoreError::VerificationFailed);
-    }
+    write_at(device, base, &encoded, encoded_len)?;
+    verify_write(device, base, &encoded, encoded_len)?;
     store.snapshot = Some(snapshot);
     store.generation = generation;
     store.active_slot = target_slot;
@@ -738,15 +799,50 @@ fn write_at(
     device: storage::Device,
     base: u32,
     encoded: &[u8; SLOT_LEN],
+    encoded_len: usize,
 ) -> Result<(), StoreError> {
-    for write_index in 0..SLOT_SECTORS {
-        let sector_index = (write_index + 1) % SLOT_SECTORS;
+    let sectors = encoded_len.div_ceil(storage::SECTOR_SIZE);
+    if sectors == 0 || sectors > SLOT_SECTORS {
+        return Err(StoreError::InvalidSnapshot);
+    }
+    // Sector zero contains the commit header and is always published last.
+    for write_index in 0..sectors {
+        let sector_index = (write_index + 1) % sectors;
         let mut sector = [0_u8; storage::SECTOR_SIZE];
         let start = sector_index * storage::SECTOR_SIZE;
         sector.copy_from_slice(&encoded[start..start + storage::SECTOR_SIZE]);
         device
             .write_sector(base + sector_index as u32, &sector)
             .map_err(StoreError::Disk)?;
+    }
+    Ok(())
+}
+
+fn boxed_slot() -> Result<Box<[u8; SLOT_LEN]>, StoreError> {
+    let pointer = unsafe { alloc_zeroed(Layout::new::<[u8; SLOT_LEN]>()) }.cast::<[u8; SLOT_LEN]>();
+    if pointer.is_null() {
+        return Err(StoreError::Unavailable);
+    }
+    Ok(unsafe { Box::from_raw(pointer) })
+}
+
+fn verify_write(
+    device: storage::Device,
+    base: u32,
+    expected: &[u8; SLOT_LEN],
+    encoded_len: usize,
+) -> Result<(), StoreError> {
+    let sectors = encoded_len.div_ceil(storage::SECTOR_SIZE);
+    for sector_index in 0..sectors {
+        let mut sector = [0_u8; storage::SECTOR_SIZE];
+        device
+            .read_sector(base + sector_index as u32, &mut sector)
+            .map_err(StoreError::Disk)?;
+        let start = sector_index * storage::SECTOR_SIZE;
+        let compared = (encoded_len - start).min(storage::SECTOR_SIZE);
+        if sector[..compared] != expected[start..start + compared] {
+            return Err(StoreError::VerificationFailed);
+        }
     }
     Ok(())
 }
@@ -801,7 +897,7 @@ fn encode_slot(
     storage_key: Option<&[u8; crypto::STORAGE_KEY_LEN]>,
     nonce_domain: u32,
     output: &mut [u8; SLOT_LEN],
-) -> Result<(), StoreError> {
+) -> Result<usize, StoreError> {
     output.fill(0);
     let mut offset = HEADER_LEN;
     put(output, &mut offset, &snapshot.primary_dimension.bytes())?;
@@ -824,33 +920,33 @@ fn encode_slot(
         &snapshot.accounts.unwrap_or([0; ACCOUNTS_RECORD_CAPACITY]),
     )?;
 
-    for slot in snapshot.dimensions {
+    for slot in &snapshot.dimensions {
         put_byte(output, &mut offset, u8::from(slot.is_some()))?;
-        if let Some(dimension) = slot {
+        if let Some(dimension) = slot.as_ref() {
             put(output, &mut offset, &dimension.fin.bytes())?;
             put_text(output, &mut offset, dimension.name)?;
             put_byte(output, &mut offset, u8::from(dimension.security_boundary))?;
-        } else {
-            offset += 16 + 1 + 32 + 1;
         }
     }
-    for slot in snapshot.forms {
+    for slot in &snapshot.forms {
         put_byte(output, &mut offset, u8::from(slot.is_some()))?;
-        if let Some(stored) = slot {
+        if let Some(stored) = slot.as_ref() {
             put(output, &mut offset, &stored.form.fin.bytes())?;
             put_text(output, &mut offset, stored.form.name)?;
             put_byte(output, &mut offset, encode_kind(stored.form.kind))?;
             put_u32_cursor(output, &mut offset, stored.form.revision)?;
             put_byte(output, &mut offset, encode_lifecycle(stored.form.lifecycle))?;
             put_u16_cursor(output, &mut offset, stored.content_len)?;
-            put(output, &mut offset, &stored.content)?;
-        } else {
-            offset += 16 + 1 + 32 + 1 + 4 + 1 + 2 + FORM_CONTENT_CAPACITY;
+            put(
+                output,
+                &mut offset,
+                &stored.content[..stored.content_len as usize],
+            )?;
         }
     }
-    for slot in snapshot.relationships {
+    for slot in &snapshot.relationships {
         put_byte(output, &mut offset, u8::from(slot.is_some()))?;
-        if let Some(relationship) = slot {
+        if let Some(relationship) = slot.as_ref() {
             put(output, &mut offset, &relationship.source.bytes())?;
             put(output, &mut offset, &relationship.target.bytes())?;
             put_byte(output, &mut offset, encode_relationship(relationship.kind))?;
@@ -864,13 +960,11 @@ fn encode_slot(
                 &mut offset,
                 &relationship.dimension.unwrap_or(Fin::ZERO).bytes(),
             )?;
-        } else {
-            offset += 16 + 16 + 1 + 1 + 16;
         }
     }
-    for slot in snapshot.handles {
+    for slot in &snapshot.handles {
         put_byte(output, &mut offset, u8::from(slot.is_some()))?;
-        if let Some(handle) = slot {
+        if let Some(handle) = slot.as_ref() {
             put_u32_cursor(output, &mut offset, handle.id)?;
             put_u32_cursor(output, &mut offset, handle.parent_id)?;
             put(output, &mut offset, &handle.requester.bytes())?;
@@ -879,8 +973,6 @@ fn encode_slot(
             put_u16_cursor(output, &mut offset, handle.operations.bits())?;
             put_u64_cursor(output, &mut offset, handle.valid_until_tick)?;
             put_byte(output, &mut offset, u8::from(handle.revoked))?;
-        } else {
-            offset += 4 + 4 + 16 + 16 + 16 + 2 + 8 + 1;
         }
     }
     if offset > SLOT_LEN {
@@ -890,7 +982,8 @@ fn encode_slot(
     output[..8].copy_from_slice(&MAGIC);
     put_u16(output, 8, FORMAT_VERSION);
     put_u16(output, 10, HEADER_LEN as u16);
-    put_u32(output, 12, PAYLOAD_LEN as u32);
+    let payload_len = offset - HEADER_LEN;
+    put_u32(output, 12, payload_len as u32);
     put_u64(output, 16, generation);
     output[24..40].copy_from_slice(&snapshot.cfc.bytes());
     put_u32(output, 40, snapshot.journal_sequence);
@@ -898,17 +991,17 @@ fn encode_slot(
         output[44] = 1;
         output[45] = 1; // XChaCha20-Poly1305
         let nonce = crypto::storage_nonce(key, &snapshot.cfc.bytes(), generation, nonce_domain);
-        let (header, payload) = output.split_at_mut(HEADER_LEN);
+        let (header, payload) = output[..offset].split_at_mut(HEADER_LEN);
         let tag = crypto::seal_storage(key, &nonce, &header[..48], payload)
             .map_err(|_| StoreError::VerificationFailed)?;
         header[48..64].copy_from_slice(&tag);
     } else {
-        let payload_crc = crc32(&output[HEADER_LEN..]);
+        let payload_crc = crc32(&output[HEADER_LEN..offset]);
         put_u32(output, 48, payload_crc);
         let header_crc = crc32(&output[..52]);
         put_u32(output, 52, header_crc);
     }
-    Ok(())
+    Ok(offset)
 }
 
 fn read_slot(
@@ -919,14 +1012,27 @@ fn read_slot(
     read_at(device, slot_lba(slot), slot, storage_key)
 }
 
-fn read_at(
+fn read_legacy_slot(
+    device: storage::Device,
+    slot: u8,
+    storage_key: Option<&[u8; crypto::STORAGE_KEY_LEN]>,
+) -> Result<DecodedSlot, StoreError> {
+    let base = if slot == 0 {
+        SLOT_A_LBA
+    } else {
+        LEGACY_SLOT_B_LBA
+    };
+    read_legacy_at(device, base, slot, storage_key)
+}
+
+fn read_legacy_at(
     device: storage::Device,
     base: u32,
     slot: u8,
     storage_key: Option<&[u8; crypto::STORAGE_KEY_LEN]>,
 ) -> Result<DecodedSlot, StoreError> {
-    let mut encoded = [0_u8; SLOT_LEN];
-    for sector_index in 0..SLOT_SECTORS {
+    let mut encoded = [0_u8; LEGACY_SLOT_LEN];
+    for sector_index in 0..LEGACY_SLOT_SECTORS {
         let mut sector = [0_u8; storage::SECTOR_SIZE];
         device
             .read_sector(base + sector_index as u32, &mut sector)
@@ -937,36 +1043,62 @@ fn read_at(
     decode_slot(&encoded, slot, storage_key, base).ok_or(StoreError::VerificationFailed)
 }
 
-fn region_is_blank(device: storage::Device, base: u32) -> bool {
-    for sector_index in 0..SLOT_SECTORS {
-        let mut sector = [0_u8; storage::SECTOR_SIZE];
-        if device
-            .read_sector(base + sector_index as u32, &mut sector)
-            .is_err()
-            || sector.iter().any(|byte| *byte != 0)
-        {
-            return false;
-        }
+fn read_at(
+    device: storage::Device,
+    base: u32,
+    slot: u8,
+    storage_key: Option<&[u8; crypto::STORAGE_KEY_LEN]>,
+) -> Result<DecodedSlot, StoreError> {
+    let mut encoded = boxed_slot()?;
+    let mut header_sector = [0_u8; storage::SECTOR_SIZE];
+    device
+        .read_sector(base, &mut header_sector)
+        .map_err(StoreError::Disk)?;
+    encoded[..storage::SECTOR_SIZE].copy_from_slice(&header_sector);
+    if encoded[..8] != MAGIC
+        || get_u16(encoded.as_ref(), 10) as usize != HEADER_LEN
+        || get_u32(encoded.as_ref(), 12) as usize > SLOT_LEN - HEADER_LEN
+    {
+        return Err(StoreError::VerificationFailed);
     }
-    true
+    let encoded_len = HEADER_LEN + get_u32(encoded.as_ref(), 12) as usize;
+    let sectors = encoded_len.div_ceil(storage::SECTOR_SIZE);
+    for sector_index in 1..sectors {
+        let mut sector = [0_u8; storage::SECTOR_SIZE];
+        device
+            .read_sector(base + sector_index as u32, &mut sector)
+            .map_err(StoreError::Disk)?;
+        let start = sector_index * storage::SECTOR_SIZE;
+        encoded[start..start + storage::SECTOR_SIZE].copy_from_slice(&sector);
+    }
+    decode_slot(&encoded[..encoded_len], slot, storage_key, base)
+        .ok_or(StoreError::VerificationFailed)
+}
+
+fn region_is_blank(device: storage::Device, base: u32) -> bool {
+    let mut sector = [0_u8; storage::SECTOR_SIZE];
+    device.read_sector(base, &mut sector).is_ok() && sector.iter().all(|byte| *byte == 0)
 }
 
 fn decode_slot(
-    encoded: &[u8; SLOT_LEN],
+    encoded: &[u8],
     slot: u8,
     storage_key: Option<&[u8; crypto::STORAGE_KEY_LEN]>,
     nonce_domain: u32,
 ) -> Option<DecodedSlot> {
     let version = get_u16(encoded, 8);
-    if encoded[..8] != MAGIC
+    let fixed_records = version <= 2;
+    let stored_content_capacity = LEGACY_FORM_CONTENT_CAPACITY;
+    if encoded.len() < HEADER_LEN
+        || encoded[..8] != MAGIC
         || !(1..=FORMAT_VERSION).contains(&version)
         || get_u16(encoded, 10) as usize != HEADER_LEN
-        || get_u32(encoded, 12) as usize != PAYLOAD_LEN
+        || get_u32(encoded, 12) as usize != encoded.len() - HEADER_LEN
     {
         return None;
     }
     let encrypted = version >= 2 && encoded[44] == 1;
-    let mut decoded = *encoded;
+    let mut decoded = Vec::from(encoded);
     if encrypted {
         if encoded[45] != 1 {
             return None;
@@ -1025,7 +1157,9 @@ fn decode_slot(
     for target in &mut snapshot.dimensions {
         let present = read_byte(input, &mut offset)?;
         if present == 0 {
-            offset += 16 + 1 + 32 + 1;
+            if fixed_records {
+                offset += 16 + 1 + 32 + 1;
+            }
             continue;
         }
         if present != 1 {
@@ -1043,7 +1177,9 @@ fn decode_slot(
     for target in &mut snapshot.forms {
         let present = read_byte(input, &mut offset)?;
         if present == 0 {
-            offset += 16 + 1 + 32 + 1 + 4 + 1 + 2 + FORM_CONTENT_CAPACITY;
+            if fixed_records {
+                offset += 16 + 1 + 32 + 1 + 4 + 1 + 2 + stored_content_capacity;
+            }
             continue;
         }
         if present != 1 {
@@ -1059,7 +1195,16 @@ fn decode_slot(
             return None;
         }
         let mut content = [0_u8; FORM_CONTENT_CAPACITY];
-        content.copy_from_slice(read(input, &mut offset, FORM_CONTENT_CAPACITY)?);
+        let stored = read(
+            input,
+            &mut offset,
+            if fixed_records {
+                stored_content_capacity
+            } else {
+                content_len as usize
+            },
+        )?;
+        content[..content_len as usize].copy_from_slice(&stored[..content_len as usize]);
         let mut form = Form::new(fin, name.as_str(), kind);
         form.revision = revision;
         form.lifecycle = lifecycle;
@@ -1072,7 +1217,9 @@ fn decode_slot(
     for target in &mut snapshot.relationships {
         let present = read_byte(input, &mut offset)?;
         if present == 0 {
-            offset += 16 + 16 + 1 + 1 + 16;
+            if fixed_records {
+                offset += 16 + 16 + 1 + 1 + 16;
+            }
             continue;
         }
         if present != 1 {
@@ -1097,7 +1244,9 @@ fn decode_slot(
     for target in &mut snapshot.handles {
         let present = read_byte(input, &mut offset)?;
         if present == 0 {
-            offset += 4 + 4 + 16 + 16 + 16 + 2 + 8 + 1;
+            if fixed_records {
+                offset += 4 + 4 + 16 + 16 + 16 + 2 + 8 + 1;
+            }
             continue;
         }
         if present != 1 {
@@ -1369,11 +1518,13 @@ mod tests {
         snapshot.next_fin = 9;
         snapshot.dimensions[0] = Some(Dimension::new(dimension, "Primary", true));
         let mut content = [0_u8; FORM_CONTENT_CAPACITY];
-        content[..5].copy_from_slice(b"hello");
+        for (index, byte) in content[..3072].iter_mut().enumerate() {
+            *byte = (index % 251) as u8;
+        }
         snapshot.forms[0] = Some(StoredForm {
             form: Form::new(form_fin, "MyNotes", FormKind::Data),
             content,
-            content_len: 5,
+            content_len: 3072,
         });
         snapshot.relationships[0] = Some(Relationship {
             source: Fin::from_u128(4),
@@ -1399,14 +1550,17 @@ mod tests {
     fn disk_snapshot_round_trips_form_graph_and_content() {
         let source = snapshot();
         let mut encoded = [0_u8; SLOT_LEN];
-        encode_slot(&source, 11, None, 0, &mut encoded).unwrap();
-        let decoded = decode_slot(&encoded, 0, None, 0).unwrap();
+        let encoded_len = encode_slot(&source, 11, None, 0, &mut encoded).unwrap();
+        let decoded = decode_slot(&encoded[..encoded_len], 0, None, 0).unwrap();
         assert_eq!(decoded.generation, 11);
         assert_eq!(decoded.snapshot.cfc, source.cfc);
         assert_eq!(decoded.snapshot.journal_sequence, 7);
         let stored = decoded.snapshot.forms[0].unwrap();
         assert_eq!(stored.form.name.as_str(), "MyNotes");
-        assert_eq!(&stored.content[..stored.content_len as usize], b"hello");
+        assert_eq!(stored.content_len, 3072);
+        assert_eq!(stored.content[0], 0);
+        assert_eq!(stored.content[511], (511 % 251) as u8);
+        assert_eq!(stored.content[3071], (3071 % 251) as u8);
         assert_eq!(decoded.snapshot.relationships[0], source.relationships[0]);
         assert_eq!(decoded.snapshot.handles[0], source.handles[0]);
     }
@@ -1414,9 +1568,9 @@ mod tests {
     #[test]
     fn corruption_invalidates_the_snapshot() {
         let mut encoded = [0_u8; SLOT_LEN];
-        encode_slot(&snapshot(), 1, None, 0, &mut encoded).unwrap();
+        let encoded_len = encode_slot(&snapshot(), 1, None, 0, &mut encoded).unwrap();
         encoded[HEADER_LEN + 700] ^= 0x80;
-        assert!(decode_slot(&encoded, 0, None, 0).is_none());
+        assert!(decode_slot(&encoded[..encoded_len], 0, None, 0).is_none());
     }
 
     #[test]
@@ -1424,19 +1578,25 @@ mod tests {
         let source = snapshot();
         let key = [0x42_u8; crypto::STORAGE_KEY_LEN];
         let mut encoded = [0_u8; SLOT_LEN];
-        encode_slot(&source, 12, Some(&key), 64, &mut encoded).unwrap();
+        let encoded_len = encode_slot(&source, 12, Some(&key), 64, &mut encoded).unwrap();
         assert_eq!(encoded[44], 1);
         assert_ne!(
             &encoded[HEADER_LEN..HEADER_LEN + 16],
             &source.primary_dimension.bytes()
         );
-        assert!(decode_slot(&encoded, 0, None, 64).is_none());
-        assert!(decode_slot(&encoded, 0, Some(&[1; crypto::STORAGE_KEY_LEN]), 64).is_none());
-        assert!(decode_slot(&encoded, 0, Some(&key), 65).is_none());
-        let decoded = decode_slot(&encoded, 0, Some(&key), 64).unwrap();
+        assert!(decode_slot(&encoded[..encoded_len], 0, None, 64).is_none());
+        assert!(decode_slot(
+            &encoded[..encoded_len],
+            0,
+            Some(&[1; crypto::STORAGE_KEY_LEN]),
+            64
+        )
+        .is_none());
+        assert!(decode_slot(&encoded[..encoded_len], 0, Some(&key), 65).is_none());
+        let decoded = decode_slot(&encoded[..encoded_len], 0, Some(&key), 64).unwrap();
         assert_eq!(decoded.snapshot.cfc, source.cfc);
         encoded[HEADER_LEN + 9] ^= 1;
-        assert!(decode_slot(&encoded, 0, Some(&key), 64).is_none());
+        assert!(decode_slot(&encoded[..encoded_len], 0, Some(&key), 64).is_none());
     }
 
     #[test]
@@ -1444,8 +1604,15 @@ mod tests {
         assert_eq!(BASELINE_LBA, checkpoint_lba(CHECKPOINT_CAPACITY));
         let key = [0x37_u8; crypto::STORAGE_KEY_LEN];
         let mut encoded = [0_u8; SLOT_LEN];
-        encode_slot(&snapshot(), 3, Some(&key), BASELINE_LBA, &mut encoded).unwrap();
-        assert!(decode_slot(&encoded, u8::MAX, Some(&key), BASELINE_LBA).is_some());
-        assert!(decode_slot(&encoded, u8::MAX, Some(&key), checkpoint_lba(0)).is_none());
+        let encoded_len =
+            encode_slot(&snapshot(), 3, Some(&key), BASELINE_LBA, &mut encoded).unwrap();
+        assert!(decode_slot(&encoded[..encoded_len], u8::MAX, Some(&key), BASELINE_LBA).is_some());
+        assert!(decode_slot(
+            &encoded[..encoded_len],
+            u8::MAX,
+            Some(&key),
+            checkpoint_lba(0)
+        )
+        .is_none());
     }
 }

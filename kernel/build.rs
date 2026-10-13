@@ -8,17 +8,105 @@ fn main() {
             .parent()
             .unwrap()
             .to_path_buf();
+        println!("cargo:rerun-if-changed=../ports/services");
+        println!("cargo:rerun-if-changed=../sdk/c");
+        let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+        let python_build = out.join("python-service");
         let status = std::process::Command::new("make")
             .args(["-C", "ports/python", "-j4"])
+            .arg(format!("BUILD={}", python_build.display()))
+            .arg("EXTRA_CFLAGS=-mcmodel=large")
             .current_dir(&root)
             .status()
-            .expect("run ExpPython build");
-        assert!(status.success(), "ExpPython build failed");
-        println!(
-            "cargo:rustc-link-search=native={}",
-            root.join("build/python").display()
-        );
-        println!("cargo:rustc-link-lib=static=expos_python");
+            .expect("build isolated MicroPython");
+        assert!(status.success(), "MicroPython service build failed");
+        let status = std::process::Command::new("cc")
+            .args([
+                "-Os",
+                "-ffreestanding",
+                "-fno-pie",
+                "-no-pie",
+                "-fno-stack-protector",
+                "-mno-red-zone",
+                "-mgeneral-regs-only",
+                "-mcmodel=large",
+                "-nostdlib",
+                "-static",
+                "-Wl,--build-id=none",
+                "-Wl,--gc-sections",
+                "-Wl,-T,ports/services/service.ld",
+                "-I",
+                "sdk/c",
+                "ports/services/python_entry.c",
+            ])
+            .arg(python_build.join("libexpos_python.a"))
+            .arg("-o")
+            .arg(out.join("python-service.elf"))
+            .current_dir(&root)
+            .status()
+            .expect("link isolated MicroPython");
+        assert!(status.success(), "MicroPython service link failed");
+        println!("cargo:rerun-if-changed=../crates/expos-core/src");
+        let http_build = out.join("http-service");
+        let status = std::process::Command::new("cargo")
+            .args([
+                "build",
+                "--release",
+                "--manifest-path",
+                "ports/services/http/Cargo.toml",
+                "--target",
+                "x86_64-unknown-none",
+            ])
+            .arg("--target-dir")
+            .arg(&http_build)
+            .env(
+                "CARGO_ENCODED_RUSTFLAGS",
+                "-Ccode-model=large\u{1f}-Crelocation-model=static",
+            )
+            .current_dir(&root)
+            .status()
+            .expect("build HTTP service");
+        assert!(status.success(), "HTTP service build failed");
+        let status = std::process::Command::new("ld")
+            .args(["-T", "ports/services/service.ld", "--gc-sections"])
+            .arg("-o")
+            .arg(out.join("http-service.elf"))
+            .arg(http_build.join("x86_64-unknown-none/release/libexpos_http_service.a"))
+            .arg(python_build.join("libexpos_python.a"))
+            .current_dir(&root)
+            .status()
+            .expect("link HTTP service");
+        assert!(status.success(), "HTTP service link failed");
+        let network_build = out.join("network-service");
+        let status = std::process::Command::new("cargo")
+            .args([
+                "build",
+                "--release",
+                "--manifest-path",
+                "ports/services/network/Cargo.toml",
+                "--target",
+                "x86_64-unknown-none",
+            ])
+            .arg("--target-dir")
+            .arg(&network_build)
+            .env(
+                "CARGO_ENCODED_RUSTFLAGS",
+                "-Ccode-model=large\u{1f}-Crelocation-model=static\u{1f}--cfg=polyval_force_soft\u{1f}--cfg=aes_force_soft",
+            )
+            .current_dir(&root)
+            .status()
+            .expect("build network service");
+        assert!(status.success(), "network service build failed");
+        let status = std::process::Command::new("ld")
+            .args(["-T", "ports/services/service.ld", "--gc-sections"])
+            .arg("-o")
+            .arg(out.join("network-service.elf"))
+            .arg(network_build.join("x86_64-unknown-none/release/libexpos_network_service.a"))
+            .arg(python_build.join("libexpos_python.a"))
+            .current_dir(&root)
+            .status()
+            .expect("link network service");
+        assert!(status.success(), "network service link failed");
     }
     let output_directory = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
     for (source, output_name) in [

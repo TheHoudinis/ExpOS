@@ -15,6 +15,7 @@ const POLICY_BROWSER: u8 = 1 << 2;
 static POLICY: AtomicU8 = AtomicU8::new(POLICY_NETWORK | POLICY_PYTHON | POLICY_BROWSER);
 static NX_ACTIVE: AtomicBool = AtomicBool::new(false);
 static SMEP_ACTIVE: AtomicBool = AtomicBool::new(false);
+static SMAP_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub fn configure(network: bool, python: bool, browser: bool) {
     let mut policy = 0;
@@ -64,20 +65,25 @@ pub fn smep_active() -> bool {
     SMEP_ACTIVE.load(Ordering::Acquire)
 }
 
+pub fn smap_active() -> bool {
+    SMAP_ACTIVE.load(Ordering::Acquire)
+}
+
 pub fn paranoid_cpu_ready() -> bool {
     nx_active() && smep_active()
 }
 
 /// Enable architectural defenses supported by this CPU.
 ///
-/// CR0.WP is unconditional. NXE and SMEP are enabled only after CPUID reports
-/// them, so the same image retains a diagnostic boot path on older x86_64 CPUs.
+/// CR0.WP is unconditional. NXE, SMEP and SMAP require CPUID support,
+/// so the same image retains a diagnostic boot path on older x86_64 CPUs.
 pub fn enable_cpu_hardening() {
     let maximum_extended = core::arch::x86_64::__cpuid(0x8000_0000).eax;
     let nx = maximum_extended >= 0x8000_0001
         && core::arch::x86_64::__cpuid(0x8000_0001).edx & (1 << 20) != 0;
     let maximum_basic = core::arch::x86_64::__cpuid(0).eax;
     let smep = maximum_basic >= 7 && core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 7) != 0;
+    let smap = maximum_basic >= 7 && core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 20) != 0;
 
     unsafe {
         let mut cr0: u64;
@@ -85,7 +91,7 @@ pub fn enable_cpu_hardening() {
         cr0 |= 1 << 16; // supervisor writes must respect read-only mappings
         core::arch::asm!("mov cr0, {}", in(reg) cr0, options(nomem, nostack, preserves_flags));
 
-        if nx {
+        {
             let mut low: u32;
             let mut high: u32;
             core::arch::asm!(
@@ -95,7 +101,10 @@ pub fn enable_cpu_hardening() {
                 out("edx") high,
                 options(nomem, nostack, preserves_flags)
             );
-            low |= 1 << 11; // EFER.NXE
+            low &= !1; // EFER.SCE: only the admitted INT 0x80 gate is supported
+            if nx {
+                low |= 1 << 11; // EFER.NXE
+            }
             core::arch::asm!(
                 "wrmsr",
                 in("ecx") 0xC000_0080_u32,
@@ -105,22 +114,42 @@ pub fn enable_cpu_hardening() {
             );
         }
 
-        if smep {
+        // Do not inherit an unowned fast entry point from firmware/bootloaders.
+        if core::arch::x86_64::__cpuid(1).edx & (1 << 11) != 0 {
+            core::arch::asm!(
+                "wrmsr", in("ecx") 0x174_u32, in("eax") 0_u32, in("edx") 0_u32,
+                options(nostack, preserves_flags)
+            ); // IA32_SYSENTER_CS=0 makes SYSENTER fault at CPL3
+        }
+
+        // Clear AC before SMAP is enabled, including on AP entry. Interrupt
+        // stubs also clear it: CPL3 can set AC using POPF without privilege.
+        core::arch::asm!("pushfq", "and qword ptr [rsp], -262145", "popfq");
+        {
             let mut cr4: u64;
             core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
-            cr4 |= 1 << 20;
+            // Forms cannot write GS base or access unsaved extended state.
+            cr4 &= !((1 << 16) | (1 << 18)); // FSGSBASE, OSXSAVE
+            if smep {
+                cr4 |= 1 << 20;
+            }
+            if smap {
+                cr4 |= 1 << 21;
+            }
             core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack, preserves_flags));
         }
     }
     NX_ACTIVE.store(nx, Ordering::Release);
     SMEP_ACTIVE.store(smep, Ordering::Release);
+    SMAP_ACTIVE.store(smap, Ordering::Release);
 }
 
 pub fn log_cpu_hardening() {
     crate::slog!(
-        "EXPOS_CPU_HARDENING wp=true nx={} smep={} form_wx={}\r\n",
+        "EXPOS_CPU_HARDENING wp=true nx={} smep={} form_wx={} smap={}\r\n",
         nx_active(),
         smep_active(),
-        nx_active()
+        nx_active(),
+        smap_active()
     );
 }

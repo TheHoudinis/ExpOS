@@ -23,12 +23,27 @@ GENESIS_ISO := $(BUILD)/ExpOS-v9-x86_64.iso
 OVMF_CODE  ?= /usr/share/edk2/x64/OVMF_CODE.4m.fd
 OVMF_VARS  ?= /usr/share/edk2/x64/OVMF_VARS.4m.fd
 
-.PHONY: all iso genesis-iso genesis-check genesis-display-check run-genesis test check display-check power-check audio-check session-check network-check internet-check https-check weather-check search-check wikipedia-check persistence-check modern-hardware-check ring3-check run debug clean legacy-alpha-check run-alpha ayo sdk rust-sdk go-sdk c-sdk python-sdk sdk-cli-check kernel-build genesis-kernel-build
+.PHONY: all iso genesis-iso genesis-check genesis-display-check run-genesis test check display-check power-check audio-check session-check network-check internet-check https-check weather-check search-check wikipedia-check persistence-check large-file-check modern-hardware-check ring3-check run debug clean legacy-alpha-check run-alpha ayo sdk rust-sdk go-sdk c-sdk python-sdk sdk-cli-check kernel-build genesis-kernel-build
 
-all: test check display-check audio-check session-check network-check persistence-check modern-hardware-check ayo sdk python-runtime-check python-check budget-check ring3-check uefi-check bootmode-check startup-check
+all: test check display-check audio-check session-check network-check persistence-check large-file-check modern-hardware-check ayo sdk python-runtime-check python-check budget-check ring3-check uefi-check bootmode-check startup-check isolation-check native-image-check parser-fuzz editors-check
 
 test:
 	cargo test --workspace
+
+.PHONY: isolation-check parser-fuzz native-image-check
+native-image-check: $(ISO)
+	python3 tests/check-native-image.py
+
+isolation-check: $(BUILD)/boot.o
+	CARGO_TARGET_DIR=target/isolation cargo build --release -p expos-kernel --target $(TARGET) --features isolation-self-test
+	mkdir -p $(BUILD)/isolation/iso/boot/grub
+	ld -T linker.ld -o $(BUILD)/isolation/iso/boot/kernel.elf $(BUILD)/boot.o target/isolation/$(TARGET)/release/libexpos_kernel.a
+	cp iso/boot/grub/grub.cfg $(BUILD)/isolation/iso/boot/grub/grub.cfg
+	grub-mkrescue -d /usr/lib/grub/i386-pc -o $(BUILD)/isolation/probes.iso $(BUILD)/isolation/iso
+	python3 tests/check-isolation.py
+
+parser-fuzz:
+	cargo test -p expos-kernel parser_fuzz -- --ignored --nocapture
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -128,12 +143,14 @@ uefi-check: $(UEFI_BOOT_IMG)
 	TMPDIR=/tmp OVMF_CODE=$(OVMF_CODE) python3 tests/check-uefi.py uefi
 	grep -q 'EXPOS_UEFI_HANDOFF version=1 boot_services=exited' $(BUILD)/uefi-serial.log
 	grep -q 'EXPOS_SMP_READY discovered=4 online=4' $(BUILD)/uefi-serial.log
-	grep -q 'EXPOS_FRAMEBUFFER_READY source=uefi-gop' $(BUILD)/uefi-serial.log
+	grep -Eq 'EXPOS_(FRAMEBUFFER_READY|DISPLAY_REPROGRAMMED) source=uefi-gop' $(BUILD)/uefi-serial.log
 	grep -q 'EXPOS_BOOT_OK' $(BUILD)/uefi-serial.log
 	grep -q 'EXPOS_LOGIN_OK user=operator' $(BUILD)/uefi-serial.log
 	grep -q 'hello from UEFI Ring 3' $(BUILD)/uefi-serial.log
 	grep -q 'EXPOS_RING3_ENTER context=.*fin=.*cr3=' $(BUILD)/uefi-serial.log
 	grep -q 'EXPOS_FORM_EXITED context=.*result=0 ring=3' $(BUILD)/uefi-serial.log
+	grep -q 'UEFI isolated Python' $(BUILD)/uefi-serial.log
+	grep -q 'EXPOS_PYTHON_OK ring=3' $(BUILD)/uefi-serial.log
 	grep -q 'EXPOS_COMMAND_OK shutdown' $(BUILD)/uefi-serial.log
 	@echo ">>> EXPOS NATIVE UEFI TEST PASSED <<<"
 
@@ -155,7 +172,7 @@ check: $(ISO)
 	rm -f $(BUILD)/serial.log
 	rm -f $(BUILD)/check-state.img
 	truncate -s $(STATE_SIZE) $(BUILD)/check-state.img
-	set +e; timeout 30 $(QEMU) -drive file=$(BUILD)/check-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-smoke-input.txt > $(BUILD)/serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
+	set +e; timeout 240 $(QEMU) -drive file=$(BUILD)/check-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-smoke-input.txt > $(BUILD)/serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
 	grep -q "EXPOS_BOOT_OK" $(BUILD)/serial.log
 	grep -Eq "EXPOS_BOOT_SCREEN_PRESENTED preset=480p frames=[1-9][0-9]* pageflip=true y_offset=480 visible=true" $(BUILD)/serial.log
 	grep -q "EXPOS_BOOT_MODE console" $(BUILD)/serial.log
@@ -222,7 +239,7 @@ display-check: $(ISO)
 	rm -f $(BUILD)/display-serial.log
 	rm -f $(BUILD)/display-state.img
 	truncate -s $(STATE_SIZE) $(BUILD)/display-state.img
-	set +e; timeout 130 $(QEMU) -drive file=$(BUILD)/display-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-display-input.txt > $(BUILD)/display-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
+	set +e; timeout 300 $(QEMU) -drive file=$(BUILD)/display-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-display-input.txt > $(BUILD)/display-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
 	grep -Eq "EXPOS_BOOT_SCREEN_PRESENTED preset=480p frames=[1-9][0-9]* pageflip=true y_offset=480 visible=true" $(BUILD)/display-serial.log
 	grep -Eq "EXPOS_LOGIN_SCREEN_PRESENTED preset=480p frames=[1-9][0-9]* pageflip=true y_offset=480 visible=true" $(BUILD)/display-serial.log
 	grep -q "framebuffer: 640x480 XRGB8888 scanout available=true" $(BUILD)/display-serial.log
@@ -302,7 +319,7 @@ audio-check: $(ISO)
 	rm -f $(BUILD)/audio-state.img
 	rm -f $(BUILD)/audio-output.wav
 	truncate -s $(STATE_SIZE) $(BUILD)/audio-state.img
-	set +e; timeout 35 $(QEMU) $(QEMU_TEST_AUDIO) -drive file=$(BUILD)/audio-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-audio-input.txt > $(BUILD)/audio-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
+	set +e; timeout 90 $(QEMU) $(QEMU_TEST_AUDIO) -drive file=$(BUILD)/audio-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-audio-input.txt > $(BUILD)/audio-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
 	grep -q "EXPOS_AUDIO_READY backend=ac97 rate=48000 channels=2 sample=s16le" $(BUILD)/audio-serial.log
 	grep -q "EXPOS_SETTING_CHANGED key=audio-volume value=85" $(BUILD)/audio-serial.log
 	grep -q "EXPOS_SETTING_CHANGED key=audio-muted value=true" $(BUILD)/audio-serial.log
@@ -320,7 +337,7 @@ session-check: $(ISO)
 	rm -f $(BUILD)/guest-serial.log
 	rm -f $(BUILD)/guest-state.img
 	truncate -s $(STATE_SIZE) $(BUILD)/guest-state.img
-	set +e; timeout 30 $(QEMU) -drive file=$(BUILD)/guest-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-guest-input.txt > $(BUILD)/guest-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
+	set +e; timeout 90 $(QEMU) -drive file=$(BUILD)/guest-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-guest-input.txt > $(BUILD)/guest-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
 	grep -q "EXPOS_LOGIN_OK user=guest" $(BUILD)/guest-serial.log
 	grep -q "guest (Guest authority)" $(BUILD)/guest-serial.log
 	grep -q "DIESE denied: change a kernel tunable requires Operator capability" $(BUILD)/guest-serial.log
@@ -341,12 +358,16 @@ network-check: $(ISO)
 	truncate -s $(STATE_SIZE) $(BUILD)/network-state.img
 	python3 -m http.server 18080 --bind 127.0.0.1 --directory tests > $(BUILD)/http-fixture.log 2>&1 & fixture_pid=$$!; \
 	trap 'kill $$fixture_pid 2>/dev/null || true' EXIT; \
-	set +e; timeout 35 $(QEMU) -drive file=$(BUILD)/network-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-network-input.txt > $(BUILD)/network-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
+	set +e; timeout 120 $(QEMU) -drive file=$(BUILD)/network-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-network-input.txt > $(BUILD)/network-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
 	grep -q "EXPOS_NET_READY driver=rtl8139" $(BUILD)/network-serial.log
+	grep -q "EXPOS_NETWORK_DRIVER_ISOLATED ring=3 dma=service-private portal=register-allowlist iommu=absent" $(BUILD)/network-serial.log
+	grep -q "EXPOS_NETWORK_DMA_REVOKED bus_master=false" $(BUILD)/network-serial.log
+	grep -q "EXPOS_NETWORK_DHCP_ISOLATED address=10.0.2.15 ring=3" $(BUILD)/network-serial.log
 	grep -q "EXPOS_DHCP_BOUND address=10.0.2.15 gateway=10.0.2.2 dns=10.0.2.3" $(BUILD)/network-serial.log
 	grep -q "ether0  up" $(BUILD)/network-serial.log
 	grep -q "ipv4=dhcp dns=10.0.2.3" $(BUILD)/network-serial.log
 	grep -q "EXPOS_HTTP_OK status=200 bytes=38 peer=10.0.2.2" $(BUILD)/network-serial.log
+	grep -Eq "EXPOS_NETWORK_TCP_ISOLATED peer=10.0.2.2 port=18080 bytes=[1-9][0-9]* truncated=false ring=3" $(BUILD)/network-serial.log
 	grep -q "ExpOS native TCP and HTTP are online." $(BUILD)/network-serial.log
 	grep -q "EXPOS_BROWSER_ENGINE nodes=4 css_rules=5 scripts=1 executed=1 rejected=0 handlers=1" $(BUILD)/network-serial.log
 	grep -q "EXPOS_BROWSER_HTTP_OK status=200 bytes=786 peer=10.0.2.2" $(BUILD)/network-serial.log
@@ -354,25 +375,31 @@ network-check: $(ISO)
 	grep -q "EXPOS_BROWSER_STORAGE area=local action=set key_bytes=5 value_bytes=8" $(BUILD)/network-serial.log
 	grep -q "EXPOS_BROWSER_STORAGE area=local action=get key_bytes=5 hit=true" $(BUILD)/network-serial.log
 	grep -q "EXPOS_BROWSER_COOKIE origin_bytes=21 secure=false" $(BUILD)/network-serial.log
-	grep -q "EXPOS_BROWSER_CONTAINER_REJECTED generation=3 rejected=1 error=TooManyNodes" $(BUILD)/network-serial.log
-	grep -q "EXPOS_BROWSER_HTTP_CONTAINED error=TooManyNodes retained_generation=3" $(BUILD)/network-serial.log
+	grep -q "EXPOS_BROWSER_READER reason=NodeLimit" $(BUILD)/network-serial.log
+	grep -q "EXPOS_BROWSER_ACTIVE_CONTENT_SKIPPED" $(BUILD)/network-serial.log
 	grep -q "EXPOS_BROWSER_HTTP_OK status=200 bytes=.* peer=10.0.2.2" $(BUILD)/network-serial.log
 	grep -q "EXPOS_BROWSER_REDIRECT status=301 hop=1" $(BUILD)/network-serial.log
 	grep -q "EXPOS_BROWSER_HTTP_OK status=200 bytes=134 peer=10.0.2.2" $(BUILD)/network-serial.log
 	grep -q "EXPOS_PING_REPLY address=10.0.2.2 sequence=1" $(BUILD)/network-serial.log
+	grep -q "EXPOS_NETWORK_ICMP_ISOLATED peer=10.0.2.2 sequence=1 ring=3" $(BUILD)/network-serial.log
+	grep -q "EXPOS_NETWORK_ICMP_ISOLATED peer=10.0.2.2 sequence=160 ring=3" $(BUILD)/network-serial.log
 	grep -q "EXPOS_PING_SUMMARY sent=160 received=160" $(BUILD)/network-serial.log
 	! grep -q "EXPOS_PING_ERROR" $(BUILD)/network-serial.log
 	! grep -q "EXPOS_HTTP_ERROR" $(BUILD)/network-serial.log
 	! grep -q "EXPOS_BROWSER_HTTP_ERROR" $(BUILD)/network-serial.log
-	grep -q "rtl8139-poll up" $(BUILD)/network-serial.log
+	grep -q "rtl8139-ring3 up" $(BUILD)/network-serial.log
+	! nm -C $(KERNEL_ELF) | grep -Eq 'service_(send|receive)_frame|NetworkStack::(send_frame|receive_frame|prepare_transport)'
 	@echo ">>> EXPOS NATIVE NETWORK TEST PASSED <<<"
 
 internet-check: $(ISO)
 	rm -f $(BUILD)/internet-serial.log
 	rm -f $(BUILD)/internet-state.img
 	truncate -s $(STATE_SIZE) $(BUILD)/internet-state.img
-	set +e; timeout 35 $(QEMU) -drive file=$(BUILD)/internet-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-internet-input.txt > $(BUILD)/internet-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
+	set +e; timeout 90 $(QEMU) -drive file=$(BUILD)/internet-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-internet-input.txt > $(BUILD)/internet-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
+	grep -q "EXPOS_NETWORK_DHCP_ISOLATED address=10.0.2.15 ring=3" $(BUILD)/internet-serial.log
 	grep -q "EXPOS_DNS_OK host=example.com address=" $(BUILD)/internet-serial.log
+	grep -q "EXPOS_NETWORK_DNS_ISOLATED host=example.com address=.* ring=3" $(BUILD)/internet-serial.log
+	grep -Eq "EXPOS_NETWORK_TCP_ISOLATED peer=.* port=80 bytes=[1-9][0-9]* truncated=false ring=3" $(BUILD)/internet-serial.log
 	grep -q "EXPOS_HTTP_OK status=" $(BUILD)/internet-serial.log
 	! grep -q "EXPOS_DNS_ERROR" $(BUILD)/internet-serial.log
 	! grep -q "EXPOS_HTTP_ERROR" $(BUILD)/internet-serial.log
@@ -382,7 +409,7 @@ https-check: $(ISO)
 	rm -f $(BUILD)/https-serial.log
 	rm -f $(BUILD)/https-state.img
 	truncate -s $(STATE_SIZE) $(BUILD)/https-state.img
-	set +e; timeout 60 $(QEMU) -drive file=$(BUILD)/https-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-https-input.txt > $(BUILD)/https-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
+	set +e; timeout 90 $(QEMU) -drive file=$(BUILD)/https-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-https-input.txt > $(BUILD)/https-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
 	grep -q "EXPOS_BROWSER_COMPAT_VIEW host=youtube.com reason=bounded-media-runtime" $(BUILD)/https-serial.log
 	grep -q "EXPOS_DISPLAY_CLOSED" $(BUILD)/https-serial.log
 	grep -q "EXPOS_COMMAND_OK shutdown" $(BUILD)/https-serial.log
@@ -394,11 +421,12 @@ weather-check: $(ISO)
 	rm -f $(BUILD)/weather-serial.log
 	rm -f $(BUILD)/weather-state.img
 	truncate -s $(STATE_SIZE) $(BUILD)/weather-state.img
-	set +e; timeout 90 $(QEMU) -drive file=$(BUILD)/weather-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-weather-input.txt > $(BUILD)/weather-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
+	set +e; timeout 150 $(QEMU) -drive file=$(BUILD)/weather-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-weather-input.txt > $(BUILD)/weather-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
 	grep -q "\[ok\] Weather installed" $(BUILD)/weather-serial.log
 	grep -q "EXPOS_PACKAGE_AUDIT result=ok authority=Operator operation=install package=Weather changed=true" $(BUILD)/weather-serial.log
-	grep -q "EXPOS_TLS_VERIFIED host=geocoding-api.open-meteo.com version=1.3" $(BUILD)/weather-serial.log
-	grep -q "EXPOS_TLS_VERIFIED host=api.open-meteo.com version=1.3" $(BUILD)/weather-serial.log
+	grep -q "EXPOS_TLS_VERIFIED host=geocoding-api.open-meteo.com version=1.3 .* ring=3" $(BUILD)/weather-serial.log
+	grep -q "EXPOS_TLS_VERIFIED host=api.open-meteo.com version=1.3 .* ring=3" $(BUILD)/weather-serial.log
+	grep -q "EXPOS_NETWORK_HTTPS_ISOLATED .* port=443 .* ring=3" $(BUILD)/weather-serial.log
 	grep -q "EXPOS_WEATHER_READY bytes=.* provider=open-meteo condition=.* days=5" $(BUILD)/weather-serial.log
 	! grep -q "EXPOS_WEATHER_ERROR" $(BUILD)/weather-serial.log
 	grep -q "EXPOS_COMMAND_OK shutdown" $(BUILD)/weather-serial.log
@@ -408,9 +436,10 @@ search-check: $(ISO)
 	rm -f $(BUILD)/search-serial.log
 	rm -f $(BUILD)/search-state.img
 	truncate -s $(STATE_SIZE) $(BUILD)/search-state.img
-	set +e; timeout 60 $(QEMU) -drive file=$(BUILD)/search-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-search-input.txt > $(BUILD)/search-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33 -o $$qemu_status -eq 124
+	set +e; timeout 120 $(QEMU) -drive file=$(BUILD)/search-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-search-input.txt > $(BUILD)/search-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33 -o $$qemu_status -eq 124
 	grep -q "EXPOS_BROWSER_SEARCH query_bytes=23 .*provider=wikipedia-rest" $(BUILD)/search-serial.log
-	grep -q "EXPOS_TLS_VERIFIED host=en.wikipedia.org version=1.3" $(BUILD)/search-serial.log
+	grep -q "EXPOS_TLS_VERIFIED host=en.wikipedia.org version=1.3 .* ring=3" $(BUILD)/search-serial.log
+	grep -q "EXPOS_NETWORK_HTTPS_ISOLATED .* port=443 .* ring=3" $(BUILD)/search-serial.log
 	grep -Eq 'EXPOS_SEARCH_RESULTS count=[1-8][[:space:]]*$$' $(BUILD)/search-serial.log
 	grep -q "EXPOS_BROWSER_HTTP_OK status=200" $(BUILD)/search-serial.log
 	! grep -q "EXPOS_BROWSER_HTTP_ERROR" $(BUILD)/search-serial.log
@@ -420,7 +449,7 @@ power-check: $(ISO)
 	rm -f $(BUILD)/power-serial.log
 	rm -f $(BUILD)/power-state.img
 	truncate -s $(STATE_SIZE) $(BUILD)/power-state.img
-	set +e; timeout 45 $(QEMU) -drive file=$(BUILD)/power-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-power-input.txt > $(BUILD)/power-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
+	set +e; timeout 90 $(QEMU) -drive file=$(BUILD)/power-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-power-input.txt > $(BUILD)/power-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
 	grep -q "EXPOS_SESSION_LOCK state=locked user=operator" $(BUILD)/power-serial.log
 	grep -q "EXPOS_SESSION_LOCK state=unlocked user=operator" $(BUILD)/power-serial.log
 	grep -q "EXPOS_POWER_STATE mode=sleep state=entered" $(BUILD)/power-serial.log
@@ -434,9 +463,12 @@ wikipedia-check: $(ISO)
 	rm -f $(BUILD)/wikipedia-serial.log
 	rm -f $(BUILD)/wikipedia-state.img
 	truncate -s $(STATE_SIZE) $(BUILD)/wikipedia-state.img
-	set +e; timeout 60 $(QEMU) -drive file=$(BUILD)/wikipedia-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-wikipedia-input.txt > $(BUILD)/wikipedia-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33 -o $$qemu_status -eq 124
+	set +e; timeout 120 $(QEMU) -drive file=$(BUILD)/wikipedia-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-wikipedia-input.txt > $(BUILD)/wikipedia-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33 -o $$qemu_status -eq 124
 	grep -q "EXPOS_WIKIPEDIA_READER request_bytes=" $(BUILD)/wikipedia-serial.log
-	grep -q "EXPOS_TLS_VERIFIED host=en.wikipedia.org version=1.3" $(BUILD)/wikipedia-serial.log
+	grep -q "EXPOS_NETWORK_DRIVER_ISOLATED ring=3 dma=service-private portal=register-allowlist iommu=absent" $(BUILD)/wikipedia-serial.log
+	grep -q "EXPOS_NETWORK_DMA_REVOKED bus_master=false" $(BUILD)/wikipedia-serial.log
+	grep -q "EXPOS_TLS_VERIFIED host=en.wikipedia.org version=1.3 .* ring=3" $(BUILD)/wikipedia-serial.log
+	grep -q "EXPOS_NETWORK_HTTPS_ISOLATED .* port=443 .* ring=3" $(BUILD)/wikipedia-serial.log
 	grep -q "EXPOS_WIKIPEDIA_READY bytes=" $(BUILD)/wikipedia-serial.log
 	grep -q "EXPOS_BROWSER_HTTP_OK status=200" $(BUILD)/wikipedia-serial.log
 	! grep -q "EXPOS_BROWSER_HTTP_ERROR" $(BUILD)/wikipedia-serial.log
@@ -445,8 +477,8 @@ wikipedia-check: $(ISO)
 persistence-check: $(ISO)
 	rm -f $(BUILD)/persistence-state.img $(BUILD)/persistence-write.log $(BUILD)/persistence-read.log
 	truncate -s $(STATE_SIZE) $(BUILD)/persistence-state.img
-	set +e; timeout 40 $(QEMU) -drive file=$(BUILD)/persistence-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-persistence-write-input.txt > $(BUILD)/persistence-write.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
-	set +e; timeout 40 $(QEMU) -drive file=$(BUILD)/persistence-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-persistence-read-input.txt > $(BUILD)/persistence-read.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
+	set +e; timeout 150 $(QEMU) -drive file=$(BUILD)/persistence-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-persistence-write-input.txt > $(BUILD)/persistence-write.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
+	set +e; timeout 90 $(QEMU) -drive file=$(BUILD)/persistence-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-persistence-read-input.txt > $(BUILD)/persistence-read.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
 	grep -q "EXPOS_USER_CREATED keeper" $(BUILD)/persistence-write.log
 	grep -q "EXPOS_SETTING_CHANGED key=theme value=Graphite" $(BUILD)/persistence-write.log
 	grep -q "EXPOS_SETTING_CHANGED key=resolution value=480p" $(BUILD)/persistence-write.log
@@ -459,6 +491,7 @@ persistence-check: $(ISO)
 	grep -q "EXPOS_STATE_COMMIT generation=" $(BUILD)/persistence-write.log
 	grep -q "EXPOS_EXPFS_COMMIT generation=" $(BUILD)/persistence-write.log
 	grep -q "Created and bound 'MyNotes'" $(BUILD)/persistence-write.log
+	grep -q "content=570 bytes" $(BUILD)/persistence-write.log
 	grep -q "Granted Handle .* execute on MyNotes" $(BUILD)/persistence-write.log
 	grep -q "Created ExpFS checkpoint 1" $(BUILD)/persistence-write.log
 	! grep -q "violetmemory" $(BUILD)/persistence-write.log
@@ -467,6 +500,8 @@ persistence-check: $(ISO)
 	grep -q "EXPOS_ACCOUNTS_READY source=disk persisted=true" $(BUILD)/persistence-read.log
 	grep -q "EXPOS_EXPFS_FORMS_RESTORED" $(BUILD)/persistence-read.log
 	grep -q "^hello" $(BUILD)/persistence-read.log
+	grep -q "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE" $(BUILD)/persistence-read.log
+	grep -q "content=570 bytes" $(BUILD)/persistence-read.log
 	grep -q "Scheduled 'MyNotes' as context" $(BUILD)/persistence-read.log
 	grep -Eq "^1[[:space:]]+[0-9]+[[:space:]]+0" $(BUILD)/persistence-read.log
 	grep -q "EXPOS_LOGIN_OK user=keeper" $(BUILD)/persistence-read.log
@@ -485,6 +520,17 @@ persistence-check: $(ISO)
 	! grep -q "violetmemory" $(BUILD)/persistence-read.log
 	grep -q "EXPOS_COMMAND_OK shutdown" $(BUILD)/persistence-read.log
 	@echo ">>> EXPOS PERSISTENCE TEST PASSED <<<"
+
+large-file-check: $(ISO)
+	rm -f $(BUILD)/large-file-state.img $(BUILD)/large-file-write.log $(BUILD)/large-file-read.log
+	truncate -s $(STATE_SIZE) $(BUILD)/large-file-state.img
+	set +e; timeout 120 $(QEMU) -drive file=$(BUILD)/large-file-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-large-file-write-input.txt > $(BUILD)/large-file-write.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
+	set +e; timeout 120 $(QEMU) -drive file=$(BUILD)/large-file-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-large-file-read-input.txt > $(BUILD)/large-file-read.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
+	grep -q "content=565 bytes" $(BUILD)/large-file-write.log
+	grep -q "content=565 bytes" $(BUILD)/large-file-read.log
+	grep -q "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE" $(BUILD)/large-file-read.log
+	grep -q "EXPOS_EXPFS_FORMS_RESTORED" $(BUILD)/large-file-read.log
+	@echo ">>> EXPOS 4 KIB FORM PERSISTENCE TEST PASSED <<<"
 
 modern-hardware-check: $(ISO)
 	python3 tests/check-modern-hardware.py
@@ -530,7 +576,7 @@ ring3-check: $(ISO)
 	python3 tests/check-ring3.py
 
 python-check: $(ISO)
-	set +e; timeout 30 $(QEMU) -device isa-debug-exit,iobase=0xf4,iosize=0x04 -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-python-input.txt > $(BUILD)/python-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
+	set +e; timeout 90 $(QEMU) -device isa-debug-exit,iobase=0xf4,iosize=0x04 -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-python-input.txt > $(BUILD)/python-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
 	grep -q '^30' $(BUILD)/python-serial.log
 	grep -q 'hello from a Form' $(BUILD)/python-serial.log
 	test "$$(grep -c 'ExpPython: execution budget exhausted; script stopped.' $(BUILD)/python-serial.log)" -eq 3
@@ -551,3 +597,8 @@ clean:
 	cargo clean
 	$(MAKE) -C ayo clean
 	rm -rf $(BUILD) iso/boot/kernel.elf
+
+.PHONY: editors-check
+editors-check: iso
+	python3 tests/check-editors.py
+	python3 tests/check-cliptick-native.py

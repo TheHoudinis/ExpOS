@@ -565,7 +565,7 @@ impl ExpBudget {
                 ResourceLimit::new(Resource::IpcBytes, 4096, 16_384, 65_536),
                 ResourceLimit::new(Resource::ScratchPages, 16, 64, 256),
                 ResourceLimit::new(Resource::FormOperations, 64, 256, 4096),
-                ResourceLimit::new(Resource::FormBytes, 6144, 6144, 6144),
+                ResourceLimit::new(Resource::FormBytes, 49_152, 49_152, 49_152),
             ],
             total_denials: 0,
         }

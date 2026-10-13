@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import struct
 import sys
 import tarfile
 import tomllib
@@ -41,6 +42,7 @@ class Project:
         self.version = package.get("version", "")
         self.language = package.get("language", "")
         self.entry = build.get("entry", "")
+        self.target = build.get("target", "host")
         self.artifact_override = build.get("artifact", "")
         self.fin = form.get("fin", "")
         self.kind = form.get("kind", "executable")
@@ -54,6 +56,10 @@ class Project:
             raise ProjectError("package.name must be 1-32 safe ASCII characters")
         if not VERSION.fullmatch(self.version):
             raise ProjectError("package.version must be semantic x.y.z form")
+        if self.target not in {"host", "expos-x86_64"}:
+            raise ProjectError("build.target must be host or expos-x86_64")
+        if self.target == "expos-x86_64" and (self.language not in {"c", "rust", "go"} or self.kind != "executable"):
+            raise ProjectError("expos-x86_64 requires a freestanding C, Rust, or Go executable Form")
         if self.language not in LANGUAGES:
             raise ProjectError("package.language must be rust, go, or c")
         for label, values in (
@@ -84,6 +90,8 @@ class Project:
     def artifact(self) -> Path:
         if self.artifact_override:
             return self.local(self.artifact_override)
+        if self.target == "expos-x86_64":
+            return self.build_dir / self.name
         if self.language == "rust":
             return self.root / "target" / "release" / self.name
         return self.build_dir / self.name
@@ -120,17 +128,161 @@ class Project:
         raise ProjectError(f"{action} is unavailable for {self.language}")
 
 
-def execute(command: list[str], root: Path) -> None:
+def execute(command: list[str], root: Path, environment=None) -> None:
     try:
-        subprocess.run(command, cwd=root, check=True)
+        subprocess.run(command, cwd=root, check=True, env=environment)
     except FileNotFoundError as error:
         raise ProjectError(f"required tool is not installed: {command[0]}") from error
     except subprocess.CalledProcessError as error:
         raise ProjectError(f"command failed with status {error.returncode}: {' '.join(command)}") from error
 
 
+def validate_native(payload: bytes) -> None:
+    if len(payload) < 24:
+        raise ProjectError("truncated EXF1 image")
+    magic, version, arch, abi, flags, code, data, bss, entry, reserved = struct.unpack_from("<4s8HI", payload)
+    if (magic, version, arch, abi, flags, reserved) != (b"EXF1", 1, 1, 1, 0, 0):
+        raise ProjectError("unsupported EXF1 header")
+    if not (0 < code <= 4096 and data + bss <= 3840 and entry < code
+            and len(payload) == 24 + code + data and len(payload) <= 4096):
+        raise ProjectError("EXF1 exceeds segment, entry, or 4096-byte Form storage limits")
+
+
+def build_native(project: Project) -> None:
+    if not project.entry:
+        raise ProjectError("native projects require build.entry")
+    if project.language == "go":
+        build_native_go(project)
+        return
+    sdk = Path(__file__).resolve().parents[1] / "c"
+    elf = project.build_dir / "native.elf"
+    if project.language == "rust":
+        execute([os.environ.get("RUSTC", "rustc"), str(project.local(project.entry)),
+                 "--edition=2021", "--crate-type=bin", "--target=x86_64-unknown-none",
+                 "-Copt-level=z", "-Cpanic=abort", "-Ccode-model=large", "-Crelocation-model=static",
+                 "-Cno-redzone=yes", "-Clinker=ld", "-Clink-arg=--build-id=none",
+                 "-Clink-arg=-T" + str(sdk / "native.ld"), "-o", str(elf)], project.root,
+                {**os.environ, "EXPOS_SDK": str(sdk.parent)})
+    else:
+        execute([os.environ.get("CC", "cc"), "-std=c11", "-Os", "-Wall", "-Wextra", "-Werror",
+                 "-m64", "-mcmodel=large", "-mno-red-zone", "-mgeneral-regs-only",
+                 "-ffreestanding", "-fno-pie", "-no-pie", "-fno-stack-protector",
+                 "-fno-asynchronous-unwind-tables", "-fno-unwind-tables", "-fcf-protection=none",
+                 "-nostdlib", "-static", "-Wl,--build-id=none", "-Wl,-z,max-page-size=4096",
+                 "-Wl,-T," + str(sdk / "native.ld"), "-I", str(sdk), str(project.local(project.entry)),
+                 "-o", str(elf)], project.root)
+    raw = elf.read_bytes()
+    # This parser consumes our linker output, never installed package bytes.
+    if raw[:7] != b"\x7fELF\x02\x01\x01" or struct.unpack_from("<HH", raw, 16) != (2, 62):
+        raise ProjectError("compiler did not produce an x86-64 ELF executable")
+    entry, _, shoff = struct.unpack_from("<QQQ", raw, 24)
+    shsize, count, names = struct.unpack_from("<HHH", raw, 58)
+    if shsize != 64 or not 0 < names < count or shoff + count * 64 > len(raw):
+        raise ProjectError("invalid ELF section table")
+    headers = [struct.unpack_from("<IIQQQQIIQQ", raw, shoff + i * 64) for i in range(count)]
+    string_header = headers[names]
+    strings = raw[string_header[4]:string_header[4] + string_header[5]]
+    sections = {}
+    for header in headers:
+        name, kind, flags, address, offset, size, *_ = header
+        label = strings[name:].split(b"\0", 1)[0]
+        if flags & 2 and size:
+            if label not in {b".text", b".data", b".bss"} or label in sections:
+                raise ProjectError(f"unsupported allocated ELF section: {label!r}")
+            expected_flags = 6 if label == b".text" else 3
+            # SHF_X86_64_LARGE is a placement hint, not an access permission.
+            if flags & ~0x10000000 != expected_flags or kind != (8 if label == b".bss" else 1):
+                raise ProjectError("unsupported ELF segment permissions/type")
+            if kind != 8 and offset + size > len(raw):
+                raise ProjectError("truncated ELF segment")
+            sections[label] = (address, size, raw[offset:offset + size] if kind != 8 else b"")
+    code_address, _, code = sections.get(b".text", (0, 0, b""))
+    data_address, _, data = sections.get(b".data", (0x400000001100, 0, b""))
+    bss_address, bss_size, _ = sections.get(b".bss", (data_address + len(data), 0, b""))
+    zero_bytes = bss_address + bss_size - (data_address + len(data))
+    if (code_address != 0x400000000000 or data_address != 0x400000001100
+            or not 0 <= zero_bytes <= 3840 or not code_address <= entry < code_address + len(code)
+            or len(code) + len(data) + 24 > 4096):
+        raise ProjectError("native image layout or 4096-byte Form storage limit exceeded")
+    payload = struct.pack("<4s8HI", b"EXF1", 1, 1, 1, 0, len(code), len(data), zero_bytes,
+                          entry - code_address, 0) + code + data
+    validate_native(payload)
+    project.artifact.parent.mkdir(parents=True, exist_ok=True)
+    project.artifact.write_bytes(payload)
+
+
+def build_native_go(project: Project) -> None:
+    """Compile the bounded freestanding Go profile without a host Go runtime."""
+    try:
+        source = project.local(project.entry).read_text(encoding="ascii")
+    except (OSError, UnicodeError) as error:
+        raise ProjectError(f"cannot read ASCII native Go source: {error}") from error
+    if len(source.encode()) > 4096:
+        raise ProjectError("native Go source exceeds the 4096-byte Form limit")
+    if not re.search(r"\bfunc\s+main\s*\(", source):
+        raise ProjectError("native Go source requires func main()")
+
+    log = re.search(r'\bexpos\.Log\s*\(\s*"((?:[^"\\]|\\.)*)"', source)
+    message = decode_native_string(log.group(1)) if log else b""
+    exit_call = re.search(r"\bexpos\.Exit\s*\(\s*([0-9]+)", source)
+    try:
+        result = int(exit_call.group(1)) if exit_call else 0
+        if not 0 <= result <= 0xFFFF_FFFF_FFFF_FFFF:
+            raise ValueError
+    except ValueError as error:
+        raise ProjectError("native Go exit result must be an unsigned 64-bit integer") from error
+    if len(message) > 4096 - 256:
+        raise ProjectError("native Go log string exceeds its admitted data page")
+
+    code = bytearray(b"\x41\x89\xd4\x41\x89\xcd\x48\xbb")
+    code += struct.pack("<Q", 0x400000001000)
+    if message:
+        code += b"\x66\xc7\x43\x02" + struct.pack("<H", 1)
+        code += b"\x44\x89\x6b\x14"
+        code += b"\x48\xc7\x43\x18" + struct.pack("<I", 256)
+        code += b"\x48\xc7\x43\x20" + struct.pack("<I", len(message))
+        code += native_abi_call()
+    code += b"\x66\xc7\x43\x02" + struct.pack("<H", 8)
+    code += b"\x44\x89\x63\x14\x48\xb8" + struct.pack("<Q", result)
+    code += b"\x48\x89\x43\x18" + native_abi_call() + b"\x0f\x0b"
+    payload = struct.pack(
+        "<4s8HI", b"EXF1", 1, 1, 1, 0, len(code), len(message), 0, 0, 0
+    ) + code + message
+    validate_native(payload)
+    project.artifact.parent.mkdir(parents=True, exist_ok=True)
+    project.artifact.write_bytes(payload)
+
+
+def native_abi_call() -> bytes:
+    return b"\x48\x89\xdf\x48\x8d\x73\x50\x48\xb8" + struct.pack(
+        "<Q", 0x4558504F53414249
+    ) + b"\xcd\x80"
+
+
+def decode_native_string(value: str) -> bytes:
+    output = bytearray()
+    index = 0
+    escapes = {"n": 10, "r": 13, "t": 9, "\\": 92, '"': 34, "'": 39}
+    while index < len(value):
+        character = value[index]
+        index += 1
+        if character == "\\":
+            if index >= len(value) or value[index] not in escapes:
+                raise ProjectError("native Go log uses an unsupported escape")
+            output.append(escapes[value[index]])
+            index += 1
+        elif ord(character) < 0x20 or ord(character) > 0x7E:
+            raise ProjectError("native Go log must be printable ASCII")
+        else:
+            output.append(ord(character))
+    return bytes(output)
+
+
 def build(project: Project) -> None:
     project.build_dir.mkdir(parents=True, exist_ok=True)
+    if project.target == "expos-x86_64":
+        build_native(project)
+        return
     execute(project.command("build"), project.root)
     if not project.artifact.is_file():
         raise ProjectError(
@@ -139,14 +291,16 @@ def build(project: Project) -> None:
 
 
 def test(project: Project) -> None:
-    if project.language == "c":
+    if project.language == "c" or project.target == "expos-x86_64":
         build(project)
-        print("C contract compiled cleanly; add a Form-native test runner as the project grows.")
+        print("Form compiled cleanly; add a Form-native test runner as the project grows.")
         return
     execute(project.command("test"), project.root)
 
 
 def run(project: Project, arguments: list[str]) -> None:
+    if project.target != "host":
+        raise ProjectError("native Forms run in ExpOS; use import-script and execute there")
     build(project)
     execute([str(project.artifact), *arguments], project.root)
 
@@ -169,6 +323,8 @@ def package(project: Project, skip_build: bool) -> Path:
     payload = project.artifact.read_bytes()
     if not payload:
         raise ProjectError("refusing to package an empty artifact")
+    if project.target == "expos-x86_64":
+        validate_native(payload)
     metadata = {
         "schema": 1,
         "name": project.name,
@@ -177,7 +333,8 @@ def package(project: Project, skip_build: bool) -> Path:
         "kind": project.kind,
         "form_abi": FORM_ABI_VERSION,
         "language": project.language,
-        "architectures": project.architectures,
+        "architectures": ["x86_64"] if project.target == "expos-x86_64" else project.architectures,
+        "implementation_format": "exf1" if project.target == "expos-x86_64" else "host",
         "capabilities": project.capabilities,
         "dependencies": project.dependencies,
         "implementation_sha256": hashlib.sha256(payload).hexdigest(),
@@ -225,6 +382,8 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("test", help="run language tests and ABI checks")
     package_parser = commands.add_parser("package", help="create a deterministic Ayo tar artifact")
     package_parser.add_argument("--no-build", action="store_true", help="package an existing artifact")
+    import_parser = commands.add_parser("import-script", help="emit bounded shell commands to import an EXF1 image")
+    import_parser.add_argument("--no-build", action="store_true")
     return result
 
 
@@ -238,10 +397,22 @@ def main(arguments: list[str] | None = None) -> int:
             run(project, options.arguments)
         elif options.command == "test":
             test(project)
+        elif options.command == "import-script":
+            if project.target != "expos-x86_64":
+                raise ProjectError("import-script requires build.target expos-x86_64")
+            if not options.no_build:
+                build(project)
+            payload = project.artifact.read_bytes()
+            validate_native(payload)
+            print(f"mkform {project.name} executable")
+            for offset in range(0, len(payload), 32):
+                print(f"writehex {project.name} {offset} {payload[offset:offset + 32].hex()}")
+            print(f"grant {project.name} execute")
+            print(f"execute {project.name}")
         elif options.command == "package":
             package(project, options.no_build)
         return 0
-    except ProjectError as error:
+    except (ProjectError, OSError) as error:
         print(f"expos: {error}", file=sys.stderr)
         return 1
 

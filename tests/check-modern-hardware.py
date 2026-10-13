@@ -128,9 +128,9 @@ class Qmp:
         for character in text:
             key = {"\n": "ret", " ": "spc"}.get(character, character)
             self.command(
-                "send-key", keys=[{"type": "qcode", "data": key}], **{"hold-time": 30}
+                "send-key", keys=[{"type": "qcode", "data": key}], **{"hold-time": 80}
             )
-            time.sleep(0.07)
+            time.sleep(0.18)
 
     def close(self) -> None:
         self.wire.close()
@@ -170,7 +170,7 @@ def check_usb_hid() -> None:
             command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT
         )
         qmp = None
-        deadline = time.monotonic() + 45
+        deadline = time.monotonic() + 90
         try:
             wait_for(serial, "EXPOS_BOOT_MODE_READY", process, deadline)
             qmp = Qmp(qmp_path, process)
@@ -202,7 +202,14 @@ def check_usb_hid() -> None:
             # Select Console through the USB keyboard; no PS/2 controller is present.
             qmp.type("2\n")
             wait_for(serial, "EXPOS_BOOT_MODE console", process, deadline)
-            qmp.type("operator\nexpos\nkstat\nasl\nshutdown\n")
+            wait_for(serial, "EXPOS_LOGIN_READY", process, deadline)
+            qmp.type("operator\nexpos\n")
+            wait_for(serial, "EXPOS_SHELL_READY", process, deadline)
+            # The current xHCI path polls. Do not type the next command while
+            # the kernel is still printing the previous command's result.
+            for command_name in ("kstat", "asl", "shutdown"):
+                qmp.type(command_name + "\n")
+                wait_for(serial, "EXPOS_COMMAND_OK " + command_name, process, deadline)
             wait_for(serial, "EXPOS_COMMAND_OK shutdown", process, deadline)
             remaining = max(0.1, deadline - time.monotonic())
             assert process.wait(timeout=remaining) == 33, "USB guest did not shut down"

@@ -257,18 +257,38 @@ impl BrowserMediaCache {
     }
 }
 
+// Keep large DOM return slots out of the navigation/click frames. Inlining
+// these constructors otherwise leaves multiple 75 KiB arenas on the live UI stack.
+#[inline(never)]
+fn parse_browser_document(url: &str, source: &str) -> Result<Box<Document>, BrowserError> {
+    expos_core::Document::parse(url, source).map(Box::new)
+}
+
+#[inline(never)]
+fn parse_reader_document(url: &str, source: &str) -> Result<Box<Document>, BrowserError> {
+    Document::parse_reader(url, source).map(Box::new)
+}
+
+#[inline(never)]
+fn parse_search_document(url: &str, source: &str) -> Option<(Box<Document>, u8)> {
+    Document::parse_duckduckgo_results(url, source)
+        .ok()
+        .map(|result| (Box::new(result.document), result.result_count))
+}
+
 impl BrowserContainer {
-    fn new(document: Document) -> Self {
+    fn new(document: Box<Document>) -> Self {
         Self {
-            document: Box::new(document),
+            document,
             generation: 1,
             rejected_loads: 0,
             last_error: None,
         }
     }
 
-    fn replace(&mut self, document: Document) {
-        *self.document = document;
+    fn replace(&mut self, document: Box<Document>) {
+        self.document = document;
+        self.last_error = None;
         self.generation = self.generation.saturating_add(1);
     }
 
@@ -640,7 +660,7 @@ const fn bypass_software_pacing(responsive: bool, damaged_commit: bool) -> bool 
     responsive && damaged_commit
 }
 
-const HOME: &str = "<style>h1{color:#a8d9df;max-width:720px}.hero{background:#182427;border:1px solid #466267;border-radius:18px;padding:14px;max-width:720px;line-height:21px}.card{background:#151c20;border:1px solid #35433f;border-radius:12px;padding:11px;max-width:720px;line-height:20px}.chip{color:#bce8ed;background:#243a3e;border:1px solid #426167;border-radius:16px;padding:6px}button{color:#071f23;background:#9cdce4;border-radius:14px;padding:8px;max-width:260px}</style><title>New tab</title><h1>ExpOS Browser</h1><p id='status' class='hero'>A calm, bounded web workspace with verified TLS, six tab sessions, history, bookmarks, find, external page resources and persistent site data.</p><button id='demo'>Try a local interaction</button><p class='card'>Web bridge: bounded fetch, cookies, local/session storage, external CSS and script, BMP images, and PCM WAV audio. Every queue, body, origin and media buffer has a fixed ceiling.</p><p class='card'>Press N for a new tab, Tab to switch, X to close, F to find, B to bookmark, or / to focus the omnibox.</p><a class='chip' href='expos://about'>Capabilities</a><a class='chip' href='expos://packages'>Packages</a><a class='chip' href='expos://system'>System</a><script>document.title='New tab';document.getElementById('demo').onclick=function(){document.getElementById('status').textContent='The deterministic script engine handled this Material-style action.';document.getElementById('status').style.backgroundColor='#20363a';}</script>";
+const HOME: &str = "<style>h1{color:#a8d9df}a{color:#bce8ed;padding:8px}p{color:#a4aab2}</style><title>New tab</title><h1>Search or enter an address</h1><p>Press / to start.</p><a href='expos://about'>About</a><a href='expos://packages'>Packages</a><a href='expos://system'>System</a>";
 const ABOUT: &str = "<style>h1{color:#a8d9df}.card{background:#151c20;border:1px solid #35433f;border-radius:12px;padding:11px;max-width:720px;line-height:20px}.accent{background:#20363a;border:1px solid #568087;border-radius:16px;padding:12px;max-width:720px}</style><title>About Browser</title><h1>Browser capabilities</h1><p class='accent'>Form-native navigation, verified HTTP/TLS transport, external CSS and deterministic scripts, bounded fetch, origin-partitioned cookies and storage, BMP images, and PCM WAV playback through ExpAudio.</p><p class='card'>This is a contained browser engine, not Blink/V8. It does not promise arbitrary ECMAScript, a standards-complete Web API surface, compressed media or video decoding, extensions, or GPU raster acceleration.</p><a href='expos://home'>New tab</a>";
 const BROWSER_PACKAGES: &str = "<title>Packages</title><h1>Packages</h1><li>Core tools</li><li>Display</li><li>Notes</li><li>Games</li><a href='expos://home'>Home</a>";
 const BROWSER_SYSTEM: &str = "<title>System</title><h1>System</h1><li>480p / 720p / 1080p display</li><li>60 / 75 / 120 / 144 Hz compositor pacing</li><li>Keyboard and mouse</li><li>RTL8139 network</li><a href='expos://home'>Home</a>";
@@ -2174,6 +2194,7 @@ struct DesktopState {
     ayo_transaction_handle: Option<u32>,
     browser_network_handle: Option<u32>,
     apps_network_handle: Option<u32>,
+    apps_execute_handle: Option<u32>,
     settings_radio_handle: Option<u32>,
     app_open: [bool; APP_COUNT],
     app_ever_opened: [bool; APP_COUNT],
@@ -2215,6 +2236,8 @@ struct DesktopState {
     browser_resources: BrowserResourceStats,
     browser_media: Box<BrowserMediaCache>,
     browser_loading: bool,
+    browser_pending_address: [u8; 512],
+    browser_pending_len: usize,
     last_weather_request_ticks: u64,
     terminal_line: [u8; TERMINAL_CAPACITY],
     terminal_len: usize,
@@ -2235,6 +2258,8 @@ struct DesktopState {
     notes_status: &'static str,
     games: crate::games::GameHub,
     native_apps: crate::apps::NativeApps,
+    cliptick: Box<crate::editor::Editor>,
+    writer: Box<crate::editor::Editor>,
     cfc: CfcFin,
     session: crate::session::Session,
     cursor: PointerCursor,
@@ -2461,6 +2486,7 @@ impl DesktopState {
         let active = start_app.unwrap_or(AppKind::Terminal);
         let preferences =
             DesktopPreferences::from_persistent(state::preferences()).load_ui_extension(cfc);
+        crate::console_style::load(cfc);
         audio::set_volume(preferences.audio_volume);
         audio::set_muted(preferences.audio_muted);
         framebuffer::set_font_style(framebuffer::FontStyle::new(
@@ -2560,6 +2586,17 @@ impl DesktopState {
         } else {
             None
         };
+        let apps_execute_handle = broker
+            .issue_for(
+                APPS_FIN,
+                session.authority(),
+                APPS_FIN,
+                STABLE_FIN,
+                Operations::EXECUTE,
+                u64::MAX,
+            )
+            .ok()
+            .map(|handle| handle.id);
         let settings_radio_handle = broker
             .issue_for(
                 SETTINGS_FIN,
@@ -2666,7 +2703,7 @@ impl DesktopState {
         let browser_web_state = crate::expfs_store::load_data_form(cfc, BROWSER_DATA_STATE)
             .map(|(content, length)| BrowserWebState::restore_local(&content[..length]))
             .unwrap_or_default();
-        let mut state = Self {
+        let state = Self {
             server,
             broker,
             app_surfaces,
@@ -2674,6 +2711,7 @@ impl DesktopState {
             ayo_transaction_handle,
             browser_network_handle,
             apps_network_handle,
+            apps_execute_handle,
             settings_radio_handle,
             app_open: core::array::from_fn(|index| start_app == Some(AppKind::ALL[index])),
             app_ever_opened: core::array::from_fn(|index| start_app == Some(AppKind::ALL[index])),
@@ -2697,7 +2735,7 @@ impl DesktopState {
             settings_row: 0,
             settings_notice: "Changes are saved locally.",
             document: BrowserContainer::new(
-                Document::parse("expos://home", HOME).expect("built-in home document"),
+                parse_browser_document("expos://home", HOME).expect("built-in home document"),
             ),
             browser_line: [0; 512],
             browser_len: 0,
@@ -2717,6 +2755,8 @@ impl DesktopState {
             browser_resources: BrowserResourceStats::default(),
             browser_media: Box::new(BrowserMediaCache::new()),
             browser_loading: false,
+            browser_pending_address: [0; 512],
+            browser_pending_len: 0,
             last_weather_request_ticks: 0,
             terminal_line: [0; TERMINAL_CAPACITY],
             terminal_len: 0,
@@ -2737,6 +2777,8 @@ impl DesktopState {
             notes_status,
             games: crate::games::GameHub::new(),
             native_apps,
+            cliptick: crate::editor::Editor::new(cfc, true),
+            writer: crate::editor::Editor::new(cfc, false),
             cfc,
             session,
             cursor: PointerCursor::new(
@@ -2757,10 +2799,28 @@ impl DesktopState {
             display_debug_overlay: false,
             display_restart_requested: false,
         };
-        state.terminal_push("ExpOS terminal");
-        state.terminal_push("Type help for commands. Up/Down recalls history.");
         state.log_browser_engine();
         state
+    }
+
+    fn refresh_editors(&mut self) {
+        self.cliptick.refresh_files();
+        self.writer.refresh_files();
+    }
+
+    fn editor_execute_allowed(&self) -> bool {
+        self.apps_execute_handle.is_some_and(|handle| {
+            self.broker
+                .authorize_requester(
+                    handle,
+                    APPS_FIN,
+                    APPS_FIN,
+                    STABLE_FIN,
+                    Operations::EXECUTE,
+                    0,
+                )
+                .is_ok()
+        })
     }
 
     fn active_surface(&self) -> u32 {
@@ -3099,6 +3159,15 @@ impl DesktopState {
                 return true;
             }
         }
+        if app == AppKind::Apps && self.native_apps.active_index() >= crate::apps::CLIPTICK {
+            let allowed = self.editor_execute_allowed();
+            let editor = if self.native_apps.active_index() == crate::apps::CLIPTICK {
+                &mut self.cliptick
+            } else {
+                &mut self.writer
+            };
+            return editor.click(x, y, rect, self.session.authority(), allowed);
+        }
         if app == AppKind::Apps {
             let generation = self.native_apps.persistence_generation();
             if self.native_apps.handle_app_click(x, y, rect) {
@@ -3163,6 +3232,9 @@ impl DesktopState {
             self.terminal_push("That component is not installed by Genesis.");
             slog!("EXPOS_APP_DENIED app={} genesis-policy\r\n", next.title());
             return;
+        }
+        if next == AppKind::Apps {
+            self.refresh_editors();
         }
         self.normalize_fullscreen();
         let was_closed = !self.app_open[next.index()];
@@ -3554,7 +3626,7 @@ impl DesktopState {
     }
 
     fn navigate(&mut self, url: &str, source: &str) {
-        match Document::parse(url, source) {
+        match parse_browser_document(url, source) {
             Ok(mut document) => {
                 let manifest = ResourceManifest::scan(source).unwrap_or(ResourceManifest::empty());
                 if url.starts_with("http://") || url.starts_with("https://") {
@@ -3584,7 +3656,7 @@ impl DesktopState {
             .cookie_header(origin, &mut cookie_buffer);
         let cookie = (cookie_length != 0)
             .then(|| core::str::from_utf8(&cookie_buffer[..cookie_length]).unwrap_or(""));
-        let response = Box::new(network::browser_get(
+        let response = network::browser_get(
             &self.broker,
             handle_id,
             BROWSER_FIN,
@@ -3592,7 +3664,7 @@ impl DesktopState {
             url,
             accept,
             cookie,
-        )?);
+        )?;
         if let Some(value) = response.set_cookie() {
             self.store_response_cookie(origin, value);
         }
@@ -3848,7 +3920,7 @@ impl DesktopState {
         );
     }
 
-    fn set_document(&mut self, document: Document) {
+    fn set_document(&mut self, document: Box<Document>) {
         let active = self.browser_active_tab;
         if self.browser_history_locked {
             self.browser_history_locked = false;
@@ -4186,7 +4258,7 @@ impl DesktopState {
         self.show_browser_notice(
             "Search results",
             "title('Search results')",
-            "Fast, bounded results from Wikipedia over verified HTTPS.",
+            "Select a result to open it.",
         );
         let mut link_nodes = [usize::MAX; 8];
         let mut link_count = 0;
@@ -4225,6 +4297,38 @@ impl DesktopState {
         }
         self.log_browser_engine();
         applied
+    }
+
+    fn queue_browser_navigation(&mut self, address: &str) {
+        let Some(length) = copy_browser_url(&mut self.browser_pending_address, address.as_bytes())
+        else {
+            self.show_browser_load_error();
+            slog!("EXPOS_BROWSER_HTTP_ERROR error=BadUrl\r\n");
+            return;
+        };
+        self.browser_pending_len = length;
+        self.browser_loading = true;
+        slog!(
+            "EXPOS_BROWSER_NAVIGATION_QUEUED bytes={} source=desktop-event\r\n",
+            length
+        );
+    }
+
+    #[inline(never)]
+    fn process_pending_browser_navigation(&mut self) {
+        if self.browser_pending_len == 0 {
+            return;
+        }
+        let mut address = [0_u8; 512];
+        let length = self.browser_pending_len.min(address.len());
+        address[..length].copy_from_slice(&self.browser_pending_address[..length]);
+        self.browser_pending_len = 0;
+        let address = core::str::from_utf8(&address[..length]).unwrap_or("");
+        slog!(
+            "EXPOS_BROWSER_NAVIGATION_DEQUEUED bytes={} stack=shallow\r\n",
+            length
+        );
+        self.navigate_external_address(address);
     }
 
     fn navigate_address(&mut self, address: &str) {
@@ -4270,7 +4374,7 @@ impl DesktopState {
             // Search results reuse the small home document in place, avoiding
             // a second full DOM allocation while the network frame is live.
             self.navigate("expos://home", HOME);
-            self.navigate_external_address(url);
+            self.queue_browser_navigation(url);
             return;
         }
         let mut unwrapped = [0_u8; 512];
@@ -4280,10 +4384,10 @@ impl DesktopState {
                 "EXPOS_BROWSER_UNWRAP provider=duckduckgo target_bytes={}\r\n",
                 length
             );
-            self.navigate_external_address(target);
+            self.queue_browser_navigation(target);
             return;
         }
-        self.navigate_external_address(address);
+        self.queue_browser_navigation(address);
     }
 
     fn navigate_external_address(&mut self, address: &str) {
@@ -4302,6 +4406,12 @@ impl DesktopState {
             return;
         }
         if self.browser_network_handle.is_none() {
+            self.show_browser_notice(
+                "Unavailable",
+                "title('Unavailable')",
+                "The Browser has no admitted Network Handle for this session.",
+            );
+            slog!("EXPOS_BROWSER_HTTP_ERROR error=CapabilityDenied\r\n");
             return;
         }
         let mut current = [0_u8; 512];
@@ -4407,14 +4517,13 @@ impl DesktopState {
                     // native reader can still project that document, but it
                     // must not turn one navigation into a serial chain of
                     // network fetches on the desktop thread.
-                    let allow_active_content =
+                    let mut allow_active_content =
                         browser_allows_active_content(response.body_len, response.truncated);
                     let (projected_document, search_results) =
-                        Document::parse_duckduckgo_results(current_url, source)
-                            .ok()
-                            .map(|results| (Some(results.document), results.result_count))
+                        parse_search_document(current_url, source)
+                            .map(|(document, count)| (Some(document), count))
                             .unwrap_or((None, 0));
-                    let manifest = if wikipedia_original_len == 0
+                    let mut manifest = if wikipedia_original_len == 0
                         && projected_document.is_none()
                         && allow_active_content
                     {
@@ -4430,11 +4539,22 @@ impl DesktopState {
                         wikipedia_document(response.body(), &mut *wiki_source)
                             .and_then(|length| core::str::from_utf8(&wiki_source[..length]).ok())
                             .ok_or(expos_core::BrowserError::InvalidDocument)
-                            .and_then(|source| Document::parse(original, source))
+                            .and_then(|source| parse_browser_document(original, source))
                     } else if let Some(document) = projected_document {
                         Ok(document)
                     } else {
-                        Document::parse(current_url, source)
+                        match parse_browser_document(current_url, source) {
+                            Err(BrowserError::TooManyNodes) => {
+                                allow_active_content = false;
+                                manifest = None;
+                                slog!(
+                                    "EXPOS_BROWSER_READER reason=NodeLimit bytes={}\r\n",
+                                    source.len()
+                                );
+                                parse_reader_document(current_url, source)
+                            }
+                            result => result,
+                        }
                     };
                     match document {
                         Ok(mut document) => {
@@ -4623,7 +4743,7 @@ impl DesktopState {
                 let mut staged = core::mem::replace(
                     &mut self.document,
                     BrowserContainer::new(
-                        Document::parse("expos://pending", "<title>Pending</title>")
+                        parse_browser_document("expos://pending", "<title>Pending</title>")
                             .expect("built-in pending document"),
                     ),
                 );
@@ -5866,9 +5986,15 @@ impl DesktopState {
     }
 
     fn save_note(&mut self) {
-        if !self.notes_name[..self.notes_name_len].ends_with(b".txt") {
+        if self.session.authority() == Authority::Guest {
+            self.notes_status = "Sign in to save files";
+            return;
+        }
+        if !crate::expfs_store::is_text_name(
+            core::str::from_utf8(&self.notes_name[..self.notes_name_len]).unwrap_or(""),
+        ) {
             if self.notes_name_len + 4 > self.notes_name.len() {
-                self.notes_status = "Filename must end in .txt";
+                self.notes_status = "Filename is too long";
                 return;
             }
             self.notes_name[self.notes_name_len..self.notes_name_len + 4].copy_from_slice(b".txt");
@@ -6160,7 +6286,8 @@ impl DesktopState {
         self.terminal_push(
             "  users display resolution network netstat storage theme history cpus audio",
         );
-        self.terminal_push("  apps ls ps forms read <name> write <name.txt> <text>");
+        self.terminal_push("  apps ls ps forms read <name> write <filename> <text>");
+        self.terminal_push("  bootlog [filter] trace [filter] serviceinfo style");
         self.terminal_push("  ayo list | ayo install <app> | ayo remove <app>");
         self.terminal_push(
             "  echo <text> audiotest audiostop windowreset displaydebug [on|off] displayrepair",
@@ -6554,6 +6681,7 @@ impl DesktopState {
                     crate::apps::package_name(index).unwrap_or("App"),
                     ".",
                 ]);
+                self.refresh_editors();
                 self.switch_to(AppKind::Apps);
             } else {
                 self.terminal_push("Install that app first with: ayo install <app>");
@@ -6570,6 +6698,23 @@ impl DesktopState {
         }
         if name.is_empty() || name.eq_ignore_ascii_case(b"help") {
             self.terminal_print_help();
+        } else if name.eq_ignore_ascii_case(b"serviceinfo") {
+            use core::fmt::Write;
+            crate::service::statistics(|line| {
+                let mut text = alloc::string::String::new();
+                let _ = text.write_fmt(line);
+                self.terminal_push(&text);
+            });
+        } else if name.eq_ignore_ascii_case(b"style") {
+            let status = crate::console_style::configure(
+                self.cfc,
+                self.session.authority(),
+                core::str::from_utf8(arguments).unwrap_or(""),
+            );
+            self.terminal_push(status);
+        } else if name.eq_ignore_ascii_case(b"bootlog") || name.eq_ignore_ascii_case(b"trace") {
+            let filter = core::str::from_utf8(arguments).unwrap_or("");
+            crate::diagnostics::visit(filter, |event| self.terminal_push(event));
         } else if name.eq_ignore_ascii_case(b"clear") {
             self.terminal_clear();
         } else if name.eq_ignore_ascii_case(b"status") {
@@ -6980,6 +7125,16 @@ fn run_session(
         crate::hardware::timestamp().saturating_add(weather_animation_ticks);
 
     while !desktop.should_exit {
+        // External navigation is queued by input handlers so a pointer/key
+        // event never retains its hit-testing and compositor frames while the
+        // Browser performs DNS, transport, parsing and resource hydration.
+        if desktop.browser_pending_len != 0 {
+            desktop.process_pending_browser_navigation();
+            if desktop.app_is_visible(AppKind::Browser) {
+                render_active_window(&mut desktop);
+            }
+            continue;
+        }
         let Some(event) = input.poll_event() else {
             let now = crate::hardware::timestamp();
             let clock_changed = if now >= next_clock_poll {
@@ -7227,6 +7382,18 @@ fn run_session(
             }
         }
         if desktop.active == AppKind::Apps && desktop.app_is_visible(AppKind::Apps) {
+            if desktop.native_apps.active_index() >= crate::apps::CLIPTICK {
+                let allowed = desktop.editor_execute_allowed();
+                let editor = if desktop.native_apps.active_index() == crate::apps::CLIPTICK {
+                    &mut desktop.cliptick
+                } else {
+                    &mut desktop.writer
+                };
+                if editor.key(key, desktop.session.authority(), allowed) {
+                    render_active_window(&mut desktop);
+                    continue;
+                }
+            }
             let generation = desktop.native_apps.persistence_generation();
             if let Some(action) = desktop.native_apps.handle_app_key(key) {
                 if desktop.native_apps.persistence_generation() != generation {
@@ -7845,7 +8012,11 @@ fn draw_app(desktop: &DesktopState, app: AppKind, focused: bool, draw_shadow: bo
             AppKind::System => draw_system(rect, desktop),
             AppKind::Games => desktop.games.render(rect),
             AppKind::Notes => draw_notes(rect, desktop),
-            AppKind::Apps => desktop.native_apps.render_app(rect),
+            AppKind::Apps => match desktop.native_apps.active_index() {
+                crate::apps::CLIPTICK => desktop.cliptick.render(rect),
+                crate::apps::WRITER => desktop.writer.render(rect),
+                _ => desktop.native_apps.render_app(rect),
+            },
         }
     }
     draw_window_border(rect, focused, desktop.preferences);
@@ -8739,11 +8910,11 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
         x + width - 190,
         bottom - 18,
         if desktop.document.url().starts_with("https://") {
-            "TLS VERIFIED"
+            "Secure"
         } else if desktop.document.url().starts_with("http://") {
-            "HTTP DOCUMENT"
+            "HTTP"
         } else {
-            "LOCAL FORM"
+            "Local"
         },
         if desktop.document.url().starts_with("https://") {
             color::GREEN
@@ -8752,12 +8923,8 @@ fn draw_browser(rect: Rect, desktop: &DesktopState) {
         },
         1,
     );
-    if desktop.document.rejected_loads != 0 {
-        framebuffer::text(x + width - 310, bottom - 18, "BOX RECOVERED", color::RED, 1);
-    } else if desktop.browser_scroll > 0 {
-        framebuffer::text(x + width - 270, bottom - 18, "SCROLLED", color::CYAN, 1);
-    } else {
-        framebuffer::text(x + width - 270, bottom - 18, "BOXED PAGE", color::MUTED, 1);
+    if desktop.document.last_error.is_some() {
+        framebuffer::text(x + width - 310, bottom - 18, "Load failed", color::RED, 1);
     }
 }
 
@@ -8796,6 +8963,7 @@ fn draw_terminal(rect: Rect, desktop: &DesktopState) {
         7 => 0x0000_0000,
         _ => desktop.preferences.theme.terminal(),
     };
+    let style = crate::console_style::current();
     let terminal_foreground = match desktop.preferences.terminal_foreground {
         1 => color::WHITE,
         2 => color::GREEN,
@@ -8805,6 +8973,12 @@ fn draw_terminal(rect: Rect, desktop: &DesktopState) {
         6 => 0x008E_B8FF,
         7 => 0x0030_343A,
         _ => color::INK,
+    };
+    let terminal_foreground = match style.color {
+        1 => color::GREEN,
+        2 => 0x00F0_C46B,
+        3 => color::CYAN,
+        _ => terminal_foreground,
     };
     let previous_style = framebuffer::font_style();
     framebuffer::set_font_style(framebuffer::FontStyle::new(
@@ -8823,7 +8997,7 @@ fn draw_terminal(rect: Rect, desktop: &DesktopState) {
     let prompt_y = y + height - 34;
     let output_top = y + titlebar_height + 16;
     let text_scale = desktop.preferences.terminal_scale as i32 + 1;
-    let line_height = if text_scale == 1 { 12 } else { 20 };
+    let line_height = (if text_scale == 1 { 12 } else { 20 }) + style.spacing as i32 * 4;
     let visible_lines = ((prompt_y - output_top - 8) / line_height).max(0) as usize;
     let lines = visible_lines.min(desktop.terminal_output_count);
     for visual_index in 0..lines {
@@ -8855,22 +9029,35 @@ fn draw_terminal(rect: Rect, desktop: &DesktopState) {
     let prompt_scale = text_scale;
     let advance = framebuffer::text_advance(prompt_scale);
     let accent = desktop.preferences.accent.color();
-    framebuffer::text(
-        x + 20,
-        prompt_y,
-        desktop.session.name(),
-        accent,
-        prompt_scale,
-    );
-    framebuffer::text(
-        x + 20 + desktop.session.name().len() as i32 * advance,
-        prompt_y,
-        "@expos $",
-        accent,
-        prompt_scale,
-    );
+    let prompt_width = match style.prompt {
+        1 => {
+            framebuffer::text(x + 20, prompt_y, ">", accent, prompt_scale);
+            2
+        }
+        2 => {
+            framebuffer::text(x + 20, prompt_y, "Stable:/ >", accent, prompt_scale);
+            11
+        }
+        _ => {
+            framebuffer::text(
+                x + 20,
+                prompt_y,
+                desktop.session.name(),
+                accent,
+                prompt_scale,
+            );
+            framebuffer::text(
+                x + 20 + desktop.session.name().len() as i32 * advance,
+                prompt_y,
+                "@expos $",
+                accent,
+                prompt_scale,
+            );
+            desktop.session.name().len() as i32 + 8
+        }
+    };
     if let Ok(line) = core::str::from_utf8(&desktop.terminal_line[..desktop.terminal_len]) {
-        let input_x = x + 20 + (desktop.session.name().len() as i32 + 8) * advance;
+        let input_x = x + 20 + prompt_width * advance;
         let visible_capacity = ((x + width - 20 - input_x) / advance).max(1) as usize;
         let visible_start = line.len().saturating_sub(visible_capacity);
         let visible = &line[visible_start..];
@@ -8881,11 +9068,17 @@ fn draw_terminal(rect: Rect, desktop: &DesktopState) {
             terminal_foreground,
             prompt_scale,
         );
+        let cursor_height = if prompt_scale == 1 { 9 } else { 16 };
         framebuffer::rect(
             input_x + visible.len() as i32 * advance,
-            prompt_y,
-            if prompt_scale == 1 { 5 } else { 8 },
-            if prompt_scale == 1 { 9 } else { 16 },
+            prompt_y
+                + if style.cursor == 2 {
+                    cursor_height - 2
+                } else {
+                    0
+                },
+            if style.cursor == 1 { 2 } else { advance - 1 },
+            if style.cursor == 2 { 2 } else { cursor_height },
             color::MUTED,
         );
     }
@@ -12354,7 +12547,7 @@ mod tests {
         assert!(html.contains("Wikipedia // NetBSD"));
         assert!(html.contains("Unix-like operating system"));
         assert!(html.contains("It emphasizes portability."));
-        Document::parse("https://en.wikipedia.org/wiki/NetBSD", html)
+        parse_browser_document("https://en.wikipedia.org/wiki/NetBSD", html)
             .expect("safe bounded document");
     }
 
@@ -12636,7 +12829,7 @@ mod tests {
 
     #[test]
     fn browser_container_keeps_the_last_valid_document_after_rejection() {
-        let home = Document::parse("expos://home", HOME).expect("home document");
+        let home = parse_browser_document("expos://home", HOME).expect("home document");
         let mut container = BrowserContainer::new(home);
         assert!(core::mem::size_of::<BrowserContainer>() < core::mem::size_of::<Document>());
 
@@ -12646,7 +12839,7 @@ mod tests {
         assert_eq!(container.rejected_loads, 1);
         assert_eq!(container.last_error, Some(BrowserError::TooManyNodes));
 
-        let about = Document::parse("expos://about", ABOUT).expect("about document");
+        let about = parse_browser_document("expos://about", ABOUT).expect("about document");
         container.replace(about);
         assert_eq!(container.url(), "expos://about");
         assert_eq!(container.generation, 2);

@@ -1,6 +1,7 @@
 /build/
 /target/
 /kernel/target/
+target/
 /iso/boot/kernel.elf
 /ayo/bin/
 /ayo/*.json
@@ -15,3 +16,5 @@
 __pycache__/
 *.pyc
 *.egg-info/
+.expos/
+/sdk/examples/*/dist/

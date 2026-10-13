@@ -4,7 +4,11 @@ const MAX_RECORDS: usize = 32;
 const MAX_STAGED: usize = 8;
 const MAX_SYSTEM_RECORDS: usize = 64;
 const MAX_STAGED_SYSTEM_RECORDS: usize = 16;
-pub const FORM_CONTENT_CAPACITY: usize = 512;
+/// Maximum inline content for one persisted Form.
+///
+/// The kernel's ExpFS v3 disk codec stores the complete record transactionally
+/// and migrates v1/v2 512-byte records when they are next committed.
+pub const FORM_CONTENT_CAPACITY: usize = 4096;
 pub const SYSTEM_RECORD_CAPACITY: usize = 512;
 
 /// Typed system-database namespaces. They are records in ExpFS rather than

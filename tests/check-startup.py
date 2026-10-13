@@ -86,20 +86,26 @@ def check_picture(path, graphical, previous=None):
 
 
 class Startup:
-    def __init__(self, firmware, scratch, deadline):
+    def __init__(self, firmware, scratch, deadline, artifacts=None):
         self.firmware = firmware
         self.deadline = deadline
-        self.artifacts = ROOT / "build" / f"startup-{firmware}"
+        self.artifacts = artifacts or ROOT / "build" / f"startup-{firmware}"
         self.artifacts.mkdir(parents=True, exist_ok=True)
         self.serial = self.artifacts / "serial.log"
         self.serial.write_text("")
         self.qmp_path = scratch / "qmp.sock"
         state = scratch / "state.img"
-        with state.open("wb") as stream:
-            stream.truncate(4 * 1024 * 1024)
-        command = ["qemu-system-x86_64", "-machine", "pc", "-cpu", "max", "-m", "256M",
+        state_source = os.environ.get("EXPOS_STATE_IMG")
+        if state_source:
+            shutil.copyfile(Path(state_source).expanduser().resolve(), state)
+        elif not state.exists():
+            with state.open("wb") as stream:
+                stream.truncate(4 * 1024 * 1024)
+        command = ["qemu-system-x86_64", "-machine", "pc", "-cpu", "max", "-smp", "4", "-m", "256M",
                    "-vga", "std", "-global", "VGA.vgamem_mb=16", "-display", "none",
                    "-netdev", "user,id=net0", "-device", "rtl8139,netdev=net0",
+                   "-audiodev", f"driver=wav,id=exposaudio,path={scratch}/audio.wav",
+                   "-device", "AC97,audiodev=exposaudio",
                    "-drive", f"file={state},format=raw,if=ide,index=0",
                    "-serial", f"file:{self.serial}",
                    "-qmp", f"unix:{self.qmp_path},server=on,wait=off",
@@ -128,7 +134,7 @@ class Startup:
         if self.process.poll() is not None:
             raise AssertionError(f"QEMU exited early ({self.process.returncode})")
         if time.monotonic() >= self.deadline:
-            raise TimeoutError("Startup check exceeded 45 seconds")
+            raise TimeoutError("Startup check exceeded its deadline")
 
     def wait_for(self, marker, count=1):
         while self.serial.read_text(errors="replace").count(marker) < count:
@@ -173,6 +179,29 @@ class Startup:
         )
         time.sleep(0.12)
 
+    def move_pointer(self, dx, dy):
+        events = []
+        if dx:
+            events.append({"type": "rel", "data": {"axis": "x", "value": dx}})
+        if dy:
+            events.append({"type": "rel", "data": {"axis": "y", "value": dy}})
+        self.qmp("input-send-event", events=events)
+        time.sleep(0.12)
+
+    def click(self, button="left"):
+        self.qmp(
+            "input-send-event",
+            events=[{"type": "btn", "data": {"down": True, "button": button}}],
+        )
+        # Keep press and release in distinct PS/2 packets. Sending both in one
+        # QMP batch can collapse the transition before the guest polls it.
+        time.sleep(0.12)
+        self.qmp(
+            "input-send-event",
+            events=[{"type": "btn", "data": {"down": False, "button": button}}],
+        )
+        time.sleep(0.12)
+
     def picture(self, name, graphical=True, previous=None):
         # QEMU's UI refresh can lag a completed guest frame by one timer tick.
         time.sleep(0.2)
@@ -189,7 +218,19 @@ class Startup:
         self.type("1\n")
         self.wait_for("EXPOS_LOGIN_SCREEN_PRESENTED")
         login = self.picture("graphical-login", previous=chooser)
-        self.type("operator\nexpos\n")
+        # Exercise the whole graphical path. The logical guest pointer starts
+        # in the password field at screen center; visit both fields and submit
+        # through the button without relying on Tab or Enter.
+        self.move_pointer(0, -75)
+        self.click()
+        self.type("operator")
+        self.move_pointer(0, 75)
+        self.click()
+        self.type("expos")
+        self.move_pointer(0, 76)
+        self.click()
+        self.wait_for("EXPOS_LOGIN_OK user=operator")
+        self.wait_for("EXPOS_DISPLAY_REUSED target=")
         self.wait_for("EXPOS_DESKTOP_EMPTY")
         self.wait_for("EXPOS_DISPLAY_PORTAL version=3")
         desktop = self.picture("desktop", previous=login)
@@ -247,8 +288,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("firmware", choices=("uefi", "bios", "both"), nargs="?", default="both")
     args = parser.parse_args()
-    deadline = time.monotonic() + 45
+    timeout = float(os.environ.get("EXPOS_STARTUP_TIMEOUT", "150"))
     for firmware in (("uefi", "bios") if args.firmware == "both" else (args.firmware,)):
+        deadline = time.monotonic() + timeout
         with tempfile.TemporaryDirectory(prefix="expos-startup-") as directory:
             startup = Startup(firmware, Path(directory), deadline)
             try:

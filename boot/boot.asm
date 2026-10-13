@@ -52,10 +52,14 @@ stack_bottom:
         ; The graphical Form session uses fixed-capacity, allocation-free
         ; document and surface state. Give those values room without letting
         ; the downward-growing stack collide with the page tables.
-        ; TLS certificate verification plus a 16 KiB response and two bounded
-        ; browser documents can coexist during a search projection. Keep the
-        ; early single-core stack explicit until per-Form stacks land.
-        resb 1048576
+        ; TLS certificate verification plus a 16 KiB response, two bounded
+        ; browser documents and 4 KiB contents for every shell Form can
+        ; coexist during a desktop transition. Keep a full second MiB of
+        ; headroom above the page-directory tables: overflowing below
+        ; stack_bottom would otherwise corrupt the high identity-map entries
+        ; used by PCI/MMIO framebuffers. The stack remains explicit until
+        ; per-Form stacks land.
+        resb 2097152
 stack_top:
 
 ; Ring-3 interrupts always enter on this kernel-owned stack through the TSS.
@@ -97,12 +101,12 @@ form_kernel_r15:
 ; ---------------------------------------------------------------------------
 ; Minimal 64-bit GDT
 ; ---------------------------------------------------------------------------
-section .rodata
+section .data
 align 16
 gdt64:
         dq 0                            ; null descriptor
         dq 0x00209A0000000000           ; 0x08: kernel code (L=1, D=0)
-        dq 0x0000920000000000           ; 0x10: kernel data
+        dq 0x0000930000000000           ; 0x10: accessed kernel data
         dq 0x0000F20000000000           ; 0x18: user data (DPL=3)
         dq 0x0020FA0000000000           ; 0x20: user code (DPL=3, L=1)
 gdt64_tss:
@@ -316,6 +320,21 @@ expos_arch_install_form_tss:
         ltr ax
         ret
 
+; Kernel GS is never exposed as the user GS base. Floating-point/SIMD is
+; currently unsupported for Forms: CR0.TS faults it before shared state changes.
+%macro FORM_IRET 0
+        test byte [rsp + 8], 3
+        jz %%kernel
+        push rax
+        mov rax, cr0
+        or rax, 8
+        mov cr0, rax
+        pop rax
+        swapgs
+%%kernel:
+        iretq
+%endmacro
+
 ; void expos_arch_enter_form(u64 cr3, const TrapFrame *state)
 ; The eventual interrupt exit jumps back to the return address on this saved
 ; kernel stack, so this ordinary-looking call encloses the complete CPL3 slice.
@@ -358,7 +377,7 @@ expos_arch_enter_form:
         mov rbx, [rsi + 104]
         mov rax, [rsi + 112]
         mov rsi, [rsi + 64]
-        iretq
+        FORM_IRET
 
 ; TrapFrame layout shared with kernel/src/form_runtime.rs. Push every general
 ; register so a timer slice can resume without cooperative save points.
@@ -398,6 +417,15 @@ expos_arch_enter_form:
         pop rax
 %endmacro
 
+; AC is user-controlled. Clear it without CLAC so older CPUs also boot.
+; The interrupted flags remain in the hardware frame for IRET.
+%macro KERNEL_ENTRY_FLAGS 0
+        cld
+        pushfq
+        and qword [rsp], ~(1 << 18)
+        popfq
+%endmacro
+
 extern expos_form_timer_interrupt
 extern expos_form_interrupt_eoi
 extern expos_form_abi_interrupt
@@ -405,7 +433,12 @@ extern expos_form_fault_interrupt
 
 global expos_form_timer_stub
 expos_form_timer_stub:
-        cld
+        test byte [rsp + 8], 3
+        jz .kernel_gs
+        swapgs
+.kernel_gs:
+        clts
+        KERNEL_ENTRY_FLAGS
         FORM_PUSH_REGS
         mov rdi, rsp
         call expos_form_timer_interrupt
@@ -415,46 +448,74 @@ expos_form_timer_stub:
         test rdi, rdi
         jnz .leave
         FORM_POP_REGS
-        iretq
+        FORM_IRET
 .leave:
         mov rax, rdi
         jmp expos_arch_leave_form
 
 global expos_form_abi_stub
 expos_form_abi_stub:
-        cld
+        test byte [rsp + 8], 3
+        jz .kernel_gs
+        swapgs
+.kernel_gs:
+        clts
+        KERNEL_ENTRY_FLAGS
         FORM_PUSH_REGS
         mov rdi, rsp
         call expos_form_abi_interrupt
         test rax, rax
         jnz expos_arch_leave_form
         FORM_POP_REGS
-        iretq
+        FORM_IRET
 
-; User faults terminate only the active Form. Kernel faults are rejected by
-; the Rust side and halt rather than being mistaken for a Form exit.
-global expos_form_ud_stub
-expos_form_ud_stub:
-        mov edi, 6
-        sub rsp, 8
-        call expos_form_fault_interrupt
-        add rsp, 8
-        mov eax, 4
-        jmp expos_arch_leave_form
+; Normalize exception stack: vector, error, RIP, CS, flags, RSP, SS.
+; Preserve registers and pass the actual saved CS to Rust. A kernel service
+; fault must never be mistaken for a fault in the Form it was servicing.
+%macro FAULT_STUB 3
+global %1
+%1:
+        %if %3 == 0
+        push qword 0
+        %endif
+        push qword %2
+        jmp expos_fault_common
+%endmacro
 
-global expos_form_gp_stub
-expos_form_gp_stub:
-        mov edi, 13
-        call expos_form_fault_interrupt
-        mov eax, 4
-        jmp expos_arch_leave_form
+FAULT_STUB expos_form_de_stub, 0, 0
+FAULT_STUB expos_form_db_stub, 1, 0
+FAULT_STUB expos_form_bp_stub, 3, 0
+FAULT_STUB expos_form_of_stub, 4, 0
+FAULT_STUB expos_form_br_stub, 5, 0
+FAULT_STUB expos_form_ud_stub, 6, 0
+FAULT_STUB expos_form_nm_stub, 7, 0
+FAULT_STUB expos_form_ts_stub, 10, 1
+FAULT_STUB expos_form_np_stub, 11, 1
+FAULT_STUB expos_form_ss_stub, 12, 1
+FAULT_STUB expos_form_gp_stub, 13, 1
+FAULT_STUB expos_form_pf_stub, 14, 1
+FAULT_STUB expos_form_mf_stub, 16, 0
+FAULT_STUB expos_form_ac_stub, 17, 1
+FAULT_STUB expos_form_xm_stub, 19, 0
 
-global expos_form_pf_stub
-expos_form_pf_stub:
-        mov edi, 14
+expos_fault_common:
+        test byte [rsp + 24], 3
+        jz .kernel_gs
+        swapgs
+.kernel_gs:
+        clts
+        KERNEL_ENTRY_FLAGS
+        FORM_PUSH_REGS
+        mov rdi, rsp
+        mov rbx, rsp
+        and rsp, -16
         call expos_form_fault_interrupt
-        mov eax, 4
-        jmp expos_arch_leave_form
+        mov rsp, rbx
+        test rax, rax
+        jnz expos_arch_leave_form
+        FORM_POP_REGS
+        add rsp, 16
+        FORM_IRET
 
 expos_arch_leave_form:
         cli
@@ -474,13 +535,13 @@ expos_arch_leave_form:
 ; ---------------------------------------------------------------------------
 
 ; The BSP copies this block to physical 0x8000 and sends INIT/SIPI. Startup is
-; serialized through the mailbox at 0x8f00, so every AP receives its own stack
+; serialized through the mailbox at 0x9000, so every AP receives its own stack
 ; and logical CPU slot before the next processor is released.
 AP_TRAMPOLINE_PHYS equ 0x8000
-AP_MAILBOX_CR3     equ 0x8F00
-AP_MAILBOX_STACK   equ 0x8F08
-AP_MAILBOX_ENTRY   equ 0x8F10
-AP_MAILBOX_SLOT    equ 0x8F18
+AP_MAILBOX_CR3     equ 0x9000
+AP_MAILBOX_STACK   equ 0x9008
+AP_MAILBOX_ENTRY   equ 0x9010
+AP_MAILBOX_SLOT    equ 0x9018
 
 align 16
 global expos_ap_trampoline_start
@@ -509,9 +570,17 @@ expos_ap_protected:
         mov cr4, eax
         mov eax, [AP_MAILBOX_CR3]
         mov cr3, eax
+        ; The shared hardened root contains NX entries. Enable NXE before
+        ; paging, rather than waiting until the Rust AP entry.
+        mov eax, 0x80000001
+        cpuid
+        and edx, 1 << 20
+        shr edx, 9                     ; CPUID.NX -> EFER.NXE (bit 11)
+        mov ebx, edx
         mov ecx, MSR_EFER
         rdmsr
         or eax, EFER_LME
+        or eax, ebx
         wrmsr
         mov eax, cr0
         or eax, 1 << 31
@@ -537,9 +606,9 @@ expos_ap_long:
 align 8
 expos_ap_gdt:
         dq 0
-        dq 0x00209A0000000000           ; 0x08: 64-bit kernel code
-        dq 0x0000920000000000           ; 0x10: kernel data
-        dq 0x00CF9A000000FFFF           ; 0x18: 32-bit transition code
+        dq 0x00209B0000000000           ; 0x08: accessed 64-bit kernel code
+        dq 0x0000930000000000           ; 0x10: accessed kernel data
+        dq 0x00CF9B000000FFFF           ; 0x18: accessed 32-bit transition code
 expos_ap_gdt_end:
 expos_ap_gdt_desc:
         dw expos_ap_gdt_end - expos_ap_gdt - 1

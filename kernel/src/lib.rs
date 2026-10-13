@@ -15,9 +15,12 @@ mod asl;
 mod audio;
 pub(crate) mod boot;
 mod compat;
+mod console_style;
 mod crypto;
 mod desktop;
+mod diagnostics;
 pub mod display_timing;
+mod editor;
 mod expfs_store;
 mod form_runtime;
 mod framebuffer;
@@ -27,15 +30,21 @@ mod graphics_console;
 mod hardware;
 mod input;
 mod interrupts;
+#[cfg(feature = "isolation-self-test")]
+mod isolation_self_test;
 mod kernel_controls;
 mod locale;
 mod network;
+mod paging;
+#[cfg(test)]
+mod parser_fuzz;
 mod pci;
 mod port;
 mod python;
 mod radio;
 mod security;
 mod serial;
+mod service;
 mod session;
 mod shell;
 mod smp;
@@ -96,6 +105,7 @@ pub fn clear_console() {
 
 #[doc(hidden)]
 pub fn _slog(args: fmt::Arguments<'_>) {
+    diagnostics::record(args);
     let mut serial = serial::COM1.lock();
     let _ = fmt::Write::write_fmt(&mut *serial, args);
 }
@@ -146,8 +156,11 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
 
     unsafe { boot::initialize(magic, mbi_phys) };
     security::enable_cpu_hardening();
+    paging::initialize();
     security::log_cpu_hardening();
     form_runtime::initialize();
+    #[cfg(feature = "isolation-self-test")]
+    isolation_self_test::kernel_permissions();
     let interrupt_platform = interrupts::initialize();
     let online_cpus = smp::initialize(interrupt_platform);
     println!(
@@ -302,7 +315,7 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
             slog!("EXPOS_SERVICE_MODE multi-user network=disabled genesis-policy=true\r\n");
             radio::initialize(false, false);
         } else {
-            let ethernet_ready = network::initialize();
+            let ethernet_ready = network::initialize(report.cfc_fin);
             radio::initialize(ethernet_ready, network::link_up());
             radio::restore_persisted_policy(
                 preferences.flags & state::PREF_NETWORK_ENABLED != 0,

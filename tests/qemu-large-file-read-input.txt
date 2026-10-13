@@ -1,0 +1,6 @@
+2222
+operator
+expos
+inspect BigForm
+cat BigForm
+shutdown

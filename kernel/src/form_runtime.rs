@@ -5,6 +5,7 @@
 //! code page, one ABI/data page and one stack page. CPL3 can enter the kernel
 //! only through the DPL3 Form ABI gate; PIT IRQ0 is the preemption source.
 
+use alloc::boxed::Box;
 use core::{
     arch::asm,
     marker::PhantomData,
@@ -15,7 +16,7 @@ use core::{
 
 use expos_core::{
     AbiCall, AbiRequest, AbiResponse, AbiStatus, AddressSpace, CapabilityBroker, CfcFin, Fin,
-    FormHandle, NativeCallGate, Operations, FORM_ABI_VERSION,
+    FormHandle, NativeCallGate, NativeImage, NativeImageError, Operations, FORM_ABI_VERSION,
 };
 
 use crate::{port, println, slog};
@@ -77,6 +78,8 @@ struct NativeSpace {
     form: Fin,
     assigned: bool,
     active: bool,
+    service: Option<Box<crate::service::Memory>>,
+    output: Option<Box<crate::service::Output>>,
 }
 
 impl NativeSpace {
@@ -92,6 +95,8 @@ impl NativeSpace {
             form: Fin::ZERO,
             assigned: false,
             active: false,
+            service: None,
+            output: None,
         }
     }
 }
@@ -190,6 +195,7 @@ struct ApJob {
     form: Fin,
     execute_handle: FormHandle,
     log_handle: FormHandle,
+    network_handle: FormHandle,
     tick_limit: u64,
     reason: u8,
     fault: u8,
@@ -207,6 +213,7 @@ impl ApJob {
         form: Fin::ZERO,
         execute_handle: empty_handle(),
         log_handle: empty_handle(),
+        network_handle: empty_handle(),
         tick_limit: 0,
         reason: 0,
         fault: 0,
@@ -242,6 +249,7 @@ pub struct RunAuthorization<'a> {
     form: Fin,
     execute_handle: FormHandle,
     log_handle: FormHandle,
+    network_handle: FormHandle,
 }
 
 /// An AP-owned Form slice. Several tickets may be alive at once as long as
@@ -270,7 +278,13 @@ impl<'a> RunAuthorization<'a> {
             form,
             execute_handle,
             log_handle,
+            network_handle: empty_handle(),
         }
+    }
+
+    pub const fn with_network(mut self, handle: FormHandle) -> Self {
+        self.network_handle = handle;
+        self
     }
 }
 
@@ -281,11 +295,15 @@ impl PreparedForm {
 }
 
 struct ActiveExecution {
+    service_reply: bool,
+    output: *mut crate::service::Output,
+    data: *mut u8,
+    service_memory: *mut crate::service::Memory,
     broker: *const CapabilityBroker,
     cfc: CfcFin,
     dimension: Fin,
     form: Fin,
-    handles: [FormHandle; 2],
+    handles: [FormHandle; 3],
     frame: TrapFrame,
     slice_ticks: u64,
     tick_limit: u64,
@@ -387,6 +405,18 @@ unsafe extern "C" {
     fn expos_form_ud_stub();
     fn expos_form_gp_stub();
     fn expos_form_pf_stub();
+    fn expos_form_de_stub();
+    fn expos_form_db_stub();
+    fn expos_form_bp_stub();
+    fn expos_form_of_stub();
+    fn expos_form_br_stub();
+    fn expos_form_nm_stub();
+    fn expos_form_ts_stub();
+    fn expos_form_np_stub();
+    fn expos_form_ss_stub();
+    fn expos_form_mf_stub();
+    fn expos_form_ac_stub();
+    fn expos_form_xm_stub();
 }
 
 /// Install the TSS, interrupt gates, remapped PIC and a 1 kHz PIT. IRQs remain
@@ -399,6 +429,18 @@ pub fn initialize() {
         IDT[6] = IdtEntry::interrupt(expos_form_ud_stub, 0);
         IDT[13] = IdtEntry::interrupt(expos_form_gp_stub, 0);
         IDT[14] = IdtEntry::interrupt(expos_form_pf_stub, 0);
+        IDT[0] = IdtEntry::interrupt(expos_form_de_stub, 0);
+        IDT[1] = IdtEntry::interrupt(expos_form_db_stub, 0);
+        IDT[3] = IdtEntry::interrupt(expos_form_bp_stub, 3);
+        IDT[4] = IdtEntry::interrupt(expos_form_of_stub, 3);
+        IDT[5] = IdtEntry::interrupt(expos_form_br_stub, 0);
+        IDT[7] = IdtEntry::interrupt(expos_form_nm_stub, 0);
+        IDT[10] = IdtEntry::interrupt(expos_form_ts_stub, 0);
+        IDT[11] = IdtEntry::interrupt(expos_form_np_stub, 0);
+        IDT[12] = IdtEntry::interrupt(expos_form_ss_stub, 0);
+        IDT[16] = IdtEntry::interrupt(expos_form_mf_stub, 0);
+        IDT[17] = IdtEntry::interrupt(expos_form_ac_stub, 0);
+        IDT[19] = IdtEntry::interrupt(expos_form_xm_stub, 0);
         IDT[32] = IdtEntry::interrupt(expos_form_timer_stub, 0);
         IDT[0x80] = IdtEntry::interrupt(expos_form_abi_stub, 3);
         let descriptor = DescriptorTablePointer {
@@ -446,7 +488,8 @@ pub fn run_ap_work(slot: usize) {
         job.form,
         job.execute_handle,
         job.log_handle,
-    );
+    )
+    .with_network(job.network_handle);
     let result = run_slice_local(unsafe { &mut *job.prepared }, authorization, job.tick_limit);
     (job.reason, job.fault) = encode_reason(result.reason);
     job.timer_ticks = result.timer_ticks;
@@ -460,6 +503,7 @@ unsafe fn initialize_cpu_arch(slot: usize) {
     let per_cpu = ptr::addr_of_mut!(PER_CPU[slot]);
     (*per_cpu).slot = slot as u64;
     write_msr(IA32_GS_BASE, per_cpu as u64);
+    write_msr(0xC000_0102, 0); // user GS base, exchanged by SWAPGS
 
     let stack_top = ptr::addr_of_mut!(CPU_STACKS[slot].0)
         .cast::<u8>()
@@ -556,20 +600,56 @@ unsafe fn io_wait() {
     port::outb(0x80, 0);
 }
 
-/// Build a per-Form page-table root and compile the bounded native capsule.
+#[derive(Debug)]
+pub enum PrepareError {
+    InvalidImage(NativeImageError),
+    NxRequired,
+    NoSlot,
+}
+
+impl PrepareError {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::InvalidImage(error) => match error {
+                NativeImageError::Header => "invalid executable header",
+                NativeImageError::Unsupported => "unsupported executable format",
+                NativeImageError::Length => "invalid executable segment lengths",
+                NativeImageError::Entry => "entry point is outside executable code",
+            },
+            Self::NxRequired => "native images require CPU NX protection",
+            Self::NoSlot => "no isolated native address-space slot is available",
+        }
+    }
+}
+
+/// Validate a native image before reserving a slot, or compile a legacy capsule.
 pub fn prepare(
     form: Fin,
     execute_handle: FormHandle,
     log_handle: FormHandle,
     content: &[u8],
-) -> Option<PreparedForm> {
+) -> Result<PreparedForm, PrepareError> {
+    let image = if content.starts_with(b"EXF")
+        || content
+            .iter()
+            .any(|b| !b.is_ascii_graphic() && !b.is_ascii_whitespace())
+    {
+        let image = NativeImage::parse(content).map_err(PrepareError::InvalidImage)?;
+        if !crate::security::nx_active() {
+            return Err(PrepareError::NxRequired);
+        }
+        Some(image)
+    } else {
+        None
+    };
     let slot_index = unsafe {
         let spaces = &mut *ptr::addr_of_mut!(NATIVE_SPACES);
         spaces
             .iter()
             .position(|space| space.assigned && space.form == form && !space.active)
             .or_else(|| spaces.iter().position(|space| !space.assigned))
-            .or_else(|| spaces.iter().position(|space| !space.active))?
+            .or_else(|| spaces.iter().position(|space| !space.active))
+            .ok_or(PrepareError::NoSlot)?
     };
     let space = unsafe { &mut (*ptr::addr_of_mut!(NATIVE_SPACES))[slot_index] };
     space.assigned = true;
@@ -598,7 +678,7 @@ pub fn prepare(
     space.user_pt.0[2] =
         physical(&space.stack) | PAGE_PRESENT | PAGE_WRITE | PAGE_USER | no_execute;
 
-    let payload = native_payload(content);
+    let payload = image.map_or_else(|| native_payload(content), |image| image.data);
     let payload_len = payload.len().min(PAGE_BYTES - ABI_PAYLOAD_OFFSET);
     space.data.0[ABI_PAYLOAD_OFFSET..ABI_PAYLOAD_OFFSET + payload_len]
         .copy_from_slice(&payload[..payload_len]);
@@ -613,7 +693,9 @@ pub fn prepare(
         ptr::write_unaligned(space.data.0.as_mut_ptr().cast::<AbiRequest>(), request);
     }
 
-    if content.starts_with(b"native:spin") {
+    if let Some(image) = image {
+        space.code.0[..image.code.len()].copy_from_slice(image.code);
+    } else if content.starts_with(b"native:spin") {
         // PAUSE; JMP -4. This deliberately has no cooperative exit path.
         space.code.0[..4].copy_from_slice(&[0xF3, 0x90, 0xEB, 0xFC]);
     } else if content.starts_with(b"native:escape") {
@@ -622,25 +704,50 @@ pub fn prepare(
         space.code.0[..12].copy_from_slice(&[
             0x48, 0xA1, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0xEB, 0xFE,
         ]);
+    } else if content == b"native:write-code" {
+        space.code.0[..2].copy_from_slice(&[0x48, 0xB8]); // mov rax, code
+        space.code.0[2..10].copy_from_slice(&USER_CODE.to_le_bytes());
+        space.code.0[10..15].copy_from_slice(&[0xC6, 0x00, 0x90, 0x0F, 0x0B]);
+    } else if content == b"native:exec-data" {
+        space.code.0[..2].copy_from_slice(&[0x48, 0xB8]);
+        space.code.0[2..10].copy_from_slice(&USER_DATA.to_le_bytes());
+        space.code.0[10..12].copy_from_slice(&[0xFF, 0xE0]); // jmp data
+    } else if content == b"native:divide-zero" {
+        space.code.0[..8].copy_from_slice(&[0x31, 0xD2, 0x31, 0xC9, 0xF7, 0xF1, 0x0F, 0x0B]);
+    } else if content == b"native:invalid-opcode" {
+        space.code.0[..2].copy_from_slice(&[0x0F, 0x0B]);
+    } else if content.starts_with(b"native:ac-log ") {
+        // User POPF can set AC; the ABI stub must clear it on kernel entry.
+        space.code.0[..10].copy_from_slice(&[0x9C, 0x81, 0x0C, 0x24, 0, 0, 4, 0, 0x9D, 0x90]);
+        emit_log_and_exit(&mut space.code.0[10..], execute_handle.id);
     } else {
         emit_log_and_exit(&mut space.code.0, execute_handle.id);
     }
 
     let root = physical(&space.pml4);
-    let address_space = AddressSpace::confined(root, USER_CODE, USER_END)?;
-    Some(PreparedForm {
+    let address_space = AddressSpace::confined(root, USER_CODE, USER_END)
+        .expect("fixed native address-space bounds are valid");
+    Ok(PreparedForm {
         slot: slot_index,
         address_space,
         frame: TrapFrame {
-            rip: USER_CODE,
+            rip: USER_CODE + image.map_or(0, |image| image.entry as u64),
+            rdi: USER_DATA,
+            rsi: USER_DATA + ABI_RESPONSE_OFFSET,
+            rdx: execute_handle.id as u64,
+            rcx: log_handle.id as u64,
             rflags: 0x202,
-            rsp: USER_STACK_TOP,
+            rsp: if image.is_some() {
+                USER_END - 8
+            } else {
+                USER_STACK_TOP
+            },
             ..TrapFrame::default()
         },
     })
 }
 
-fn emit_log_and_exit(code: &mut [u8; PAGE_BYTES], execute_handle: u32) {
+fn emit_log_and_exit(code: &mut [u8], execute_handle: u32) {
     let mut cursor = 0;
     let mut emit = |bytes: &[u8]| {
         code[cursor..cursor + bytes.len()].copy_from_slice(bytes);
@@ -728,6 +835,7 @@ pub fn submit_ap_slice<'a>(
     job.form = authorization.form;
     job.execute_handle = authorization.execute_handle;
     job.log_handle = authorization.log_handle;
+    job.network_handle = authorization.network_handle;
     job.tick_limit = tick_limit;
     AP_JOB_STATE[slot].store(JOB_READY, Ordering::Release);
     slog!(
@@ -790,11 +898,35 @@ fn run_slice_local(
     tick_limit: u64,
 ) -> SliceResult {
     let mut active = ActiveExecution {
+        service_reply: unsafe {
+            (*ptr::addr_of!(NATIVE_SPACES[prepared.slot]))
+                .service
+                .is_some()
+        },
+        output: unsafe {
+            (*ptr::addr_of_mut!(NATIVE_SPACES[prepared.slot]))
+                .output
+                .as_deref_mut()
+                .map_or(ptr::null_mut(), |out| out as *mut _)
+        },
+        // The Form cannot edit its PTEs. Use the admitted slot's supervisor
+        // alias for bounded ABI copies, keeping SMAP active with AC clear.
+        data: unsafe { ptr::addr_of_mut!(NATIVE_SPACES[prepared.slot].data.0).cast::<u8>() },
+        service_memory: unsafe {
+            (*ptr::addr_of_mut!(NATIVE_SPACES[prepared.slot]))
+                .service
+                .as_deref_mut()
+                .map_or(ptr::null_mut(), |memory| memory as *mut _)
+        },
         broker: authorization.broker,
         cfc: authorization.cfc,
         dimension: authorization.dimension,
         form: authorization.form,
-        handles: [authorization.execute_handle, authorization.log_handle],
+        handles: [
+            authorization.execute_handle,
+            authorization.log_handle,
+            authorization.network_handle,
+        ],
         frame: prepared.frame,
         slice_ticks: 0,
         tick_limit: tick_limit.max(1),
@@ -828,12 +960,18 @@ fn run_slice_local(
 
 pub fn finish(prepared: PreparedForm) {
     unsafe {
-        (*ptr::addr_of_mut!(NATIVE_SPACES))[prepared.slot].active = false;
+        let space = &mut (*ptr::addr_of_mut!(NATIVE_SPACES))[prepared.slot];
+        space.service = None;
+        space.output = None;
+        space.active = false;
     }
 }
 
 #[no_mangle]
 pub extern "C" fn expos_form_timer_interrupt(frame: *mut TrapFrame) -> u64 {
+    if unsafe { (*frame).cs } & 3 != 3 {
+        return DISPOSITION_RESUME;
+    }
     let Some(active) = active_execution() else {
         return DISPOSITION_FAULT;
     };
@@ -856,6 +994,8 @@ pub extern "C" fn expos_form_interrupt_eoi() {
 
 #[no_mangle]
 pub extern "C" fn expos_form_abi_interrupt(frame: *mut TrapFrame) -> u64 {
+    #[cfg(feature = "isolation-self-test")]
+    crate::isolation_self_test::smap(current_slot());
     let Some(active) = active_execution() else {
         return DISPOSITION_FAULT;
     };
@@ -868,14 +1008,24 @@ pub extern "C" fn expos_form_abi_interrupt(frame: *mut TrapFrame) -> u64 {
         active.frame = *frame;
         return DISPOSITION_FAULT;
     }
-    let request = unsafe { ptr::read_unaligned(USER_DATA as *const AbiRequest) };
+    let request = unsafe { ptr::read_unaligned(active.data.cast::<AbiRequest>()) };
+    #[cfg(feature = "isolation-self-test")]
+    if unsafe {
+        core::slice::from_raw_parts(
+            active.data.add(ABI_PAYLOAD_OFFSET),
+            b"kernel-fault-test!".len(),
+        )
+    } == b"kernel-fault-test!"
+    {
+        crate::isolation_self_test::fatal_kernel_fault();
+    }
     let Some(handle) = active
         .handles
         .iter()
         .find(|handle| handle.id == request.handle_id)
         .copied()
     else {
-        write_abi_response(AbiResponse::status(AbiStatus::Denied));
+        write_abi_response(active.data, AbiResponse::status(AbiStatus::Denied));
         frame.rax = AbiStatus::Denied as u64;
         return DISPOSITION_RESUME;
     };
@@ -886,11 +1036,23 @@ pub extern "C" fn expos_form_abi_interrupt(frame: *mut TrapFrame) -> u64 {
             request,
             crate::hardware::timestamp(),
             |call, arguments| match call {
-                AbiCall::Log => service_log(arguments),
+                AbiCall::Log if !active.output.is_null() && !active.service_reply => {
+                    capture_reply(active.data, active.output, arguments)
+                }
+                AbiCall::Log => service_log(active.data, arguments),
+                AbiCall::IpcSend if active.service_reply && !active.output.is_null() => {
+                    capture_reply(active.data, active.output, arguments)
+                }
                 AbiCall::HandleAuthorize => {
                     AbiResponse::ok([handle.id as u64, handle.operations.bits() as u64, 0, 0])
                 }
                 AbiCall::TimeNow => AbiResponse::ok([crate::hardware::timestamp(), 0, 0, 0]),
+                AbiCall::NetworkSend if handle.id == active.handles[2].id => {
+                    service_network_send(active, arguments)
+                }
+                AbiCall::NetworkReceive if handle.id == active.handles[2].id => {
+                    service_network_receive(active, arguments)
+                }
                 AbiCall::ExecutionYield => {
                     requested_disposition = DISPOSITION_PREEMPT;
                     AbiResponse::ok([0; 4])
@@ -903,22 +1065,172 @@ pub extern "C" fn expos_form_abi_interrupt(frame: *mut TrapFrame) -> u64 {
                 _ => AbiResponse::status(AbiStatus::Unsupported),
             },
         );
-    write_abi_response(response);
+    write_abi_response(active.data, response);
     frame.rax = response.status as u64;
     if requested_disposition != DISPOSITION_RESUME {
         active.frame = *frame;
     }
-    slog!(
-        "EXPOS_FORM_ABI fin={} call={} handle={} status={}\r\n",
-        active.form,
-        request.call,
-        request.handle_id,
-        response.status
-    );
+    // Register polling is normal driver flow and can occur hundreds of
+    // thousands of times per bounded exchange. The lease, rejected portal
+    // requests, service lifecycle and DMA revocation remain audited; avoid
+    // serializing every successful allowlisted register read.
+    let successful_driver_portal = request.arguments[2] == 3
+        && matches!(
+            request.call,
+            value if value == AbiCall::NetworkSend as u16
+                || value == AbiCall::NetworkReceive as u16
+        )
+        && response.status == AbiStatus::Ok as u16;
+    if !successful_driver_portal
+        && (request.call != AbiCall::NetworkReceive as u16
+            || response.status != AbiStatus::WouldBlock as u16)
+    {
+        slog!(
+            "EXPOS_FORM_ABI fin={} call={} handle={} status={}\r\n",
+            active.form,
+            request.call,
+            request.handle_id,
+            response.status
+        );
+    }
     requested_disposition
 }
 
-fn service_log(arguments: [u64; 6]) -> AbiResponse {
+fn capture_reply(
+    data: *const u8,
+    output: *mut crate::service::Output,
+    arguments: [u64; 6],
+) -> AbiResponse {
+    let (offset, length) = (arguments[0] as usize, arguments[1] as usize);
+    if offset < ABI_PAYLOAD_OFFSET
+        || length > 512
+        || offset
+            .checked_add(length)
+            .is_none_or(|end| end > PAGE_BYTES)
+    {
+        return AbiResponse::status(AbiStatus::Invalid);
+    }
+    let output = unsafe { &mut *output };
+    if length > output.bytes.len() - output.length {
+        return AbiResponse::status(AbiStatus::Denied);
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(data.add(offset), length) };
+    output.bytes[output.length..output.length + length].copy_from_slice(bytes);
+    output.length += length;
+    AbiResponse::ok([length as u64, 0, 0, 0])
+}
+
+fn service_network_send(active: &mut ActiveExecution, arguments: [u64; 6]) -> AbiResponse {
+    let _ = active;
+    if arguments[2] == 3 {
+        return match crate::network::service_driver_write(
+            arguments[0] as u16,
+            arguments[1] as u8,
+            arguments[3] as u32,
+        ) {
+            Ok(()) => AbiResponse::ok([0; 4]),
+            Err(_) => AbiResponse::status(AbiStatus::Denied),
+        };
+    }
+    AbiResponse::status(AbiStatus::Unsupported)
+}
+
+fn service_network_receive(active: &mut ActiveExecution, arguments: [u64; 6]) -> AbiResponse {
+    if arguments[2] == 2 {
+        let Some(memory) = (unsafe { active.service_memory.as_ref() }) else {
+            return AbiResponse::status(AbiStatus::Denied);
+        };
+        let Some(physical) = memory.writable_physical_range(arguments[0], arguments[1] as usize)
+        else {
+            return AbiResponse::status(AbiStatus::Invalid);
+        };
+        return match crate::network::service_driver_acquire(
+            physical,
+            arguments[1] as usize,
+            arguments[3] as usize,
+            arguments[4] as usize,
+            arguments[5] as usize,
+        ) {
+            Ok(()) => AbiResponse::ok([0; 4]),
+            Err(_) => AbiResponse::status(AbiStatus::Denied),
+        };
+    }
+    if arguments[2] == 3 {
+        return match crate::network::service_driver_read(arguments[0] as u16, arguments[1] as u8) {
+            Ok(value) => AbiResponse::ok([value as u64, 0, 0, 0]),
+            Err(_) => AbiResponse::status(AbiStatus::Denied),
+        };
+    }
+    if arguments[2] == 1 {
+        return match crate::network::service_configuration() {
+            Ok(values) => AbiResponse::ok(values),
+            Err(_) => AbiResponse::status(AbiStatus::Denied),
+        };
+    }
+    AbiResponse::status(AbiStatus::Unsupported)
+}
+
+pub fn prepare_service(
+    form: Fin,
+    execute: FormHandle,
+    reply: FormHandle,
+    elf: &[u8],
+    input: &[u8],
+    network_handle: Option<FormHandle>,
+) -> Result<PreparedForm, crate::service::Error> {
+    let (mut memory, entry) = crate::service::Memory::load(elf, input)?;
+    let stack_top = crate::service::STACK_OFFSET + crate::service::STACK_BYTES;
+    if let Some(handle) = network_handle {
+        // Seventh SysV argument: the stack begins with a synthetic return
+        // address and the sealed Network Handle follows at RSP+8.
+        memory.bytes[stack_top - 16..stack_top - 8]
+            .copy_from_slice(&(handle.id as u64).to_le_bytes());
+    }
+    let mut prepared = prepare(form, execute, reply, b"native:spin")
+        .map_err(|_| crate::service::Error::Admission)?;
+    let space = unsafe { &mut (*ptr::addr_of_mut!(NATIVE_SPACES))[prepared.slot] };
+    space.user_pd.0[1] = memory.table.as_ptr() as u64 | page_table_flags();
+    space.user_pt.0[0] = 0; // no legacy code/stack in service address spaces
+    space.user_pt.0[2] = 0;
+    space.service = Some(memory);
+    space.output = Some(Box::new(crate::service::Output {
+        bytes: [0; crate::service::OUTPUT_BYTES],
+        length: 0,
+    }));
+    prepared.frame.rip = entry;
+    prepared.frame.r8 = crate::service::BASE + crate::service::INPUT_OFFSET as u64;
+    prepared.frame.r9 = input.len() as u64;
+    prepared.frame.r10 = network_handle.map_or(0, |handle| handle.id as u64);
+    prepared.frame.rsp =
+        crate::service::BASE + stack_top as u64 - if network_handle.is_some() { 24 } else { 8 };
+    prepared.address_space = AddressSpace::confined(
+        physical(&space.pml4),
+        USER_CODE,
+        crate::service::BASE + crate::service::MEMORY_BYTES as u64,
+    )
+    .expect("fixed service range");
+    Ok(prepared)
+}
+
+pub fn capture_output(prepared: PreparedForm) {
+    unsafe {
+        (*ptr::addr_of_mut!(NATIVE_SPACES))[prepared.slot].output =
+            Some(Box::new(crate::service::Output {
+                bytes: [0; crate::service::OUTPUT_BYTES],
+                length: 0,
+            }));
+    }
+}
+
+pub fn take_service_output(prepared: PreparedForm) -> Option<Box<crate::service::Output>> {
+    unsafe {
+        (*ptr::addr_of_mut!(NATIVE_SPACES))[prepared.slot]
+            .output
+            .take()
+    }
+}
+
+fn service_log(data: *const u8, arguments: [u64; 6]) -> AbiResponse {
     let offset = arguments[0] as usize;
     let length = arguments[1] as usize;
     let Some(end) = offset.checked_add(length) else {
@@ -927,8 +1239,7 @@ fn service_log(arguments: [u64; 6]) -> AbiResponse {
     if offset < ABI_PAYLOAD_OFFSET || end > PAGE_BYTES || length > 512 {
         return AbiResponse::status(AbiStatus::Invalid);
     }
-    let bytes =
-        unsafe { core::slice::from_raw_parts((USER_DATA as *const u8).add(offset), length) };
+    let bytes = unsafe { core::slice::from_raw_parts(data.add(offset), length) };
     let Ok(message) = core::str::from_utf8(bytes) else {
         return AbiResponse::status(AbiStatus::Invalid);
     };
@@ -936,24 +1247,84 @@ fn service_log(arguments: [u64; 6]) -> AbiResponse {
     AbiResponse::ok([length as u64, 0, 0, 0])
 }
 
-fn write_abi_response(response: AbiResponse) {
+fn write_abi_response(data: *mut u8, response: AbiResponse) {
     unsafe {
         ptr::write_unaligned(
-            (USER_DATA + ABI_RESPONSE_OFFSET) as *mut AbiResponse,
+            data.add(ABI_RESPONSE_OFFSET as usize).cast::<AbiResponse>(),
             response,
         );
     }
 }
 
+#[repr(C)]
+pub struct FaultFrame {
+    registers: [u64; 15],
+    vector: u64,
+    error: u64,
+    rip: u64,
+    cs: u64,
+    rflags: u64,
+    rsp: u64,
+    ss: u64,
+}
+
+const _: () = assert!(size_of::<FaultFrame>() == 176);
+const _: () = assert!(core::mem::offset_of!(FaultFrame, vector) == 120);
+const _: () = assert!(core::mem::offset_of!(FaultFrame, rip) == 136);
+const _: () = assert!(core::mem::offset_of!(FaultFrame, cs) == 144);
+
 #[no_mangle]
-pub extern "C" fn expos_form_fault_interrupt(vector: u64) {
-    let Some(active) = active_execution() else {
-        loop {
-            port::halt();
+pub extern "C" fn expos_form_fault_interrupt(frame: *mut FaultFrame) -> u64 {
+    let frame = unsafe { &mut *frame };
+    let address: u64;
+    unsafe { asm!("mov {}, cr2", out(reg) address, options(nomem, nostack, preserves_flags)) };
+    #[cfg(feature = "isolation-self-test")]
+    if frame.cs & 3 == 0
+        && crate::isolation_self_test::recover(
+            current_slot(),
+            frame.vector,
+            frame.error,
+            address,
+            &mut frame.rip,
+        )
+    {
+        return DISPOSITION_RESUME;
+    }
+    if frame.cs & 3 == 3 {
+        if let Some(active) = active_execution() {
+            active.fault = frame.vector as u8;
+            slog!(
+                "EXPOS_FORM_FAULT fin={} vector={} error={:#x} rip={:#x} address={:#x} cpl=3\r\n",
+                active.form,
+                frame.vector,
+                frame.error,
+                frame.rip,
+                address
+            );
+            return DISPOSITION_FAULT;
         }
-    };
-    active.fault = vector as u8;
-    slog!("EXPOS_FORM_FAULT fin={} vector={}\r\n", active.form, vector);
+    }
+    // A supervisor fault is never recoverable through an active Form's saved
+    // stack/CR3. Use COM1 directly: the fault may have interrupted a log lock.
+    {
+        let mut serial = crate::serial::SerialPort::new(0x3F8);
+        let _ = core::fmt::Write::write_fmt(
+            &mut serial,
+            format_args!(
+                "EXPOS_KERNEL_FAULT vector={} error={:#x} rip={:#x} address={:#x} cpl={}\r\n",
+                frame.vector,
+                frame.error,
+                frame.rip,
+                address,
+                frame.cs & 3
+            ),
+        );
+    }
+    loop {
+        unsafe {
+            asm!("cli; hlt", options(nomem, nostack));
+        }
+    }
 }
 
 fn physical<T>(value: &T) -> u64 {
