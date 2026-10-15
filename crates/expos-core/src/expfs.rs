@@ -1,4 +1,6 @@
-use crate::{Cfc, CfcFin, Fin};
+use alloc::vec::Vec;
+
+use crate::{Cfc, CfcFin, ChunkedBlob, Fin, DEFAULT_CFC_BLOB_QUOTA, DEFAULT_FORM_BLOB_QUOTA};
 
 const MAX_RECORDS: usize = 32;
 const MAX_STAGED: usize = 8;
@@ -8,7 +10,8 @@ const MAX_STAGED_SYSTEM_RECORDS: usize = 16;
 ///
 /// The kernel's ExpFS v3 disk codec stores the complete record transactionally
 /// and migrates v1/v2 512-byte records when they are next committed.
-pub const FORM_CONTENT_CAPACITY: usize = 4096;
+pub const FORM_CONTENT_CAPACITY: usize = DEFAULT_FORM_BLOB_QUOTA;
+pub const CFC_CONTENT_CAPACITY: usize = DEFAULT_CFC_BLOB_QUOTA;
 pub const SYSTEM_RECORD_CAPACITY: usize = 512;
 
 /// Typed system-database namespaces. They are records in ExpFS rather than
@@ -53,20 +56,27 @@ impl SystemRecord {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PersistentForm {
     pub cfc: CfcFin,
     pub form: Fin,
     pub dimension: Fin,
     pub revision: u32,
     pub journal_sequence: u32,
-    content: [u8; FORM_CONTENT_CAPACITY],
-    content_len: u16,
+    content: ChunkedBlob,
 }
 
 impl PersistentForm {
-    pub fn content(&self) -> &[u8] {
-        &self.content[..self.content_len as usize]
+    pub fn content(&self) -> Vec<u8> {
+        self.content.to_vec()
+    }
+
+    pub fn content_len(&self) -> usize {
+        self.content.len()
+    }
+
+    pub fn read(&self, offset: usize, output: &mut [u8]) -> usize {
+        self.content.read(offset, output)
     }
 }
 
@@ -76,6 +86,7 @@ pub enum StorageError {
     EmptyTransaction,
     InvalidRecord,
     ContentTooLarge,
+    CfcQuotaExceeded,
     DuplicateRecord,
     DuplicateKey,
     StaleRevision,
@@ -185,16 +196,13 @@ impl Transaction {
             .iter_mut()
             .find(|slot| slot.is_none())
             .ok_or(StorageError::Full)?;
-        let mut content = [0; FORM_CONTENT_CAPACITY];
-        content[..bytes.len()].copy_from_slice(bytes);
         *slot = Some(PersistentForm {
             cfc: self.cfc.fin(),
             form,
             dimension,
             revision,
             journal_sequence: 0,
-            content,
-            content_len: bytes.len() as u16,
+            content: ChunkedBlob::from_bytes(bytes),
         });
         Ok(())
     }
@@ -214,7 +222,7 @@ impl ExpFs {
         cfc.validate().expect("ExpFS requires a valid CFC");
         Self {
             cfc: *cfc,
-            records: [None; MAX_RECORDS],
+            records: core::array::from_fn(|_| None),
             system_records: [None; MAX_SYSTEM_RECORDS],
             next_sequence: 1,
         }
@@ -224,10 +232,10 @@ impl ExpFs {
         self.cfc.fin()
     }
 
-    pub const fn begin(&self) -> Transaction {
+    pub fn begin(&self) -> Transaction {
         Transaction {
             cfc: self.cfc,
-            records: [None; MAX_STAGED],
+            records: core::array::from_fn(|_| None),
             system_records: [None; MAX_STAGED_SYSTEM_RECORDS],
         }
     }
@@ -261,6 +269,28 @@ impl ExpFs {
             {
                 return Err(StorageError::StaleRevision);
             }
+        }
+        let retained_bytes: usize = self
+            .records
+            .iter()
+            .flatten()
+            .filter(|record| {
+                self.latest(record.form, record.dimension)
+                    .is_some_and(|latest| latest.revision == record.revision)
+                    && !transaction.records.iter().flatten().any(|replacement| {
+                        replacement.form == record.form && replacement.dimension == record.dimension
+                    })
+            })
+            .map(PersistentForm::content_len)
+            .sum();
+        let staged_bytes: usize = transaction
+            .records
+            .iter()
+            .flatten()
+            .map(PersistentForm::content_len)
+            .sum();
+        if retained_bytes.saturating_add(staged_bytes) > CFC_CONTENT_CAPACITY {
+            return Err(StorageError::CfcQuotaExceeded);
         }
         for record in transaction.system_records.iter().flatten() {
             if self

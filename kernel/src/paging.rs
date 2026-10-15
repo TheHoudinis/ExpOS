@@ -14,11 +14,15 @@ const LARGE: u64 = 1 << 7;
 const NX: u64 = 1 << 63;
 const ADDRESS: u64 = 0x000F_FFFF_FFFF_F000;
 const SPLIT_CAPACITY: usize = 64;
+const DYNAMIC_SPLIT_CAPACITY: usize = 64;
 
 #[repr(C, align(4096))]
 struct Table([u64; 512]);
 
 static mut TABLES: [Table; SPLIT_CAPACITY] = [const { Table([0; 512]) }; SPLIT_CAPACITY];
+static mut DYNAMIC_TABLES: [Table; DYNAMIC_SPLIT_CAPACITY] =
+    [const { Table([0; 512]) }; DYNAMIC_SPLIT_CAPACITY];
+static DYNAMIC_USED: crate::sync::SpinMutex<usize> = crate::sync::SpinMutex::new(0);
 
 unsafe extern "C" {
     static __kernel_text_start: u8;
@@ -120,6 +124,58 @@ pub fn seal_ap_trampoline() {
         ptr::write_volatile(pt.add(8), 0x8000 | PRESENT);
         asm!("invlpg [rax]", in("rax") 0x8000_u64, options(nostack, preserves_flags));
     }
+}
+
+/// Remove every writable executable alias of a Form code frame. The user
+/// mapping remains read-only/executable; its supervisor identity alias becomes
+/// read-only/NX until the frame is reclaimed.
+pub fn seal_form_code_frame(physical: u64) -> bool {
+    set_identity_frame(physical, PRESENT | crate::security::nx_page_flag())
+}
+
+/// Restore a reclaimed frame to the normal supervisor RW/NX pool.
+pub fn unseal_form_frame(physical: u64) -> bool {
+    set_identity_frame(physical, PRESENT | WRITE | crate::security::nx_page_flag())
+}
+
+fn set_identity_frame(physical: u64, flags: u64) -> bool {
+    if physical == 0 || physical >= 1_u64 << 32 || !physical.is_multiple_of(PAGE) {
+        return false;
+    }
+    unsafe {
+        let root = read_cr3();
+        let pdpt = (ptr::read_volatile(root as *const u64) & ADDRESS) as *mut u64;
+        let pdpt_index = (physical / (512 * HUGE)) as usize;
+        let directory_entry = ptr::read_volatile(pdpt.add(pdpt_index));
+        if directory_entry & PRESENT == 0 {
+            return false;
+        }
+        let directory = (directory_entry & ADDRESS) as *mut u64;
+        let pd_index = ((physical / HUGE) % 512) as usize;
+        let entry = directory.add(pd_index);
+        let value = ptr::read_volatile(entry);
+        let table = if value & LARGE != 0 {
+            let mut used = DYNAMIC_USED.lock();
+            if *used >= DYNAMIC_SPLIT_CAPACITY {
+                return false;
+            }
+            let table = &mut *ptr::addr_of_mut!(DYNAMIC_TABLES[*used]);
+            let base = value & ADDRESS;
+            let inherited = value & (PRESENT | WRITE | NX);
+            for (page, target) in table.0.iter_mut().enumerate() {
+                *target = (base + page as u64 * PAGE) | inherited;
+            }
+            *used += 1;
+            ptr::write_volatile(entry, table as *mut Table as u64 | PRESENT | WRITE);
+            table as *mut Table as *mut u64
+        } else {
+            (value & ADDRESS) as *mut u64
+        };
+        let page_index = ((physical / PAGE) % 512) as usize;
+        ptr::write_volatile(table.add(page_index), physical | flags);
+        asm!("invlpg [rax]", in("rax") physical, options(nostack, preserves_flags));
+    }
+    true
 }
 
 fn read_cr3() -> u64 {

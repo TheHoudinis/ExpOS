@@ -21,7 +21,9 @@ The first modern-driver milestone is intentionally bounded:
   devices and eight scratchpads; it does not provide hubs, USB mass storage,
   Bluetooth, audio or arbitrary HID report parsing;
 - ExpAudio supports the Intel/QEMU-compatible AC'97 PCM-out interface with a
-  bounded 48 kHz stereo DMA buffer. It does not yet drive the HDA or USB audio
+  bounded 32-descriptor 48 kHz stereo DMA ring, double-buffered one-request
+  queue, strict integer-PCM WAV conversion and FIFO/underrun diagnostics. It
+  does not yet drive the HDA or USB audio
   hardware used by the listed physical systems, so physical audio is not
   claimed;
 - UEFI uses validated GOP address, size, geometry, stride and RGB/BGR order

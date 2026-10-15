@@ -850,8 +850,7 @@ pub fn enter() -> bool {
             true
         } else {
             let aperture_bytes = LFB_DEVICE_BYTES.load(Ordering::Acquire);
-            active_mode()
-                .is_some_and(|mode| mode_fits_aperture(requested, mode, aperture_bytes))
+            active_mode().is_some_and(|mode| mode_fits_aperture(requested, mode, aperture_bytes))
         };
     if active_matches {
         crate::slog!(

@@ -130,7 +130,7 @@ version = "0.1.0"
 
 [[package]]
 name = "expos-kernel"
-version = "9.3.0-dev"
+version = "9.4.0"
 dependencies = [
  "argon2",
  "chacha20poly1305",

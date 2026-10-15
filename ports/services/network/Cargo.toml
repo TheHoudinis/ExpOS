@@ -9,7 +9,7 @@ edition = "2021"
 crate-type = ["staticlib"]
 
 [dependencies]
-expos-core = { path = "../../../crates/expos-core" }
+expos-core = { path = "../../../crates/expos-core", default-features = false }
 embedded-io = { version = "0.7", default-features = false }
 embedded-tls = { version = "0.19", default-features = false, features = ["rustpki", "p384", "rsa"] }
 rand_core = { version = "0.6", default-features = false }

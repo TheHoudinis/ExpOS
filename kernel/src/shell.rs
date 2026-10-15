@@ -11,7 +11,7 @@ use crate::{
 use expos_core::{
     AddressSpace, Authority, BootReport, CapabilityBroker, CpuState, Dimension, ExecutionContext,
     ExecutionIdentity, ExecutionRuntime, ExecutionState, Fin, Form, FormHandle, FormKind,
-    Lifecycle, NetworkPolicy, Operations, PimpScope, PimpSpec, PimpValue, Relationship,
+    IpcMessage, Lifecycle, NetworkPolicy, Operations, PimpScope, PimpSpec, PimpValue, Relationship,
     RelationshipGraph, RelationshipKind, ResourceKind, Scheduler, SpecKey, Text, FORM_ABI_VERSION,
 };
 
@@ -37,6 +37,7 @@ pub fn run(report: BootReport, mut input: Input, session: Session) -> ! {
 
     loop {
         let Some(byte) = input.poll() else {
+            shell.poll_background();
             core::hint::spin_loop();
             continue;
         };
@@ -110,6 +111,8 @@ struct Shell {
     network_policy: NetworkPolicy,
     kernel_controls: KernelControls,
     scheduler: Scheduler,
+    background: alloc::vec::Vec<ParallelLaunch>,
+    background_cursor: usize,
 }
 
 struct ParallelLaunch {
@@ -270,7 +273,7 @@ impl Shell {
                 .relate(relationship)
                 .expect("built-in graphical relationship must fit");
         }
-        let mut content = [FormContent::empty(); MAX_FORMS];
+        let mut content: [FormContent; MAX_FORMS] = core::array::from_fn(|_| FormContent::empty());
         let ayo_description = b"ayo v3 verified artifact manager; download, SHA-256, safe staging, ownership, rollback, remove, and recovery";
         content[1].bytes[..ayo_description.len()].copy_from_slice(ayo_description);
         content[1].length = ayo_description.len() as u16;
@@ -296,14 +299,15 @@ impl Shell {
         let mut network_policy = NetworkPolicy::Restricted;
         if let Some(snapshot) = crate::expfs_store::loaded_snapshot(report.cfc_fin) {
             forms = [None; MAX_FORMS];
-            content = [FormContent::empty(); MAX_FORMS];
+            content = core::array::from_fn(|_| FormContent::empty());
             dimensions = snapshot.dimensions;
             relationships = RelationshipGraph::new();
             for (index, stored) in snapshot.forms.into_iter().enumerate() {
                 if let Some(stored) = stored {
                     forms[index] = Some(stored.form);
-                    content[index].bytes = stored.content;
-                    content[index].length = stored.content_len;
+                    let bytes = stored.bytes();
+                    content[index].length = bytes.len() as u16;
+                    content[index].bytes[..bytes.len()].copy_from_slice(&bytes);
                 }
             }
             for relationship in snapshot.relationships.into_iter().flatten() {
@@ -332,8 +336,9 @@ impl Shell {
                     break;
                 };
                 forms[index] = Some(stored.form);
-                content[index].bytes = stored.content;
-                content[index].length = stored.content_len;
+                let bytes = stored.bytes();
+                content[index].length = bytes.len() as u16;
+                content[index].bytes[..bytes.len()].copy_from_slice(&bytes);
             }
             slog!(
                 "EXPOS_GENESIS_FORMS_MERGED count={} dimensions={} sequence={}\r\n",
@@ -381,6 +386,8 @@ impl Shell {
             network_policy,
             kernel_controls,
             scheduler,
+            background: alloc::vec::Vec::new(),
+            background_cursor: 0,
         }
     }
 
@@ -591,6 +598,10 @@ impl Shell {
                         context.cpu_state().accumulator
                     );
                 });
+                true
+            }
+            "formctl" => {
+                self.formctl(args);
                 true
             }
             "kstat" => {
@@ -1221,7 +1232,7 @@ impl Shell {
         println!("  CORE       help clear echo about status bootmode whoami history");
         println!("  SESSION    users login logout useradd userdel passwd");
         println!(
-            "  FORMS      forms inspect resolve mkform execute execute-parallel retire activate reclaim"
+            "  FORMS      forms inspect resolve mkform execute execute-parallel formctl retire activate reclaim"
         );
         println!("  DATA       view/cat write append head delete recover move copy");
         println!(
@@ -2243,7 +2254,7 @@ impl Shell {
             .iter()
             .position(|candidate| candidate.is_some_and(|candidate| candidate.fin == form.fin))
             .expect("scheduled Form remains registered");
-        let content = self.content[index];
+        let content = &self.content[index];
         let mut prepared = match crate::form_runtime::prepare(
             form.fin,
             execute_handle,
@@ -2266,6 +2277,9 @@ impl Shell {
             }
         };
         context.set_runtime(ExecutionRuntime::NativeForm);
+        if let Some(heap) = prepared.heap() {
+            context.configure_heap(heap);
+        }
         for launch_handle in [execute_handle, log_handle] {
             if let Err(error) = context.attach_handle(launch_handle) {
                 crate::form_runtime::finish(prepared);
@@ -2501,7 +2515,7 @@ impl Shell {
             .iter()
             .position(|candidate| candidate.is_some_and(|candidate| candidate.fin == form.fin))
             .expect("parallel Form remains registered");
-        let content = self.content[index];
+        let content = &self.content[index];
         let prepared = match crate::form_runtime::prepare(
             form.fin,
             execute_handle,
@@ -2526,6 +2540,9 @@ impl Shell {
             }
         };
         context.set_runtime(ExecutionRuntime::NativeForm);
+        if let Some(heap) = prepared.heap() {
+            context.configure_heap(heap);
+        }
         for launch_handle in [execute_handle, log_handle] {
             if let Err(error) = context.attach_handle(launch_handle) {
                 crate::form_runtime::finish(prepared);
@@ -2748,6 +2765,162 @@ impl Shell {
         crate::form_runtime::finish(left.prepared);
         crate::form_runtime::finish(right.prepared);
         let _ = self.scheduler.dispatch_next();
+    }
+
+    fn start_background(&mut self, identity: &str) {
+        if self
+            .background
+            .iter()
+            .any(|launch| launch.name.as_str().eq_ignore_ascii_case(identity))
+        {
+            println!("'{}' already has a background context.", identity);
+            return;
+        }
+        let Some(launch) = self.prepare_parallel_launch(identity) else {
+            return;
+        };
+        println!(
+            "Started '{}' as background context #{}.",
+            launch.name, launch.context_id
+        );
+        slog!(
+            "EXPOS_FORM_BACKGROUND_START context={} fin={}\r\n",
+            launch.context_id,
+            launch.fin
+        );
+        self.background.push(launch);
+    }
+
+    fn poll_background(&mut self) {
+        if self.background.is_empty() {
+            return;
+        }
+        self.background_cursor %= self.background.len();
+        let index = self.background_cursor;
+        let state = self
+            .scheduler
+            .context(self.background[index].context_id)
+            .map(ExecutionContext::state);
+        if state != Some(ExecutionState::Ready) {
+            self.background_cursor = (index + 1) % self.background.len();
+            return;
+        }
+        let mut launch = self.background.swap_remove(index);
+        let remaining = self
+            .scheduler
+            .context(launch.context_id)
+            .unwrap()
+            .budget()
+            .account(ResourceKind::CpuTicks)
+            .remaining_before_soft();
+        let slice = crate::form_runtime::run_slice(
+            &mut launch.prepared,
+            crate::form_runtime::RunAuthorization::new(
+                &self.broker,
+                self.report.cfc_fin,
+                self.report.stable_fin,
+                launch.fin,
+                launch.execute_handle,
+                launch.log_handle,
+            ),
+            remaining,
+        );
+        self.account_parallel_slice(&mut launch, slice);
+        if launch.finished {
+            slog!(
+                "EXPOS_FORM_BACKGROUND_STOP context={} fin={} state={}\r\n",
+                launch.context_id,
+                launch.fin,
+                execution_state_name(
+                    self.scheduler
+                        .context(launch.context_id)
+                        .map(ExecutionContext::state)
+                        .unwrap_or(ExecutionState::Terminated)
+                )
+            );
+            crate::form_runtime::finish(launch.prepared);
+        } else {
+            self.background.push(launch);
+            self.background_cursor = (index + 1) % self.background.len();
+        }
+    }
+
+    fn formctl(&mut self, arguments: &str) {
+        let mut words = arguments.splitn(3, char::is_whitespace);
+        let operation = words.next().unwrap_or("");
+        let identity = words.next().unwrap_or("");
+        if operation.is_empty() || identity.is_empty() {
+            println!(
+                "usage: formctl <start|pause|resume|wait|terminate|restart|send> <Form> [message]"
+            );
+            return;
+        }
+        if operation == "start" {
+            self.start_background(identity);
+            return;
+        }
+        let Some(index) = self
+            .background
+            .iter()
+            .position(|launch| launch.name.as_str().eq_ignore_ascii_case(identity))
+        else {
+            if operation == "restart" {
+                self.start_background(identity);
+                return;
+            }
+            println!("No background Form named '{}'.", identity);
+            return;
+        };
+        let context_id = self.background[index].context_id;
+        match operation {
+            "pause" => match self.scheduler.pause(context_id) {
+                Ok(()) => println!("Paused '{}' (context #{}).", identity, context_id),
+                Err(error) => println!("formctl pause: {:?}", error),
+            },
+            "resume" => {
+                let result = match self
+                    .scheduler
+                    .context(context_id)
+                    .map(ExecutionContext::state)
+                {
+                    Some(ExecutionState::Paused) => self.scheduler.continue_context(context_id),
+                    Some(ExecutionState::Waiting) => self.scheduler.wake(context_id),
+                    _ => Err(expos_core::ExecutionError::NotRunnable),
+                };
+                match result {
+                    Ok(()) => println!("Resumed '{}' (context #{}).", identity, context_id),
+                    Err(error) => println!("formctl resume: {:?}", error),
+                }
+            }
+            "wait" => match self.scheduler.wait(context_id) {
+                Ok(()) => println!("'{}' is waiting for an event or IPC message.", identity),
+                Err(error) => println!("formctl wait: {:?}", error),
+            },
+            "send" => {
+                let message = words.next().unwrap_or("").as_bytes();
+                match IpcMessage::new(
+                    self.report.root_fin,
+                    crate::hardware::timestamp(),
+                    0,
+                    message,
+                )
+                .and_then(|message| self.scheduler.send_message(context_id, message))
+                {
+                    Ok(()) => println!("Queued asynchronous IPC for '{}'.", identity),
+                    Err(error) => println!("formctl send: {:?}", error),
+                }
+            }
+            "terminate" | "restart" => {
+                let launch = self.background.swap_remove(index);
+                let _ = self.scheduler.terminate(context_id);
+                crate::form_runtime::finish(launch.prepared);
+                println!("Terminated '{}' (context #{}).", identity, context_id);
+                if operation == "restart" {
+                    self.start_background(identity);
+                }
+            }
+            _ => println!("formctl: unknown lifecycle operation '{}'.", operation),
+        }
     }
 
     fn inspect(&self, identity: Option<&str>) {
@@ -2978,7 +3151,7 @@ impl Shell {
         let fin = Fin::from_u128(0x464F_524D_0000_0000_0000_0000_0000_0000 | self.next_fin as u128);
         self.next_fin += 1;
         self.forms[destination_index] = Some(Form::new(fin, destination, source_form.kind));
-        self.content[destination_index] = self.content[source_index];
+        self.content[destination_index] = self.content[source_index].clone();
         self.commit_action();
         println!(
             "Copied '{}' into '{}' with new FIN {}.",
@@ -3339,8 +3512,9 @@ impl Shell {
             if let Some(form) = self.forms[index] {
                 snapshot.forms[index] = Some(crate::expfs_store::StoredForm {
                     form,
-                    content: self.content[index].bytes,
-                    content_len: self.content[index].length,
+                    content: expos_core::ChunkedBlob::from_bytes(
+                        &self.content[index].bytes[..self.content[index].length as usize],
+                    ),
                 });
             }
         }
@@ -3418,9 +3592,9 @@ fn replace_input_line(line: &mut [u8; MAX_LINE], length: &mut usize, value: Opti
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct FormContent {
-    bytes: [u8; MAX_CONTENT],
+    bytes: alloc::vec::Vec<u8>,
     length: u16,
 }
 
@@ -3440,9 +3614,9 @@ impl HistoryEntry {
 }
 
 impl FormContent {
-    const fn empty() -> Self {
+    fn empty() -> Self {
         Self {
-            bytes: [0; MAX_CONTENT],
+            bytes: alloc::vec![0; MAX_CONTENT],
             length: 0,
         }
     }
@@ -3616,6 +3790,7 @@ fn is_shell_command(name: &str) -> bool {
             | "mkform"
             | "execute"
             | "execute-parallel"
+            | "formctl"
             | "parallel"
             | "view"
             | "cat"
@@ -3671,6 +3846,7 @@ fn is_mutating_command(name: &str) -> bool {
             | "recover"
             | "move"
             | "copy"
+            | "formctl"
             | "retire"
             | "activate"
             | "reclaim"
@@ -3703,6 +3879,7 @@ fn is_form_mutation(name: &str) -> bool {
             | "recover"
             | "move"
             | "copy"
+            | "formctl"
             | "retire"
             | "activate"
             | "reclaim"
@@ -3920,9 +4097,11 @@ const fn execution_state_name(state: ExecutionState) -> &'static str {
     match state {
         ExecutionState::Ready => "ready",
         ExecutionState::Running => "running",
+        ExecutionState::Paused => "paused",
         ExecutionState::Waiting => "waiting",
         ExecutionState::BudgetBlocked => "budget-blocked",
         ExecutionState::Exited => "exited",
+        ExecutionState::Terminated => "terminated",
     }
 }
 

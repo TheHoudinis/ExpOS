@@ -15,8 +15,9 @@ use core::{
 };
 
 use expos_core::{
-    AbiCall, AbiRequest, AbiResponse, AbiStatus, AddressSpace, CapabilityBroker, CfcFin, Fin,
-    FormHandle, NativeCallGate, NativeImage, NativeImageError, Operations, FORM_ABI_VERSION,
+    AbiCall, AbiRequest, AbiResponse, AbiStatus, AddressSpace, CapabilityBroker, CfcFin,
+    ContextHeap, Fin, FormHandle, NativeCallGate, NativeImage, NativeImageError, Operations,
+    StreamCall, StreamRequest, FORM_ABI_VERSION,
 };
 
 use crate::{port, println, slog};
@@ -30,12 +31,22 @@ const IA32_GS_BASE: u32 = 0xC000_0101;
 
 pub const USER_CODE: u64 = 0x0000_4000_0000_0000;
 pub const USER_DATA: u64 = USER_CODE + PAGE_BYTES as u64;
-pub const USER_STACK: u64 = USER_DATA + PAGE_BYTES as u64;
+pub const USER_STACK: u64 = USER_DATA + 2 * PAGE_BYTES as u64;
 pub const USER_END: u64 = USER_STACK + PAGE_BYTES as u64;
 const USER_STACK_TOP: u64 = USER_END - 16;
+const V2_CODE_PAGES: usize = 8;
+const V2_DATA_INDEX: usize = 9;
+const V2_DATA_PAGES: usize = 6;
+const V2_HEAP_INDEX: usize = 16;
+const V2_HEAP_PAGES: usize = 16;
+const V2_STACK_INDEX: usize = 33;
+const V2_STACK_PAGES: usize = 4;
+const V2_END_INDEX: usize = 38;
+const MAX_DYNAMIC_FRAMES: usize = V2_CODE_PAGES + V2_DATA_PAGES + V2_HEAP_PAGES + V2_STACK_PAGES;
 const ABI_RESPONSE_OFFSET: u64 = 80;
 const ABI_PAYLOAD_OFFSET: usize = 256;
 const ABI_MAGIC: u64 = 0x4558_504F_5341_4249; // "EXPOSABI"
+const STREAM_ABI_MAGIC: u64 = 0x4558_5053_5452_4D32; // "EXPSTRM2"
 
 const PAGE_PRESENT: u64 = 1 << 0;
 const PAGE_WRITE: u64 = 1 << 1;
@@ -75,6 +86,11 @@ struct NativeSpace {
     code: BytePage,
     data: BytePage,
     stack: BytePage,
+    dynamic_frames: [u64; MAX_DYNAMIC_FRAMES],
+    dynamic_len: u8,
+    dynamic_code_len: u8,
+    data_physical: u64,
+    data_virtual: u64,
     form: Fin,
     assigned: bool,
     active: bool,
@@ -92,6 +108,11 @@ impl NativeSpace {
             code: BytePage::zeroed(),
             data: BytePage::zeroed(),
             stack: BytePage::zeroed(),
+            dynamic_frames: [0; MAX_DYNAMIC_FRAMES],
+            dynamic_len: 0,
+            dynamic_code_len: 0,
+            data_physical: 0,
+            data_virtual: USER_DATA,
             form: Fin::ZERO,
             assigned: false,
             active: false,
@@ -292,12 +313,25 @@ impl PreparedForm {
     pub const fn address_space(self) -> AddressSpace {
         self.address_space
     }
+
+    pub fn heap(self) -> Option<ContextHeap> {
+        if self.address_space.upper_bound != USER_CODE + V2_END_INDEX as u64 * PAGE_BYTES as u64 {
+            return None;
+        }
+        let mut heap = ContextHeap::new(
+            USER_CODE + V2_HEAP_INDEX as u64 * PAGE_BYTES as u64,
+            V2_HEAP_PAGES as u32,
+        )?;
+        heap.grow(V2_HEAP_PAGES as u32).ok()?;
+        Some(heap)
+    }
 }
 
 struct ActiveExecution {
     service_reply: bool,
     output: *mut crate::service::Output,
     data: *mut u8,
+    data_virtual: u64,
     service_memory: *mut crate::service::Memory,
     broker: *const CapabilityBroker,
     cfc: CfcFin,
@@ -605,6 +639,8 @@ pub enum PrepareError {
     InvalidImage(NativeImageError),
     NxRequired,
     NoSlot,
+    OutOfMemory,
+    WxSeal,
 }
 
 impl PrepareError {
@@ -618,6 +654,8 @@ impl PrepareError {
             },
             Self::NxRequired => "native images require CPU NX protection",
             Self::NoSlot => "no isolated native address-space slot is available",
+            Self::OutOfMemory => "physical page-frame quota is exhausted",
+            Self::WxSeal => "executable frame could not be physically sealed",
         }
     }
 }
@@ -662,6 +700,11 @@ pub fn prepare(
     space.code.0.fill(0xCC);
     space.data.0.fill(0);
     space.stack.0.fill(0);
+    space.dynamic_frames.fill(0);
+    space.dynamic_len = 0;
+    space.dynamic_code_len = 0;
+    space.data_physical = physical(&space.data);
+    space.data_virtual = USER_DATA;
 
     let kernel_cr3 = read_cr3() & !0xFFF;
     let kernel_pml4 = kernel_cr3 as *const u64;
@@ -671,17 +714,99 @@ pub fn prepare(
     space.pml4.0[pml4_index] = physical(&space.user_pdpt) | page_table_flags();
     space.user_pdpt.0[0] = physical(&space.user_pd) | page_table_flags();
     space.user_pd.0[0] = physical(&space.user_pt) | page_table_flags();
-    // W^X: executable Form code is read-only; writable data and stack are NX.
+    // EXF1 format v1 retains its historical addresses. Format v2 gets
+    // independently allocated multi-page code/data/stack ranges with explicit
+    // guard holes and a private per-context heap window.
     let no_execute = crate::security::nx_page_flag();
-    space.user_pt.0[0] = physical(&space.code) | PAGE_PRESENT | PAGE_USER;
-    space.user_pt.0[1] = physical(&space.data) | PAGE_PRESENT | PAGE_WRITE | PAGE_USER | no_execute;
-    space.user_pt.0[2] =
-        physical(&space.stack) | PAGE_PRESENT | PAGE_WRITE | PAGE_USER | no_execute;
+    let v2 = image.is_some_and(|image| image.format_version == 2);
+    let (data_virtual, stack_top, address_end) = if let Some(image) =
+        image.filter(|image| image.format_version == 2)
+    {
+        let code_pages = image.code.len().div_ceil(PAGE_BYTES);
+        let data_bytes = ABI_PAYLOAD_OFFSET + image.data.len() + image.zero_bytes;
+        let data_pages = data_bytes.div_ceil(PAGE_BYTES);
+        let total = code_pages + data_pages + V2_HEAP_PAGES + V2_STACK_PAGES;
+        if code_pages > V2_CODE_PAGES || data_pages > V2_DATA_PAGES || total > MAX_DYNAMIC_FRAMES {
+            return reject_preparation(space, PrepareError::InvalidImage(NativeImageError::Length));
+        }
+        for index in 0..total {
+            let Some(frame) = crate::memory::allocate_frame() else {
+                return reject_preparation(space, PrepareError::OutOfMemory);
+            };
+            space.dynamic_frames[index] = frame;
+            space.dynamic_len += 1;
+        }
+        space.dynamic_code_len = code_pages as u8;
+        for page in 0..code_pages {
+            let frame = space.dynamic_frames[page];
+            let start = page * PAGE_BYTES;
+            let end = (start + PAGE_BYTES).min(image.code.len());
+            unsafe {
+                core::slice::from_raw_parts_mut(frame as *mut u8, PAGE_BYTES)[..end - start]
+                    .copy_from_slice(&image.code[start..end]);
+            }
+            space.user_pt.0[page] = frame | PAGE_PRESENT | PAGE_USER;
+        }
+        let data_start = code_pages;
+        for page in 0..data_pages {
+            let frame = space.dynamic_frames[data_start + page];
+            space.user_pt.0[V2_DATA_INDEX + page] =
+                frame | PAGE_PRESENT | PAGE_WRITE | PAGE_USER | no_execute;
+        }
+        let heap_start = code_pages + data_pages;
+        for page in 0..V2_HEAP_PAGES {
+            let frame = space.dynamic_frames[heap_start + page];
+            space.user_pt.0[V2_HEAP_INDEX + page] =
+                frame | PAGE_PRESENT | PAGE_WRITE | PAGE_USER | no_execute;
+        }
+        let stack_start = heap_start + V2_HEAP_PAGES;
+        for page in 0..V2_STACK_PAGES {
+            let frame = space.dynamic_frames[stack_start + page];
+            space.user_pt.0[V2_STACK_INDEX + page] =
+                frame | PAGE_PRESENT | PAGE_WRITE | PAGE_USER | no_execute;
+        }
+        space.data_physical = space.dynamic_frames[data_start];
+        space.data_virtual = USER_CODE + V2_DATA_INDEX as u64 * PAGE_BYTES as u64;
+        copy_to_frames(
+            &space.dynamic_frames[data_start..data_start + data_pages],
+            ABI_PAYLOAD_OFFSET,
+            image.data,
+        );
+        for page in 0..code_pages {
+            if !crate::paging::seal_form_code_frame(space.dynamic_frames[page]) {
+                return reject_preparation(space, PrepareError::WxSeal);
+            }
+        }
+        crate::slog!(
+            "EXPOS_FORM_MAP fin={} format=2 code_pages={} data_pages={} heap_pages={} stack_pages={} guards=4\r\n",
+            form,
+            code_pages,
+            data_pages,
+            V2_HEAP_PAGES,
+            V2_STACK_PAGES
+        );
+        (
+            space.data_virtual,
+            USER_CODE + (V2_STACK_INDEX + V2_STACK_PAGES) as u64 * PAGE_BYTES as u64 - 16,
+            USER_CODE + V2_END_INDEX as u64 * PAGE_BYTES as u64,
+        )
+    } else {
+        space.user_pt.0[0] = physical(&space.code) | PAGE_PRESENT | PAGE_USER;
+        space.user_pt.0[1] =
+            physical(&space.data) | PAGE_PRESENT | PAGE_WRITE | PAGE_USER | no_execute;
+        // Index 2 is deliberately unmapped as a guard page.
+        space.user_pt.0[3] =
+            physical(&space.stack) | PAGE_PRESENT | PAGE_WRITE | PAGE_USER | no_execute;
+        let payload = image.map_or_else(|| native_payload(content), |image| image.data);
+        let payload_len = payload.len().min(PAGE_BYTES - ABI_PAYLOAD_OFFSET);
+        space.data.0[ABI_PAYLOAD_OFFSET..ABI_PAYLOAD_OFFSET + payload_len]
+            .copy_from_slice(&payload[..payload_len]);
+        (USER_DATA, USER_STACK_TOP, USER_END)
+    };
 
-    let payload = image.map_or_else(|| native_payload(content), |image| image.data);
-    let payload_len = payload.len().min(PAGE_BYTES - ABI_PAYLOAD_OFFSET);
-    space.data.0[ABI_PAYLOAD_OFFSET..ABI_PAYLOAD_OFFSET + payload_len]
-        .copy_from_slice(&payload[..payload_len]);
+    let payload_len = image
+        .map_or_else(|| native_payload(content).len(), |image| image.data.len())
+        .min(PAGE_BYTES - ABI_PAYLOAD_OFFSET);
     let request = AbiRequest {
         version: FORM_ABI_VERSION,
         call: AbiCall::Log as u16,
@@ -690,11 +815,16 @@ pub fn prepare(
         arguments: [ABI_PAYLOAD_OFFSET as u64, payload_len as u64, 0, 0, 0, 0],
     };
     unsafe {
-        ptr::write_unaligned(space.data.0.as_mut_ptr().cast::<AbiRequest>(), request);
+        ptr::write_unaligned(
+            (space.data_physical as *mut u8).cast::<AbiRequest>(),
+            request,
+        );
     }
 
-    if let Some(image) = image {
+    if let Some(image) = image.filter(|image| image.format_version == 1) {
         space.code.0[..image.code.len()].copy_from_slice(image.code);
+    } else if v2 {
+        // v2 code was copied into physical frames before their aliases were sealed.
     } else if content.starts_with(b"native:spin") {
         // PAUSE; JMP -4. This deliberately has no cooperative exit path.
         space.code.0[..4].copy_from_slice(&[0xF3, 0x90, 0xEB, 0xFC]);
@@ -725,23 +855,19 @@ pub fn prepare(
     }
 
     let root = physical(&space.pml4);
-    let address_space = AddressSpace::confined(root, USER_CODE, USER_END)
+    let address_space = AddressSpace::confined(root, USER_CODE, address_end)
         .expect("fixed native address-space bounds are valid");
     Ok(PreparedForm {
         slot: slot_index,
         address_space,
         frame: TrapFrame {
             rip: USER_CODE + image.map_or(0, |image| image.entry as u64),
-            rdi: USER_DATA,
-            rsi: USER_DATA + ABI_RESPONSE_OFFSET,
+            rdi: data_virtual,
+            rsi: data_virtual + ABI_RESPONSE_OFFSET,
             rdx: execute_handle.id as u64,
             rcx: log_handle.id as u64,
             rflags: 0x202,
-            rsp: if image.is_some() {
-                USER_END - 8
-            } else {
-                USER_STACK_TOP
-            },
+            rsp: stack_top,
             ..TrapFrame::default()
         },
     })
@@ -770,6 +896,50 @@ fn emit_log_and_exit(code: &mut [u8], execute_handle: u32) {
     emit(&[0x48, 0xB8]);
     emit(&ABI_MAGIC.to_le_bytes());
     emit(&[0xCD, 0x80, 0x0F, 0x0B]); // int 0x80; ud2 if exit returned
+}
+
+fn copy_to_frames(frames: &[u64], offset: usize, bytes: &[u8]) {
+    let mut copied = 0;
+    while copied < bytes.len() {
+        let position = offset + copied;
+        let page = position / PAGE_BYTES;
+        let within = position % PAGE_BYTES;
+        let count = (PAGE_BYTES - within).min(bytes.len() - copied);
+        unsafe {
+            core::slice::from_raw_parts_mut(frames[page] as *mut u8, PAGE_BYTES)
+                [within..within + count]
+                .copy_from_slice(&bytes[copied..copied + count]);
+        }
+        copied += count;
+    }
+}
+
+fn release_dynamic_frames(space: &mut NativeSpace) {
+    for index in 0..space.dynamic_len as usize {
+        let frame = space.dynamic_frames[index];
+        if index < space.dynamic_code_len as usize {
+            let _ = crate::paging::unseal_form_frame(frame);
+        }
+        let _ = crate::memory::release_frame(frame);
+        space.dynamic_frames[index] = 0;
+    }
+    space.dynamic_len = 0;
+    space.dynamic_code_len = 0;
+    space.data_physical = physical(&space.data);
+    space.data_virtual = USER_DATA;
+}
+
+fn reject_preparation(
+    space: &mut NativeSpace,
+    error: PrepareError,
+) -> Result<PreparedForm, PrepareError> {
+    release_dynamic_frames(space);
+    space.user_pt.0.fill(0);
+    space.user_pd.0.fill(0);
+    space.user_pdpt.0.fill(0);
+    space.pml4.0.fill(0);
+    space.active = false;
+    Err(error)
 }
 
 fn native_payload(content: &[u8]) -> &[u8] {
@@ -911,7 +1081,8 @@ fn run_slice_local(
         },
         // The Form cannot edit its PTEs. Use the admitted slot's supervisor
         // alias for bounded ABI copies, keeping SMAP active with AC clear.
-        data: unsafe { ptr::addr_of_mut!(NATIVE_SPACES[prepared.slot].data.0).cast::<u8>() },
+        data: unsafe { (*ptr::addr_of!(NATIVE_SPACES[prepared.slot])).data_physical as *mut u8 },
+        data_virtual: unsafe { (*ptr::addr_of!(NATIVE_SPACES[prepared.slot])).data_virtual },
         service_memory: unsafe {
             (*ptr::addr_of_mut!(NATIVE_SPACES[prepared.slot]))
                 .service
@@ -963,6 +1134,7 @@ pub fn finish(prepared: PreparedForm) {
         let space = &mut (*ptr::addr_of_mut!(NATIVE_SPACES))[prepared.slot];
         space.service = None;
         space.output = None;
+        release_dynamic_frames(space);
         space.active = false;
     }
 }
@@ -1000,10 +1172,18 @@ pub extern "C" fn expos_form_abi_interrupt(frame: *mut TrapFrame) -> u64 {
         return DISPOSITION_FAULT;
     };
     let frame = unsafe { &mut *frame };
-    if frame.rax != ABI_MAGIC
-        || frame.rdi != USER_DATA
-        || frame.rsi != USER_DATA + ABI_RESPONSE_OFFSET
-    {
+    if frame.rdi != active.data_virtual || frame.rsi != active.data_virtual + ABI_RESPONSE_OFFSET {
+        active.fault = 0x80;
+        active.frame = *frame;
+        return DISPOSITION_FAULT;
+    }
+    if frame.rax == STREAM_ABI_MAGIC {
+        let response = dispatch_stream(active);
+        write_abi_response(active.data, response);
+        frame.rax = response.status as u64;
+        return DISPOSITION_RESUME;
+    }
+    if frame.rax != ABI_MAGIC {
         active.fault = 0x80;
         active.frame = *frame;
         return DISPOSITION_FAULT;
@@ -1094,6 +1274,102 @@ pub extern "C" fn expos_form_abi_interrupt(frame: *mut TrapFrame) -> u64 {
         );
     }
     requested_disposition
+}
+
+fn dispatch_stream(active: &mut ActiveExecution) -> AbiResponse {
+    const TRANSFER_OFFSET: usize = ABI_PAYLOAD_OFFSET;
+    const TRANSFER_BYTES: usize = expos_core::STREAM_CHUNK_BYTES;
+    let request = unsafe { ptr::read_unaligned(active.data.cast::<StreamRequest>()) };
+    let operation = match request.validate() {
+        Ok(operation) => operation,
+        Err(status) => return AbiResponse::status(status),
+    };
+    let Some(handle) = active
+        .handles
+        .iter()
+        .find(|handle| handle.id == request.handle_id)
+        .copied()
+    else {
+        return AbiResponse::status(AbiStatus::Denied);
+    };
+    let broker = unsafe { &*active.broker };
+    if broker
+        .authorize_requester(
+            handle.id,
+            active.form,
+            handle.target,
+            active.dimension,
+            operation,
+            crate::hardware::timestamp(),
+        )
+        .is_err()
+    {
+        return AbiResponse::status(AbiStatus::Denied);
+    }
+    let Some(call) = StreamCall::from_raw(request.call) else {
+        return AbiResponse::status(AbiStatus::Unsupported);
+    };
+    if request.length as usize > TRANSFER_BYTES {
+        return AbiResponse::status(AbiStatus::Invalid);
+    }
+    let offset = match usize::try_from(request.offset) {
+        Ok(offset) => offset,
+        Err(_) => return AbiResponse::status(AbiStatus::Invalid),
+    };
+    let result = match call {
+        StreamCall::OpenRead => {
+            crate::expfs_store::open_blob_stream(active.cfc, handle.target, false)
+                .map(|(id, length)| [id as u64, length as u64, 0, 0])
+        }
+        StreamCall::OpenWrite => {
+            crate::expfs_store::open_blob_stream(active.cfc, handle.target, true)
+                .map(|(id, length)| [id as u64, length as u64, 0, 0])
+        }
+        StreamCall::ReadChunk => {
+            let output = unsafe {
+                core::slice::from_raw_parts_mut(
+                    active.data.add(TRANSFER_OFFSET),
+                    request.length as usize,
+                )
+            };
+            crate::expfs_store::read_blob_stream(
+                active.cfc,
+                handle.target,
+                request.stream_id,
+                offset,
+                output,
+            )
+            .map(|(count, total)| [count as u64, total as u64, TRANSFER_OFFSET as u64, 0])
+        }
+        StreamCall::WriteChunk => {
+            let input = unsafe {
+                core::slice::from_raw_parts(
+                    active.data.add(TRANSFER_OFFSET),
+                    request.length as usize,
+                )
+            };
+            crate::expfs_store::write_blob_stream(
+                active.cfc,
+                handle.target,
+                request.stream_id,
+                offset,
+                input,
+            )
+            .map(|end| [end as u64, 0, 0, 0])
+        }
+        StreamCall::Commit => {
+            crate::expfs_store::commit_blob_stream(active.cfc, handle.target, request.stream_id)
+                .map(|(revision, generation)| [revision as u64, generation, 0, 0])
+        }
+        StreamCall::Abort => {
+            crate::expfs_store::abort_blob_stream(active.cfc, handle.target, request.stream_id)
+                .map(|()| [0; 4])
+        }
+    };
+    match result {
+        Ok(values) => AbiResponse::ok(values),
+        Err(_) => AbiResponse::status(AbiStatus::Invalid),
+    }
 }
 
 fn capture_reply(

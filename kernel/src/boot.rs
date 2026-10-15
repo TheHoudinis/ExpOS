@@ -16,6 +16,10 @@ static GOP_HEIGHT: AtomicU32 = AtomicU32::new(0);
 static GOP_STRIDE: AtomicU32 = AtomicU32::new(0);
 static GOP_FORMAT: AtomicU32 = AtomicU32::new(u32::MAX);
 static ACPI_RSDP: AtomicU64 = AtomicU64::new(0);
+static HANDOFF_ADDRESS: AtomicU64 = AtomicU64::new(0);
+static MEMORY_MAP_ADDRESS: AtomicU64 = AtomicU64::new(0);
+static MEMORY_MAP_SIZE: AtomicU64 = AtomicU64::new(0);
+static MEMORY_DESCRIPTOR_SIZE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FirmwareFramebuffer {
@@ -91,6 +95,7 @@ pub fn requested_mode() -> Option<crate::session::BootMode> {
 /// The firmware memory map stays reserved and is handed to future ASL memory
 /// ownership work; the current allocator uses a separately reserved kernel heap.
 pub unsafe fn initialize(magic: u32, address: u64) {
+    HANDOFF_ADDRESS.store(address, Ordering::Release);
     if magic == UEFI_MAGIC {
         NATIVE_UEFI.store(true, Ordering::Release);
         assert!(
@@ -109,6 +114,9 @@ pub unsafe fn initialize(magic: u32, address: u64) {
         assert!(info.memory_map >= 0x1000 && info.memory_map < 0x4000_0000);
         assert!(info.memory_map_size <= 0x4000_0000 - info.memory_map);
         assert_eq!(info.memory_map_size % info.descriptor_size, 0);
+        MEMORY_MAP_ADDRESS.store(info.memory_map, Ordering::Relaxed);
+        MEMORY_MAP_SIZE.store(info.memory_map_size, Ordering::Relaxed);
+        MEMORY_DESCRIPTOR_SIZE.store(info.descriptor_size, Ordering::Release);
         assert!(info.boot_mode <= 3);
         REQUESTED.store(info.boot_mode as u8, Ordering::Release);
         if valid_framebuffer(info) {
@@ -142,6 +150,81 @@ pub unsafe fn initialize(magic: u32, address: u64) {
         ACPI_RSDP.store(rsdp, Ordering::Release);
     }
     crate::slog!("EXPOS_BIOS_HANDOFF protocol=multiboot2\r\n");
+}
+
+/// Visit RAM that firmware has released after boot services ended. The page
+/// allocator performs its own alignment and reserves the kernel/handoff again.
+pub fn visit_usable_memory(mut visitor: impl FnMut(u64, u64)) {
+    if native_uefi() {
+        let address = MEMORY_MAP_ADDRESS.load(Ordering::Acquire);
+        let size = MEMORY_MAP_SIZE.load(Ordering::Relaxed);
+        let stride = MEMORY_DESCRIPTOR_SIZE.load(Ordering::Relaxed);
+        if address == 0 || stride < 40 {
+            return;
+        }
+        let mut offset = 0;
+        while offset + 40 <= size {
+            unsafe {
+                let descriptor = (address + offset) as *const u8;
+                let kind = core::ptr::read_unaligned(descriptor.cast::<u32>());
+                let physical = core::ptr::read_unaligned(descriptor.add(8).cast::<u64>());
+                let pages = core::ptr::read_unaligned(descriptor.add(24).cast::<u64>());
+                if matches!(kind, 3 | 4 | 7) {
+                    visitor(physical, pages.saturating_mul(4096));
+                }
+            }
+            offset += stride;
+        }
+        return;
+    }
+
+    let address = HANDOFF_ADDRESS.load(Ordering::Acquire);
+    if !(0x1000..0x1_0000_0000).contains(&address) {
+        return;
+    }
+    unsafe {
+        let total = core::ptr::read_unaligned(address as *const u32) as u64;
+        let mut cursor = address + 8;
+        while cursor + 8 <= address.saturating_add(total) {
+            let kind = core::ptr::read_unaligned(cursor as *const u32);
+            let size = core::ptr::read_unaligned((cursor + 4) as *const u32) as u64;
+            if size < 8 || cursor + size > address + total {
+                break;
+            }
+            if kind == 6 && size >= 16 {
+                let entry_size = core::ptr::read_unaligned((cursor + 8) as *const u32) as u64;
+                let mut entry = cursor + 16;
+                while entry_size >= 24 && entry + entry_size <= cursor + size {
+                    let base = core::ptr::read_unaligned(entry as *const u64);
+                    let length = core::ptr::read_unaligned((entry + 8) as *const u64);
+                    let memory_kind = core::ptr::read_unaligned((entry + 16) as *const u32);
+                    if memory_kind == 1 {
+                        visitor(base, length);
+                    }
+                    entry += entry_size;
+                }
+            }
+            if kind == 0 {
+                break;
+            }
+            cursor = (cursor + size + 7) & !7;
+        }
+    }
+}
+
+pub fn visit_handoff_ranges(mut visitor: impl FnMut(u64, u64)) {
+    let handoff = HANDOFF_ADDRESS.load(Ordering::Acquire);
+    if handoff != 0 {
+        visitor(handoff, 4096);
+    }
+    let map = MEMORY_MAP_ADDRESS.load(Ordering::Acquire);
+    let size = MEMORY_MAP_SIZE.load(Ordering::Relaxed);
+    if map != 0 && size != 0 {
+        visitor(map, size);
+    }
+    if let Some(framebuffer) = firmware_framebuffer() {
+        visitor(framebuffer.address, framebuffer.bytes);
+    }
 }
 
 unsafe fn multiboot_rsdp(address: u64) -> Option<u64> {

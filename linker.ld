@@ -53,6 +53,9 @@ SECTIONS
         *(.bss .bss.*)
     } :data
 
+    . = ALIGN(4K);
+    __kernel_end = .;
+
     /DISCARD/ :
     {
         *(.eh_frame*)

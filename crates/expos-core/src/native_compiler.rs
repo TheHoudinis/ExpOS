@@ -5,12 +5,16 @@
 //! real language-shaped entry point, and emits an EXF1 x86-64 image that can
 //! only log and exit through the admitted Form ABI bootstrap.
 
-use crate::{NATIVE_IMAGE_HEADER, NATIVE_IMAGE_LIMIT};
+use alloc::{vec, vec::Vec};
+
+use crate::NATIVE_IMAGE_HEADER;
 
 const USER_DATA: u64 = 0x4000_0000_1000;
 const ABI_MAGIC: u64 = 0x4558_504f_5341_4249;
 const DATA_OFFSET: u32 = 256;
 const DATA_CAPACITY: usize = 4096 - DATA_OFFSET as usize;
+const SOURCE_LIMIT: usize = 32 * 1024;
+const COMPILER_IMAGE_LIMIT: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeLanguage {
@@ -67,7 +71,7 @@ pub enum CompileError {
 impl CompileError {
     pub const fn message(self) -> &'static str {
         match self {
-            Self::SourceTooLarge => "source exceeds the 4096-byte Form limit",
+            Self::SourceTooLarge => "source exceeds the 32768-byte Form quota",
             Self::NonAscii => "the native source profile currently requires ASCII",
             Self::MissingEntry => "missing supported main entry point",
             Self::InvalidString => "log string is malformed or uses an unsupported escape",
@@ -79,18 +83,17 @@ impl CompileError {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompiledNative {
-    bytes: [u8; NATIVE_IMAGE_LIMIT],
-    len: usize,
+    bytes: Vec<u8>,
 }
 
 impl CompiledNative {
     pub fn bytes(&self) -> &[u8] {
-        &self.bytes[..self.len]
+        &self.bytes
     }
 }
 
 pub fn compile(language: NativeLanguage, source: &str) -> Result<CompiledNative, CompileError> {
-    if source.len() > NATIVE_IMAGE_LIMIT {
+    if source.len() > SOURCE_LIMIT {
         return Err(CompileError::SourceTooLarge);
     }
     if !source.is_ascii() {
@@ -136,12 +139,11 @@ pub fn compile(language: NativeLanguage, source: &str) -> Result<CompiledNative,
     emit(&mut code, &mut cursor, &[0x0F, 0x0B])?; // exit must not return
 
     let total = NATIVE_IMAGE_HEADER + cursor + message_len;
-    if total > NATIVE_IMAGE_LIMIT {
+    if total > COMPILER_IMAGE_LIMIT {
         return Err(CompileError::ImageTooLarge);
     }
     let mut image = CompiledNative {
-        bytes: [0; NATIVE_IMAGE_LIMIT],
-        len: total,
+        bytes: vec![0; total],
     };
     image.bytes[..4].copy_from_slice(b"EXF1");
     image.bytes[4..6].copy_from_slice(&1_u16.to_le_bytes());
@@ -293,7 +295,7 @@ mod tests {
             compile(NativeLanguage::Go, "func main() { expos.Log(\"bad\\x\") }"),
             Err(CompileError::InvalidString)
         );
-        let source = "x".repeat(NATIVE_IMAGE_LIMIT + 1);
+        let source = "x".repeat(SOURCE_LIMIT + 1);
         assert_eq!(
             compile(NativeLanguage::C, &source),
             Err(CompileError::SourceTooLarge)

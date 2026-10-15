@@ -5,8 +5,76 @@ use crate::{CapabilityBroker, CfcFin, Fin, Operations};
 /// reinterpret an existing version's call numbers or wire layouts.
 pub const FORM_ABI_VERSION: u16 = 1;
 
+/// Additive large-object contract. ABI v1 keeps its original request and
+/// response records; streaming is negotiated separately and never reuses v1
+/// call numbers.
+pub const STREAM_ABI_VERSION: u16 = 2;
+// The request/response records occupy the first 256 bytes of the admitted ABI
+// page, leaving this contiguous transfer window for one gate invocation. ExpFS
+// still allocates its backing blob in independent 4 KiB chunks.
+pub const STREAM_CHUNK_BYTES: usize = 4096 - 256;
+
 /// Compatibility name retained for source written against the first Go SDK.
 pub const GO_ABI_VERSION: u16 = FORM_ABI_VERSION;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u16)]
+pub enum StreamCall {
+    OpenRead = 1,
+    OpenWrite = 2,
+    ReadChunk = 3,
+    WriteChunk = 4,
+    Commit = 5,
+    Abort = 6,
+}
+
+impl StreamCall {
+    pub const fn from_raw(value: u16) -> Option<Self> {
+        Some(match value {
+            1 => Self::OpenRead,
+            2 => Self::OpenWrite,
+            3 => Self::ReadChunk,
+            4 => Self::WriteChunk,
+            5 => Self::Commit,
+            6 => Self::Abort,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct StreamRequest {
+    pub version: u16,
+    pub call: u16,
+    pub caller: Fin,
+    pub handle_id: u32,
+    pub stream_id: u32,
+    pub offset: u64,
+    pub length: u32,
+    pub flags: u32,
+}
+
+impl StreamRequest {
+    pub fn validate(self) -> Result<Operations, AbiStatus> {
+        if self.version != STREAM_ABI_VERSION || self.caller.is_zero() || self.handle_id == 0 {
+            return Err(AbiStatus::Invalid);
+        }
+        if self.length as usize > STREAM_CHUNK_BYTES {
+            return Err(AbiStatus::Invalid);
+        }
+        match StreamCall::from_raw(self.call) {
+            Some(StreamCall::OpenRead | StreamCall::ReadChunk) => Ok(Operations::READ),
+            Some(
+                StreamCall::OpenWrite
+                | StreamCall::WriteChunk
+                | StreamCall::Commit
+                | StreamCall::Abort,
+            ) => Ok(Operations::CONFIGURE),
+            None => Err(AbiStatus::Unsupported),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
@@ -293,6 +361,30 @@ mod tests {
             }
             .validate(),
             Err(AbiStatus::Unsupported)
+        );
+        assert_eq!(FORM_ABI_VERSION, 1);
+    }
+
+    #[test]
+    fn streaming_is_additive_and_chunk_bounded() {
+        let request = StreamRequest {
+            version: STREAM_ABI_VERSION,
+            call: StreamCall::WriteChunk as u16,
+            caller: Fin::from_u128(7),
+            handle_id: 3,
+            stream_id: 9,
+            offset: 4096,
+            length: STREAM_CHUNK_BYTES as u32,
+            flags: 0,
+        };
+        assert_eq!(request.validate(), Ok(Operations::CONFIGURE));
+        assert_eq!(
+            StreamRequest {
+                length: STREAM_CHUNK_BYTES as u32 + 1,
+                ..request
+            }
+            .validate(),
+            Err(AbiStatus::Invalid)
         );
     }
 

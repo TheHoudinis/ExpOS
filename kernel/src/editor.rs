@@ -16,7 +16,7 @@ const MUTED: u32 = 0x0085888c;
 const ACCENT: u32 = 0x000078d4;
 
 pub struct Editor {
-    code: [u8; CAPACITY],
+    code: Vec<u8>,
     len: usize,
     cursor: usize,
     scroll: Cell<usize>,
@@ -39,7 +39,7 @@ pub struct Editor {
 impl Editor {
     pub fn new(cfc: CfcFin, ide: bool) -> Box<Self> {
         let mut editor = Box::new(Self {
-            code: [0; CAPACITY],
+            code: alloc::vec![0; CAPACITY],
             len: 0,
             cursor: 0,
             scroll: Cell::new(0),
@@ -116,6 +116,7 @@ impl Editor {
                 return;
             }
             self.code = bytes;
+            self.code.resize(CAPACITY, 0);
             self.len = len;
             self.cursor = 0;
             self.scroll.set(0);
@@ -352,7 +353,7 @@ impl Editor {
 
     fn insert(&mut self, bytes: &[u8]) {
         if self.len + bytes.len() > CAPACITY {
-            self.status = "File limit: 4096 bytes";
+            self.status = "File quota: 32768 bytes";
             return;
         }
         self.code
@@ -722,8 +723,8 @@ impl Editor {
         }
         fb::rect(x + 1, y + h - 24, w - 2, 23, ACCENT);
         clipped(x + 12, y + h - 16, w - 165, self.status, 0x00ffffff);
-        number(x + w - 134, y + h - 16, self.len, 0x00ffffff);
-        fb::text(x + w - 112, y + h - 16, "/4096 bytes", 0x00ffffff, 1);
+        number(x + w - 158, y + h - 16, self.len, 0x00ffffff);
+        fb::text(x + w - 128, y + h - 16, "/32768 bytes", 0x00ffffff, 1);
     }
 }
 fn clipped(x: i32, y: i32, width: i32, text: &str, color: u32) {

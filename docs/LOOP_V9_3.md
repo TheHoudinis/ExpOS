@@ -399,6 +399,30 @@ GUI evidence is in `build/editor-check/`, `build/editor-reboot-check/`, and
 finishing the help/status text. Full `make all`, Genesis installer/recovery,
 live public HTTPS endpoints and physical hardware were not rerun for this
 increment. The Genesis ISO from the previous increment was not rebuilt.
-Everything remains local and uncommitted on `codex/v9.3-loop`; HEAD and
-`origin/main` remain the v9.2 Mole baseline `7121551`. No release or public
-registry was published.
+That paragraph records the state of the original Loop development run. Loop was
+later committed as `19ac013`; the increment below is newer local work and is
+not pushed, tagged or released.
+
+## Post-Loop scalability and background-runtime increment (local)
+
+- ExpFS Form content is a heap-backed `ChunkedBlob`, allocated in 4 KiB pieces
+  with a 32 KiB per-Form quota and 48 KiB live CFC quota. Snapshot publication,
+  checkpointing and encrypted persistence remain transactional; the unit disk
+  round trip now crosses three chunk boundaries. A separate ABI v2 stream gate
+  performs capability-bound open/read/write/commit/abort without changing ABI
+  v1 records or call numbers.
+- A firmware-map physical page-frame allocator now owns released RAM below
+  4 GiB. EXF1 container v2 uses independent physical code/data/heap/stack frames,
+  four unmapped guards and a private 64 KiB RW/NX per-context heap. Code frames are
+  loaded RW/NX, exposed RX to the Form, and have their identity alias sealed
+  R/NX until reclaim.
+- The scheduler now models pause, resume, wait, terminate and restart, bounded
+  asynchronous IPC queues, event-driven wakeup and per-context heap ownership.
+  `formctl` exposes the lifecycle for background executable
+  Forms, while the shell idle path advances one interrupt-bounded slice at a
+  time instead of synchronously waiting for completion.
+
+Boundaries: the frame allocator is intentionally below 4 GiB; demand-grown
+heaps, cross-CPU TLB shootdown, IST/NMI stacks and IOMMU/DMA isolation
+remain open. Form ABI v1 `IPC_RECEIVE` remains frozen/unsupported; general queue
+transport requires its own versioned SDK gate rather than reinterpretation.

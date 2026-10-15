@@ -3,7 +3,10 @@
 
 pub const NATIVE_IMAGE_MAGIC: &[u8; 4] = b"EXF1";
 pub const NATIVE_IMAGE_HEADER: usize = 24;
-pub const NATIVE_IMAGE_LIMIT: usize = 4096;
+pub const NATIVE_IMAGE_LIMIT: usize = 32 * 1024;
+pub const NATIVE_V1_CODE_LIMIT: usize = 4096;
+pub const NATIVE_V2_CODE_LIMIT: usize = 8 * 4096;
+pub const NATIVE_V2_DATA_LIMIT: usize = 6 * 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeImageError {
@@ -15,6 +18,7 @@ pub enum NativeImageError {
 
 #[derive(Clone, Copy, Debug)]
 pub struct NativeImage<'a> {
+    pub format_version: u16,
     pub code: &'a [u8],
     pub data: &'a [u8],
     pub zero_bytes: usize,
@@ -27,16 +31,28 @@ impl<'a> NativeImage<'a> {
             return Err(NativeImageError::Header);
         }
         let word = |at| u16::from_le_bytes([bytes[at], bytes[at + 1]]) as usize;
-        if word(4) != 1 || word(6) != 1 || word(8) != 1 || word(10) != 0 || bytes[20..24] != [0; 4]
+        let format_version = word(4);
+        if !matches!(format_version, 1 | 2)
+            || word(6) != 1
+            || word(8) != 1
+            || word(10) != 0
+            || bytes[20..24] != [0; 4]
         {
             return Err(NativeImageError::Unsupported);
         }
         let (code, data, zero_bytes, entry) = (word(12), word(14), word(16), word(18));
         // All lengths are widened before addition; no allocation or unchecked indexing.
+        let (code_limit, data_limit) = if format_version == 1 {
+            (NATIVE_V1_CODE_LIMIT, 4096 - 256)
+        } else {
+            (NATIVE_V2_CODE_LIMIT, NATIVE_V2_DATA_LIMIT - 256)
+        };
         if bytes.len() > NATIVE_IMAGE_LIMIT
             || code == 0
-            || code > 4096
-            || data + zero_bytes > 4096 - 256
+            || code > code_limit
+            || data
+                .checked_add(zero_bytes)
+                .is_none_or(|size| size > data_limit)
             || NATIVE_IMAGE_HEADER + code + data != bytes.len()
         {
             return Err(NativeImageError::Length);
@@ -45,6 +61,7 @@ impl<'a> NativeImage<'a> {
             return Err(NativeImageError::Entry);
         }
         Ok(Self {
+            format_version: format_version as u16,
             code: &bytes[NATIVE_IMAGE_HEADER..NATIVE_IMAGE_HEADER + code],
             data: &bytes[NATIVE_IMAGE_HEADER + code..],
             zero_bytes,
@@ -81,6 +98,22 @@ mod tests {
         for length in 0..bytes.len() {
             assert!(NativeImage::parse(&bytes[..length]).is_err());
         }
+    }
+
+    #[test]
+    fn v2_admits_multi_page_code_and_data_without_changing_abi_v1() {
+        let code = 7000_usize;
+        let data = 5000_usize;
+        let mut bytes = vec![0; NATIVE_IMAGE_HEADER + code + data];
+        bytes[..4].copy_from_slice(NATIVE_IMAGE_MAGIC);
+        bytes[4..6].copy_from_slice(&2_u16.to_le_bytes());
+        bytes[6..8].copy_from_slice(&1_u16.to_le_bytes());
+        bytes[8..10].copy_from_slice(&1_u16.to_le_bytes());
+        bytes[12..14].copy_from_slice(&(code as u16).to_le_bytes());
+        bytes[14..16].copy_from_slice(&(data as u16).to_le_bytes());
+        let image = NativeImage::parse(&bytes).unwrap();
+        assert_eq!(image.format_version, 2);
+        assert_eq!((image.code.len(), image.data.len()), (code, data));
     }
 
     #[test]

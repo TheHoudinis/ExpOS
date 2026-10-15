@@ -49,13 +49,16 @@ erase.
   bootstrap initially uses writable executable huge pages. Unsupported CPUs
   retain a diagnostic boot path with `wx=false`. The low identity map still
   covers RAM and MMIO, and kernel code can modify page tables.
-- Executable Form pages still have a supervisor RW/NX backing alias used by the
-  image/capsule loader; strict physical-page W^X for dynamically loaded Forms needs
-  allocator/sealing work. This is separate from kernel image W^X.
+- EXF1 container-v2 Form pages are leased from the firmware-derived physical
+  frame allocator. Code is populated while RW/NX, then its supervisor identity
+  alias is sealed R/NX while the Form alias is RX. Reclaim restores RW/NX.
+  Cross-CPU TLB shootdown and IOMMU/DMA isolation remain open; kernel page-table
+  code is still trusted.
 - EXF1 images require NX and receive a bounded CPL3 address space; GS is
   switched on entry/exit, unowned fast syscall entries are disabled, and
   floating-point/SIMD instructions fault until owned state saving exists.
-  NMI/IST stacks and general service memory allocation are still missing.
+  NMI/IST stacks and demand-grown heaps are still missing; v2 receives a fixed,
+  eagerly committed private 64 KiB RW/NX heap.
 - Secure Boot, measured boot, TPM sealing, IOMMU DMA isolation and signed kernel
   updates are not implemented.
 - CRC protects unencrypted Architect records from accidental damage, not a
@@ -63,7 +66,7 @@ erase.
 - Static tests do not replace hostile packet/parser fuzzing or physical-machine
   validation.
 
-## Loop protection validation
+## v9.4 protection validation
 
 `make isolation-check` builds a separate disposable image with the
 `isolation-self-test` feature. Its narrowly matched exception fixups do not

@@ -9,13 +9,108 @@
 
 pub use expos_core::{
     AbiCall as Call, AbiRequest as Request, AbiResponse as Response, AbiStatus as Status, Fin,
-    FORM_ABI_VERSION,
+    StreamCall, StreamRequest, FORM_ABI_VERSION, STREAM_ABI_VERSION, STREAM_CHUNK_BYTES,
 };
 
 pub trait Transport {
     type Error;
 
     fn call(&mut self, request: Request) -> Result<Response, Self::Error>;
+}
+
+/// Separate transport for the additive blob-stream gate. Implementations copy
+/// `transfer` through the admitted ABI-page window; v1 `Transport` is unchanged.
+pub trait StreamTransport {
+    type Error;
+
+    fn stream_call(
+        &mut self,
+        request: StreamRequest,
+        transfer: &mut [u8],
+    ) -> Result<Response, Self::Error>;
+}
+
+pub struct StreamClient<T> {
+    caller: Fin,
+    handle: u32,
+    stream: u32,
+    transport: T,
+}
+
+impl<T: StreamTransport> StreamClient<T> {
+    pub fn new(caller: Fin, handle: u32, transport: T) -> Option<Self> {
+        (!caller.is_zero() && handle != 0).then_some(Self {
+            caller,
+            handle,
+            stream: 0,
+            transport,
+        })
+    }
+
+    fn invoke(
+        &mut self,
+        call: StreamCall,
+        offset: u64,
+        transfer: &mut [u8],
+    ) -> Result<Response, Error<T::Error>> {
+        if transfer.len() > STREAM_CHUNK_BYTES {
+            return Err(Error::Status(Status::Invalid));
+        }
+        let response = self
+            .transport
+            .stream_call(
+                StreamRequest {
+                    version: STREAM_ABI_VERSION,
+                    call: call as u16,
+                    caller: self.caller,
+                    handle_id: self.handle,
+                    stream_id: self.stream,
+                    offset,
+                    length: transfer.len() as u32,
+                    flags: 0,
+                },
+                transfer,
+            )
+            .map_err(Error::Transport)?;
+        let status =
+            Status::from_raw(response.status).ok_or(Error::UnknownStatus(response.status))?;
+        if status != Status::Ok {
+            return Err(Error::Status(status));
+        }
+        Ok(response)
+    }
+
+    pub fn open_read(&mut self) -> Result<usize, Error<T::Error>> {
+        let response = self.invoke(StreamCall::OpenRead, 0, &mut [])?;
+        self.stream = response.values[0] as u32;
+        Ok(response.values[1] as usize)
+    }
+
+    pub fn open_write(&mut self) -> Result<usize, Error<T::Error>> {
+        let response = self.invoke(StreamCall::OpenWrite, 0, &mut [])?;
+        self.stream = response.values[0] as u32;
+        Ok(response.values[1] as usize)
+    }
+
+    pub fn read(&mut self, offset: u64, output: &mut [u8]) -> Result<usize, Error<T::Error>> {
+        Ok(self.invoke(StreamCall::ReadChunk, offset, output)?.values[0] as usize)
+    }
+
+    pub fn write(&mut self, offset: u64, bytes: &mut [u8]) -> Result<usize, Error<T::Error>> {
+        Ok(self.invoke(StreamCall::WriteChunk, offset, bytes)?.values[0] as usize)
+    }
+
+    pub fn commit(&mut self) -> Result<u32, Error<T::Error>> {
+        let response = self.invoke(StreamCall::Commit, 0, &mut [])?;
+        self.stream = 0;
+        Ok(response.values[0] as u32)
+    }
+
+    pub fn abort(&mut self) -> Result<(), Error<T::Error>> {
+        self.invoke(StreamCall::Abort, 0, &mut [])?;
+        self.stream = 0;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,5 +244,33 @@ mod tests {
         let make_transport = || RecordingTransport { last: None };
         assert!(Client::new(Fin::ZERO, 9, make_transport()).is_none());
         assert!(Client::new(Fin::from_u128(7), 0, make_transport()).is_none());
+    }
+
+    struct RecordingStream {
+        last: Option<StreamRequest>,
+    }
+
+    impl StreamTransport for RecordingStream {
+        type Error = ();
+
+        fn stream_call(
+            &mut self,
+            request: StreamRequest,
+            _transfer: &mut [u8],
+        ) -> Result<Response, Self::Error> {
+            self.last = Some(request);
+            Ok(Response::ok([17, 9000, 0, 0]))
+        }
+    }
+
+    #[test]
+    fn stream_client_uses_v2_without_changing_v1() {
+        let transport = RecordingStream { last: None };
+        let mut client = StreamClient::new(Fin::from_u128(7), 9, transport).unwrap();
+        assert_eq!(client.open_read(), Ok(9000));
+        let mut output = [0; 32];
+        assert_eq!(client.read(4096, &mut output), Ok(17));
+        assert_eq!(FORM_ABI_VERSION, 1);
+        assert_eq!(STREAM_ABI_VERSION, 2);
     }
 }

@@ -121,6 +121,22 @@ impl Inventory {
         entry.owner = owner;
         true
     }
+
+    fn release(&mut self, location: pci::Location, owner: Owner) -> bool {
+        let Some(entry) = self
+            .entries
+            .iter_mut()
+            .flatten()
+            .find(|entry| entry.location == Some(location))
+        else {
+            return false;
+        };
+        if owner == Owner::Unbound || entry.owner != owner {
+            return false;
+        }
+        entry.owner = Owner::Unbound;
+        true
+    }
 }
 
 static INVENTORY: SpinMutex<Inventory> = SpinMutex::new(Inventory::new());
@@ -152,6 +168,12 @@ pub fn initialize() {
 
 pub fn claim(function: pci::Function, owner: Owner) -> bool {
     INVENTORY.lock().claim(function.location, owner)
+}
+
+/// Return a failed driver's exact capability to the unbound inventory. A
+/// caller cannot release another driver's device or use `Unbound` as an owner.
+pub fn release(function: pci::Function, owner: Owner) -> bool {
+    INVENTORY.lock().release(function.location, owner)
 }
 
 pub fn claim_firmware_framebuffer() {
@@ -261,5 +283,8 @@ mod tests {
         );
         assert!(inventory.claim(location, Owner::ExpStorage));
         assert!(!inventory.claim(location, Owner::ExpUsb));
+        assert!(!inventory.release(location, Owner::ExpUsb));
+        assert!(inventory.release(location, Owner::ExpStorage));
+        assert!(inventory.claim(location, Owner::ExpUsb));
     }
 }

@@ -20,9 +20,9 @@ python exec('def square(x):\n return x*x\nprint(square(7))')
 `python3` is an alias. Every execution requires the authenticated session's
 Execute capability, including requester identity and revocation checks.
 Each invocation starts a fresh VM: variables do not survive between commands.
-Form scripts fit the shell's 4096-byte content capacity; inline
-commands are limited by its 127-byte input line. The embedding accepts up to
-4096 source bytes. The runtime limits are a private 256 KiB heap, 48 KiB C stack
+Persisted Form scripts fit the 32 KiB per-Form blob quota; inline commands are
+limited by the shell's 127-byte input line. The embedding deliberately accepts
+up to 4096 source bytes. The runtime limits are a private 256 KiB heap, 48 KiB C stack
 budget, 100000 VM/iterator budget checkpoints, and 16 KiB output. There is no
 claim that a checkpoint equals a CPU instruction or a fixed number of seconds.
 Loop and iterator exhaustion use a VM abort that Python `try/except` cannot
@@ -41,8 +41,9 @@ filesystem or network service is exposed to scripts. The loader, ABI bridge
 and scheduler remain trusted code; this is not a guarantee against all defects.
 
 The optional Ayo app Cliptick uses this same native VM and captures output in
-its Output pane. Ctrl+R runs and Ctrl+S saves. Its source documents fit 4096
-bytes. See [Loop work log](LOOP_V9_3.md) for run-mode semantics.
+its Output pane. Ctrl+R runs and Ctrl+S saves. Its source documents fit the
+32 KiB Form quota; execution still applies the smaller admission bound above.
+See [Loop work log](LOOP_V9_3.md) for run-mode semantics.
 The current console font displays ASCII; non-ASCII output uses placeholders.
 
 `sdk/python` is a separate host-side Python development package. Its versioned

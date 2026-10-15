@@ -69,15 +69,17 @@ and service policy, not concurrent processes or multiple simultaneous sessions.
 
 The handoff ABI v1 includes the map descriptor size/version and GOP metadata.
 It is an implementation interface, not a finalized CFC disk or encryption
-format. The allocator currently uses its reserved kernel heap; it does not yet
-consume arbitrary conventional memory from the firmware map. GOP address,
+format. A bitmap page-frame allocator now consumes released UEFI conventional/
+boot-services memory or the Multiboot2 usable-memory map below 4 GiB, after
+reserving the complete kernel, handoff, memory-map and framebuffer ranges. The
+reclaiming 80 MiB kernel heap remains a separate audited allocation arena. GOP address,
 size, geometry, stride and RGB/BGR order are validated and used directly by the
 desktop, login and graphical console. BIOS fallback discovers the Bochs/QEMU
 framebuffer PCI BAR and checks mapped bounds before drawing.
-Executable Forms have static per-context page-table arenas, supervisor-only
-kernel mappings, a TSS/IDT, PIT preemption and a bounded DPL3 ABI gate. General
-physical-page allocation, complete exception coverage and interrupt-driven
-device drivers retain their current limitations. This build is unsigned and
+Executable Forms have per-context page-table roots, dynamically leased v2
+code/data/heap/stack frames, guard pages, a TSS/IDT, PIT preemption and bounded DPL3
+ABI gates. Above-4-GiB frames, demand paging, complete exception coverage and
+interrupt-driven device drivers retain their current limitations. This build is unsigned and
 does not implement Secure Boot.
 
 Genesis now has a separate native-UEFI installation build. It offers Easy and

@@ -320,16 +320,18 @@ audio-check: $(ISO)
 	rm -f $(BUILD)/audio-output.wav
 	truncate -s $(STATE_SIZE) $(BUILD)/audio-state.img
 	set +e; timeout 90 $(QEMU) $(QEMU_TEST_AUDIO) -drive file=$(BUILD)/audio-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-audio-input.txt > $(BUILD)/audio-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
-	grep -q "EXPOS_AUDIO_READY backend=ac97 rate=48000 channels=2 sample=s16le" $(BUILD)/audio-serial.log
+	grep -q "EXPOS_AUDIO_READY backend=ac97 rate=48000 channels=2 sample=s16le descriptors=32 queue=1" $(BUILD)/audio-serial.log
 	grep -q "EXPOS_SETTING_CHANGED key=audio-volume value=85" $(BUILD)/audio-serial.log
 	grep -q "EXPOS_SETTING_CHANGED key=audio-muted value=true" $(BUILD)/audio-serial.log
 	grep -q "EXPOS_SETTING_CHANGED key=audio-test action=play" $(BUILD)/audio-serial.log
 	grep -q "EXPOS_SETTING_CHANGED key=audio-test action=stop" $(BUILD)/audio-serial.log
-	grep -q "EXPOS_AUDIO_PLAY codec=generated-tone frequency=660" $(BUILD)/audio-serial.log
+	grep -q "EXPOS_AUDIO_PLAY codec=generated-tone frequency=660 frames=24000" $(BUILD)/audio-serial.log
 	grep -q "EXPOS_TERMINAL_COMMAND name=audio" $(BUILD)/audio-serial.log
 	grep -q "EXPOS_AUDIO_STATUS backend=ac97 volume=85 muted=true" $(BUILD)/audio-serial.log
 	grep -q "EXPOS_AUDIO_STOP" $(BUILD)/audio-serial.log
 	grep -q "EXPOS_COMMAND_OK shutdown" $(BUILD)/audio-serial.log
+	! grep -q "EXPOS_AUDIO_FAULT" $(BUILD)/audio-serial.log
+	! grep -q "EXPOS_AUDIO_RECOVERY_FAILED" $(BUILD)/audio-serial.log
 	python3 -c "from pathlib import Path; assert Path('$(BUILD)/audio-output.wav').stat().st_size > 44"
 	@echo ">>> EXPOS AC97 AUDIO TEST PASSED <<<"
 
@@ -526,11 +528,12 @@ large-file-check: $(ISO)
 	truncate -s $(STATE_SIZE) $(BUILD)/large-file-state.img
 	set +e; timeout 120 $(QEMU) -drive file=$(BUILD)/large-file-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-large-file-write-input.txt > $(BUILD)/large-file-write.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
 	set +e; timeout 120 $(QEMU) -drive file=$(BUILD)/large-file-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-large-file-read-input.txt > $(BUILD)/large-file-read.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
-	grep -q "content=565 bytes" $(BUILD)/large-file-write.log
-	grep -q "content=565 bytes" $(BUILD)/large-file-read.log
+	grep -q "content=4520 bytes" $(BUILD)/large-file-write.log
+	grep -q "content=4520 bytes" $(BUILD)/large-file-read.log
 	grep -q "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE" $(BUILD)/large-file-read.log
+	grep -q "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF" $(BUILD)/large-file-read.log
 	grep -q "EXPOS_EXPFS_FORMS_RESTORED" $(BUILD)/large-file-read.log
-	@echo ">>> EXPOS 4 KIB FORM PERSISTENCE TEST PASSED <<<"
+	@echo ">>> EXPOS CHUNKED FORM PERSISTENCE TEST PASSED (4520 BYTES) <<<"
 
 modern-hardware-check: $(ISO)
 	python3 tests/check-modern-hardware.py

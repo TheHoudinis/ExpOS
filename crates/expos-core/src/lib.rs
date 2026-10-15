@@ -5,7 +5,12 @@
 //! This crate deliberately exposes Forms, FINs, Dimensions and capability
 //! handles instead of paths, file descriptors, users, or POSIX permissions.
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
+
 mod abi;
+#[cfg(feature = "alloc")]
+mod blob;
 mod browser;
 mod budget;
 mod capability;
@@ -13,10 +18,12 @@ mod cfc;
 mod diese;
 mod display;
 mod execution;
+#[cfg(feature = "alloc")]
 mod expfs;
 mod fin;
 mod form;
 mod http;
+#[cfg(feature = "alloc")]
 mod native_compiler;
 mod native_image;
 mod pimp;
@@ -27,7 +34,13 @@ mod scope;
 mod text;
 
 pub use abi::{
-    AbiCall, AbiRequest, AbiResponse, AbiStatus, NativeCallGate, FORM_ABI_VERSION, GO_ABI_VERSION,
+    AbiCall, AbiRequest, AbiResponse, AbiStatus, NativeCallGate, StreamCall, StreamRequest,
+    FORM_ABI_VERSION, GO_ABI_VERSION, STREAM_ABI_VERSION, STREAM_CHUNK_BYTES,
+};
+#[cfg(feature = "alloc")]
+pub use blob::{
+    BlobError, BlobQuota, BlobTransaction, CfcBlobStore, ChunkedBlob, BLOB_CHUNK_BYTES,
+    DEFAULT_CFC_BLOB_QUOTA, DEFAULT_FORM_BLOB_QUOTA,
 };
 pub use browser::{
     BorderStyle, BoxEdges, BrowserError, BrowserText, BrowserWebState, ComputedStyle, CssColor,
@@ -51,13 +64,14 @@ pub use display::{
     DisplayServer, Rect, Surface, SurfaceRole, SurfaceState, EXPDISPLAY_PROTOCOL_VERSION,
 };
 pub use execution::{
-    AddressSpace, CpuState, ExecutionContext, ExecutionError, ExecutionEvent, ExecutionIdentity,
-    ExecutionRuntime, ExecutionState, Scheduler, MAX_CONTEXT_EVENTS, MAX_CONTEXT_HANDLES,
-    MAX_EXECUTION_CONTEXTS,
+    AddressSpace, ContextHeap, CpuState, ExecutionContext, ExecutionError, ExecutionEvent,
+    ExecutionIdentity, ExecutionRuntime, ExecutionState, IpcMessage, Scheduler, IPC_INLINE_BYTES,
+    MAX_CONTEXT_EVENTS, MAX_CONTEXT_HANDLES, MAX_CONTEXT_MESSAGES, MAX_EXECUTION_CONTEXTS,
 };
+#[cfg(feature = "alloc")]
 pub use expfs::{
-    ExpFs, RecordKey, RecordKind, StorageError, SystemRecord, Transaction, FORM_CONTENT_CAPACITY,
-    SYSTEM_RECORD_CAPACITY,
+    ExpFs, RecordKey, RecordKind, StorageError, SystemRecord, Transaction, CFC_CONTENT_CAPACITY,
+    FORM_CONTENT_CAPACITY, SYSTEM_RECORD_CAPACITY,
 };
 pub use fin::Fin;
 pub use form::{Dimension, Form, FormKind, FormRegistry, Lifecycle, Visibility};
@@ -65,12 +79,14 @@ pub use http::{
     decode_chunked as decode_http_chunked, parse_http_response, HttpError, HttpResponse,
     HTTP_BODY_CAPACITY,
 };
+#[cfg(feature = "alloc")]
 pub use native_compiler::{
     compile as compile_native_source, CompileError as NativeCompileError, CompiledNative,
     NativeLanguage,
 };
 pub use native_image::{
     NativeImage, NativeImageError, NATIVE_IMAGE_HEADER, NATIVE_IMAGE_LIMIT, NATIVE_IMAGE_MAGIC,
+    NATIVE_V1_CODE_LIMIT, NATIVE_V2_CODE_LIMIT, NATIVE_V2_DATA_LIMIT,
 };
 pub use pimp::{NetworkPolicy, PimpScope, PimpSpec, PimpValue, SpecKey};
 pub use protection::{
@@ -193,14 +209,22 @@ pub fn bootstrap_with_identity(
         .charge(ResourceKind::FormOperations, 1)
         .map_err(|_| BootError::BudgetRejected)?;
 
-    let mut store = ExpFs::new(&cfc);
-    let mut transaction = store.begin();
-    transaction
-        .stage_form(root_fin, stable_fin, 1)
-        .map_err(|_| BootError::StorageFailure)?;
-    let sequence = store
-        .commit(transaction)
-        .map_err(|_| BootError::StorageFailure)?;
+    #[cfg(feature = "alloc")]
+    let sequence = {
+        let mut store = ExpFs::new(&cfc);
+        let mut transaction = store.begin();
+        transaction
+            .stage_form(root_fin, stable_fin, 1)
+            .map_err(|_| BootError::StorageFailure)?;
+        store
+            .commit(transaction)
+            .map_err(|_| BootError::StorageFailure)?
+    };
+    // Ring 3 service images intentionally build expos-core without an allocator.
+    // Their bootstrap report still describes the initial logical journal record;
+    // the kernel-owned ExpFS path performs the persistent transaction.
+    #[cfg(not(feature = "alloc"))]
+    let sequence = 1;
 
     Ok(BootReport {
         cfc_fin,

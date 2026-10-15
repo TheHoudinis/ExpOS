@@ -119,12 +119,12 @@ artifact = "build/hello"
                 self.assertNotEqual(result.returncode, 0)
             self.assertEqual(*images)
 
-    def test_native_rejects_storage_overflow_and_undefined_symbols(self):
+    def test_native_rejects_v2_quota_overflow_and_undefined_symbols(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             command = self.native_project(root)
             for source in (
-                '__attribute__((used)) char huge[4097] = {1}; void _start(void) { for (;;) {} }',
+                '__attribute__((used)) char huge[24577] = {1}; void _start(void) { for (;;) {} }',
                 'extern void missing(void); void _start(void) { missing(); }',
             ):
                 (root / "hello.c").write_text(source)

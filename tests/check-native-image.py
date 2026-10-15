@@ -29,8 +29,8 @@ go_script = subprocess.check_output([str(CLI), "--manifest", str(GO_MANIFEST),
                                      "import-script", "--no-build"], text=True).splitlines()
 
 
-def image(code, data=b"", entry=0):
-    return struct.pack("<4s8HI", b"EXF1", 1, 1, 1, 0, len(code), len(data), 0, entry, 0) + code + data
+def image(code, data=b"", entry=0, version=1):
+    return struct.pack("<4s8HI", b"EXF1", version, 1, 1, 0, len(code), len(data), 0, entry, 0) + code + data
 
 
 def upload(payload, name="Probe"):
@@ -83,7 +83,8 @@ def run(name, commands, cpu="max", reset=True):
 
 
 # Reuse one Form so the test checks the image boundary, not the Form quota.
-commands = [*script, *rust_script, *go_script, "mkform Probe executable", "grant Probe execute"]
+commands = ["expbudget set form-operations 512 1024", *script, *rust_script, *go_script,
+            "mkform Probe executable", "grant Probe execute"]
 faults = [
     (bytes.fromhex("31c08ee8dbe3"), 7),                       # x87 with CR0.TS
     (bytes.fromhex("0f57c0"), 6),                     # XORPS: OSFXSR disabled on BIOS
@@ -99,7 +100,25 @@ for code, _ in faults:
 # Mutating the user GS selector must not corrupt kernel GS on timer/ABI/fault.
 commands += [*upload(image(bytes.fromhex(
     "31c08ee866c74702080089571448c747182b00000048b8494241534f505845cd800f0b"))), "execute Probe"]
+# EXF1 format v2 crosses the old 4 KiB ceiling and must use independently
+# allocated code pages plus guard-separated data/stack ranges.
+v2_exit = bytes.fromhex(
+    "4889fb48b80000010000400000c6002a66c74302080089531448c743184d0000004889df488d7350"
+    "48b8494241534f505845cd800f0b"
+)
+v2_code = v2_exit + bytes([0x90]) * (4120 - len(v2_exit))
+commands += [*upload(image(v2_code, version=2)), "execute Probe"]
+# Preserve the preemption/budget proof after the v2 re-launch. A
+# budget-blocked context deliberately remains non-runnable for inspection.
 commands += [*upload(image(bytes.fromhex("31c08ee8f390ebfc"))), "execute Probe"]
+# Exercise lifecycle transitions and queued IPC without letting a spinning
+# background Form monopolize the command environment.
+commands += ["mkform Background executable", "write Background native:spin",
+             "grant Background execute", "formctl start Background",
+             "formctl pause Background", "formctl resume Background",
+             "formctl wait Background", "formctl send Background wake",
+             "formctl terminate Background", "formctl restart Background",
+             "formctl terminate Background"]
 # Partial/malformed uploads never become executable and rejected writes are atomic.
 commands += [*upload(b"EXF1"), "execute Probe", "writehex Probe 4 gg", "writehex Probe 5 00",
              "execute Probe", "execute NativeHello"]
@@ -115,6 +134,13 @@ assert len(observed) == len(faults), observed
 for actual, (_, expected) in zip(observed, faults):
     assert actual in (expected if isinstance(expected, tuple) else (expected,)), (actual, expected)
 assert "Executable Form 'Probe' exited with result 43 in Ring 3." in text
+assert "Executable Form 'Probe' exited with result 77 in Ring 3." in text
+assert "EXPOS_FORM_MAP" in text and "format=2 code_pages=2" in text
+assert "heap_pages=16" in text and "guards=4" in text
+assert "EXPOS_FRAME_ALLOCATOR" in text
+assert "Started 'Background' as background context" in text
+assert "Paused 'Background'" in text and "Queued asynchronous IPC for 'Background'" in text
+assert text.count("Terminated 'Background'") == 2
 assert "EXPOS_FORM_BUDGET_EXHAUSTED" in text
 assert text.count("Native launch denied: invalid executable header.") == 2
 assert "Invalid hex bytes; nothing changed." in text

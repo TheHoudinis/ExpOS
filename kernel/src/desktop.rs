@@ -5305,7 +5305,10 @@ impl DesktopState {
                 );
             }
             (SettingsCategory::Audio, 2) => {
-                self.settings_notice = if audio::play_tone(660, 120).is_ok() {
+                // Long enough to cross one AC'97 descriptor boundary, so the
+                // user-facing test exercises the ring rather than only its
+                // first entry.
+                self.settings_notice = if audio::play_tone(660, 500).is_ok() {
                     "Playing a bounded PCM test tone."
                 } else {
                     "No supported audio output is active."
@@ -6595,7 +6598,8 @@ impl DesktopState {
             "  ",
             form_kind_label(stored.form.kind),
         ]);
-        self.terminal_push_bytes(&stored.content[..stored.content_len as usize]);
+        let bytes = stored.bytes();
+        self.terminal_push_bytes(&bytes);
     }
 
     fn terminal_write_form(&mut self, arguments: &[u8]) {
@@ -6756,7 +6760,7 @@ impl DesktopState {
         } else if name.eq_ignore_ascii_case(b"audio") {
             let status = audio::status();
             slog!(
-                "EXPOS_AUDIO_STATUS backend={} volume={} muted={} playing={} submitted={} completed={} underruns={}\r\n",
+                "EXPOS_AUDIO_STATUS backend={} volume={} muted={} playing={} queued={} submitted={} completed={} queue_total={} underruns={} fifo_errors={} recoveries={}\r\n",
                 if status.backend == audio::Backend::Ac97 {
                     "ac97"
                 } else {
@@ -6765,9 +6769,13 @@ impl DesktopState {
                 status.volume,
                 status.muted,
                 status.playing,
+                status.queued,
                 status.submitted_frames,
                 status.completed_buffers,
-                status.underruns
+                status.queued_buffers,
+                status.underruns,
+                status.fifo_errors,
+                status.recoveries
             );
             self.terminal_push_parts(&["audio backend: ", status.backend.label()]);
             self.terminal_push_number("volume: ", status.volume as u64, "%");
@@ -6776,8 +6784,12 @@ impl DesktopState {
                 if status.muted { "yes" } else { "no" },
                 "  playing: ",
                 if status.playing { "yes" } else { "no" },
+                "  queued: ",
+                if status.queued { "yes" } else { "no" },
             ]);
             self.terminal_push_number("submitted frames: ", status.submitted_frames, "");
+            self.terminal_push_number("completed buffers: ", status.completed_buffers, "");
+            self.terminal_push_number("underruns: ", status.underruns, "");
         } else if name.eq_ignore_ascii_case(b"audiotest") {
             if audio::play_tone(660, 120).is_ok() {
                 self.terminal_push("Playing a bounded 660 Hz stereo test tone.");
@@ -7123,8 +7135,15 @@ fn run_session(
     let weather_animation_ticks = (clock.tsc_hz / 4).max(1);
     let mut next_weather_animation =
         crate::hardware::timestamp().saturating_add(weather_animation_ticks);
+    let audio_poll_ticks = (clock.tsc_hz / 200).max(1);
+    let mut next_audio_poll = crate::hardware::timestamp().saturating_add(audio_poll_ticks);
 
     while !desktop.should_exit {
+        let loop_now = crate::hardware::timestamp();
+        if loop_now >= next_audio_poll {
+            let _ = audio::poll();
+            next_audio_poll = loop_now.saturating_add(audio_poll_ticks);
+        }
         // External navigation is queued by input handlers so a pointer/key
         // event never retains its hit-testing and compositor frames while the
         // Browser performs DNS, transport, parsing and resource hydration.

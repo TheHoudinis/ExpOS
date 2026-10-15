@@ -1,18 +1,25 @@
-# ExpOS v9.3-dev “Loop”
+# ExpOS v9.4 “Lose”
 
-**Loop** builds on v9.2 **Mole** (commit `7121551`). This is an active
-development increment of the isolation, hardware, Genesis, Ayo and
-ExpDisplay roadmap in [`docs/LOOP_V9_3.md`](docs/LOOP_V9_3.md), not a finished
-v9.3 release. It adds kernel section permissions, CPU-supported SMAP, stricter
-fault attribution and repeatable parser mutation campaigns. MicroPython and
+**Lose** is the stable-release hardening line built on v9.3 **Loop**. Release
+scope and verified limitations are recorded in
+[`docs/LOSE_V9_4.md`](docs/LOSE_V9_4.md); the prior
+[`docs/LOOP_V9_3.md`](docs/LOOP_V9_3.md) remains as its engineering history.
+The current system adds kernel section permissions, CPU-supported SMAP,
+stricter fault attribution and repeatable parser mutation campaigns. MicroPython and
 HTTP response parsing run in isolated Ring 3 workers. The sealed built-in
 network worker owns the RTL8139 polling driver, its service-private DMA buffers,
 Ethernet, DHCP, DNS, ICMP, generic UDP, plain TCP/HTTP and authenticated
 streaming TCP/TLS. Ring 0 exposes only PCI discovery, an exact register/value
 allowlist, validated DMA-address substitution and a short bus-master lease that
 is revoked before the worker arena is released. There is no hardware IOMMU.
-Optional Ayo apps Cliptick and Writer add 4 KiB source editing,
+Optional Ayo apps Cliptick and Writer add 32 KiB source editing,
 native Python, and bounded on-device C/Rust/Go profile compilation to EXF1.
+
+Lose adds chunked transactional Form blobs, EXF1 v2 multi-page address spaces,
+lease-tracked physical frames, shell-idle background Forms, and a hardened
+ExpAudio ring with strict WAV validation, linear resampling and one queued
+playback request. Form ABI v1 remains frozen; large-object streaming is an
+additive, capability-checked ABI v2 contract.
 
 Mole's Browser/Weather request bounds, display-mode handling, desktop/session
 reliability, taskbar styles and Power & session menu remain part of this baseline.
@@ -89,9 +96,10 @@ ExpOS is the Form-native operating system described by
   Wikipedia article links use its live HTTPS summary endpoint and render as a
   scrollable reader; interactive transport retries and automatic subresources
   are capped so a failed or media-heavy site returns control to the desktop;
-- ExpAudio with an ASL-owned AC'97 PCI backend, 48 kHz stereo DMA, persistent
-  volume/mute controls, a test tone, and bounded PCM WAV conversion from
-  8/16/24/32-bit mono or stereo sources;
+- ExpAudio with an ASL-owned AC'97 PCI backend, a 32-descriptor 48 kHz stereo
+  DMA ring, double-buffered one-request queue, persistent volume/mute controls,
+  underrun diagnostics, a test tone, and strict PCM WAV conversion with linear
+  resampling from 8/16/24/32-bit mono or stereo sources;
 - graphical and console login for Operator, Power and Guest authority;
 - a bright white-on-black native command deck with cyan/green identity
   accents, a structured startup banner, grouped help, and aligned system
@@ -468,12 +476,16 @@ absent. The workflow is intentionally Chromium-like, but the engine is not
 Chromium/Blink/V8 compatible. YouTube addresses therefore open an immediate
 bounded compatibility notice instead of attempting unsupported playback.
 
-ExpAudio currently supports the QEMU/Intel-compatible AC'97 PCM-out interface.
-It converts bounded RIFF/WAVE integer PCM at 8-192 kHz, mono or stereo, and
-8/16/24/32-bit depth into 48 kHz stereo signed-16 DMA. Settings and the
+ExpAudio supports the QEMU/Intel-compatible AC'97 PCM-out interface. It converts
+strictly validated RIFF/WAVE integer PCM at 8-192 kHz, mono or stereo, and
+8/16/24/32-bit depth into 48 kHz stereo signed-16 DMA using linear interpolation.
+A 32-entry descriptor ring removes the old single-descriptor ceiling; separate
+active/pending sample banks allow one queued request without rewriting live DMA
+memory. Controller reset, FIFO/unexpected-halt diagnostics and ASL claim rollback
+provide bounded failure recovery. Settings and the
 graphical Terminal (`audio`, `audiotest`, `audiostop`) expose real backend and
 playback state. This is full end-to-end PCM output, not a claim of universal
-sound-card support or compressed-media/video codec coverage.
+sound-card support, software mixing, capture or compressed-media/video codecs.
 
 The worker cannot access kernel memory or ambient Handles. It can access only
 its private DMA arena and a narrow RTL8139 register/value allowlist; Ring 0
@@ -525,12 +537,13 @@ Ayo. Kernel-private Rust layouts are explicitly outside the ABI.
 
 The project driver supports fixed Rust, Go, and C recipes and emits a
 deterministic Ayo tar artifact plus SHA-256 receipt. `run` launches host builds.
-Loop adds a freestanding C/Rust/Go target, `expos-x86_64`, that produces real EXF1
+The freestanding C/Rust/Go target, `expos-x86_64`, produces real EXF1
 executables and bounded console import commands. The kernel validates and runs
-these images in CPL3 with requester-owned Handles. EXF1 and ExpFS Form content
-are limited to 4,096 bytes; the Go path is the documented freestanding ExpOS
-profile, not the upstream Go runtime or standard library. Larger services,
-general buffer grants and native Ayo installation remain unfinished. See the
+these images in CPL3 with requester-owned Handles. Frozen EXF1 v1 remains
+compatible; EXF1 v2 and chunked ExpFS raise the executable/Form quota to 32 KiB
+with capability-bound transactional streaming. The Go path is the documented
+freestanding ExpOS profile, not the upstream Go runtime or standard library.
+General buffer grants and native Ayo installation remain unfinished. See the
 [native executable guide](docs/NATIVE_IMAGES.md) and runnable
 [sample](sdk/examples/native-hello/hello.c).
 
@@ -615,6 +628,7 @@ The feature pass described above does not modify `legacy/alpha32/`.
 | `docs/ARCHITECTURE.md` | implementation and trust boundaries |
 | `docs/MIGRATION.md` | migration map |
 | `docs/FEATURE_COVERAGE.md` | implemented and missing features |
+| `docs/LOSE_V9_4.md` | v9.4 release scope, evidence and residual limits |
 | `legacy/alpha32/` | preserved Diamond II source |
 
 ASL v1 now has a bounded boot inventory, exclusive driver claims, PCI/firmware

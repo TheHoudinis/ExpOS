@@ -34,6 +34,7 @@ mod interrupts;
 mod isolation_self_test;
 mod kernel_controls;
 mod locale;
+mod memory;
 mod network;
 mod paging;
 #[cfg(test)]
@@ -142,7 +143,6 @@ fn panic(info: &PanicInfo) -> ! {
 #[no_mangle]
 pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
     serial::COM1.lock().init();
-    allocator::initialize();
 
     slog!("[ExpOS] kernel entered; serial online\r\n");
     vga::WRITER.lock().clear();
@@ -155,6 +155,8 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
     println!("============================================");
 
     unsafe { boot::initialize(magic, mbi_phys) };
+    memory::initialize();
+    allocator::initialize();
     security::enable_cpu_hardening();
     paging::initialize();
     security::log_cpu_hardening();

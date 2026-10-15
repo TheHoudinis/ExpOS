@@ -18,6 +18,9 @@ import tomllib
 
 
 FORM_ABI_VERSION = 1
+NATIVE_IMAGE_LIMIT = 32 * 1024
+V2_CODE_LIMIT = 8 * 4096
+V2_DATA_LIMIT = 6 * 4096 - 256
 NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,31}$")
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$")
 LANGUAGES = {"rust", "go", "c"}
@@ -141,11 +144,12 @@ def validate_native(payload: bytes) -> None:
     if len(payload) < 24:
         raise ProjectError("truncated EXF1 image")
     magic, version, arch, abi, flags, code, data, bss, entry, reserved = struct.unpack_from("<4s8HI", payload)
-    if (magic, version, arch, abi, flags, reserved) != (b"EXF1", 1, 1, 1, 0, 0):
+    if magic != b"EXF1" or version not in {1, 2} or (arch, abi, flags, reserved) != (1, 1, 0, 0):
         raise ProjectError("unsupported EXF1 header")
-    if not (0 < code <= 4096 and data + bss <= 3840 and entry < code
-            and len(payload) == 24 + code + data and len(payload) <= 4096):
-        raise ProjectError("EXF1 exceeds segment, entry, or 4096-byte Form storage limits")
+    code_limit, data_limit = (4096, 3840) if version == 1 else (V2_CODE_LIMIT, V2_DATA_LIMIT)
+    if not (0 < code <= code_limit and data + bss <= data_limit and entry < code
+            and len(payload) == 24 + code + data and len(payload) <= NATIVE_IMAGE_LIMIT):
+        raise ProjectError("EXF1 exceeds its versioned segment or 32 KiB Form quota")
 
 
 def build_native(project: Project) -> None:
@@ -197,14 +201,16 @@ def build_native(project: Project) -> None:
                 raise ProjectError("truncated ELF segment")
             sections[label] = (address, size, raw[offset:offset + size] if kind != 8 else b"")
     code_address, _, code = sections.get(b".text", (0, 0, b""))
-    data_address, _, data = sections.get(b".data", (0x400000001100, 0, b""))
+    data_address, _, data = sections.get(b".data", (0x400000009100, 0, b""))
     bss_address, bss_size, _ = sections.get(b".bss", (data_address + len(data), 0, b""))
     zero_bytes = bss_address + bss_size - (data_address + len(data))
-    if (code_address != 0x400000000000 or data_address != 0x400000001100
-            or not 0 <= zero_bytes <= 3840 or not code_address <= entry < code_address + len(code)
-            or len(code) + len(data) + 24 > 4096):
-        raise ProjectError("native image layout or 4096-byte Form storage limit exceeded")
-    payload = struct.pack("<4s8HI", b"EXF1", 1, 1, 1, 0, len(code), len(data), zero_bytes,
+    if (code_address != 0x400000000000 or data_address != 0x400000009100
+            or not 0 <= zero_bytes <= V2_DATA_LIMIT
+            or not code_address <= entry < code_address + len(code)
+            or len(code) > V2_CODE_LIMIT
+            or len(code) + len(data) + 24 > NATIVE_IMAGE_LIMIT):
+        raise ProjectError("native image layout or 32 KiB Form quota exceeded")
+    payload = struct.pack("<4s8HI", b"EXF1", 2, 1, 1, 0, len(code), len(data), zero_bytes,
                           entry - code_address, 0) + code + data
     validate_native(payload)
     project.artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -217,8 +223,8 @@ def build_native_go(project: Project) -> None:
         source = project.local(project.entry).read_text(encoding="ascii")
     except (OSError, UnicodeError) as error:
         raise ProjectError(f"cannot read ASCII native Go source: {error}") from error
-    if len(source.encode()) > 4096:
-        raise ProjectError("native Go source exceeds the 4096-byte Form limit")
+    if len(source.encode()) > NATIVE_IMAGE_LIMIT:
+        raise ProjectError("native Go source exceeds the 32 KiB compiler profile")
     if not re.search(r"\bfunc\s+main\s*\(", source):
         raise ProjectError("native Go source requires func main()")
 
@@ -404,6 +410,10 @@ def main(arguments: list[str] | None = None) -> int:
                 build(project)
             payload = project.artifact.read_bytes()
             validate_native(payload)
+            chunks = (len(payload) + 31) // 32
+            if chunks + 2 > 64:
+                soft = chunks + 2
+                print(f"expbudget set form-operations {soft} {min(4096, soft + 32)}")
             print(f"mkform {project.name} executable")
             for offset in range(0, len(payload), 32):
                 print(f"writehex {project.name} {offset} {payload[offset:offset + 32].hex()}")

@@ -37,8 +37,9 @@ hooks from the manifest.
 
 `run` launches host development builds. For a real integer-only CPL3 executable,
 set `[build] target = "expos-x86_64"` in a C, freestanding Rust, or bounded
-native Go project. The driver produces a validated EXF1 image within the
-current 4096-byte persisted Form limit.
+native Go project. New C and Rust builds use EXF1 v2 with up to eight code
+pages, six data pages and a 32 KiB persisted Form quota. Existing EXF1 v1
+artifacts remain accepted unchanged; bounded native Go currently emits v1.
 
 ```sh
 ./sdk/bin/expos --manifest sdk/examples/native-hello/expos.toml build

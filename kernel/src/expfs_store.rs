@@ -10,9 +10,10 @@ use alloc::{
     boxed::Box,
     vec::Vec,
 };
+use core::sync::atomic::{AtomicU32, Ordering};
 use expos_core::{
-    CfcFin, Dimension, Fin, Form, FormHandle, FormKind, Lifecycle, NativeImage, NetworkPolicy,
-    Operations, Relationship, RelationshipKind, Text,
+    CfcFin, ChunkedBlob, Dimension, Fin, Form, FormHandle, FormKind, Lifecycle, NativeImage,
+    NetworkPolicy, Operations, Relationship, RelationshipKind, Text,
 };
 
 pub const MAX_STORED_FORMS: usize = 12;
@@ -23,6 +24,7 @@ pub const FORM_CONTENT_CAPACITY: usize = expos_core::FORM_CONTENT_CAPACITY;
 pub const SETTINGS_RECORD_CAPACITY: usize = 32;
 pub const ACCOUNTS_RECORD_CAPACITY: usize = 12 * 80;
 pub const CHECKPOINT_CAPACITY: usize = 8;
+const MAX_BLOB_STREAMS: usize = 8;
 
 const MAGIC: [u8; 8] = *b"EXPFSDB1";
 const FORMAT_VERSION: u16 = 3;
@@ -45,14 +47,23 @@ const LEGACY_CHECKPOINT_LBA: u32 = LEGACY_SLOT_B_LBA + LEGACY_SLOT_SECTORS as u3
 const LEGACY_BASELINE_LBA: u32 =
     LEGACY_CHECKPOINT_LBA + (CHECKPOINT_CAPACITY * LEGACY_SLOT_SECTORS) as u32;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct StoredForm {
     pub form: Form,
-    pub content: [u8; FORM_CONTENT_CAPACITY],
-    pub content_len: u16,
+    pub content: ChunkedBlob,
 }
 
-#[derive(Clone, Copy)]
+impl StoredForm {
+    pub fn content_len(&self) -> usize {
+        self.content.len()
+    }
+
+    pub fn bytes(&self) -> Vec<u8> {
+        self.content.to_vec()
+    }
+}
+
+#[derive(Clone)]
 pub struct Snapshot {
     pub cfc: CfcFin,
     pub cfc_name: Text,
@@ -76,7 +87,7 @@ impl Snapshot {
             cfc,
             cfc_name,
             primary_dimension,
-            forms: [None; MAX_STORED_FORMS],
+            forms: core::array::from_fn(|_| None),
             dimensions: [None; MAX_STORED_DIMENSIONS],
             relationships: [None; MAX_STORED_RELATIONSHIPS],
             handles: [None; MAX_STORED_HANDLES],
@@ -103,6 +114,9 @@ pub enum StoreError {
     CheckpointNotFound,
     BaselineNotFound,
     BaselineDamaged,
+    StreamNotFound,
+    StreamMode,
+    StaleStream,
 }
 
 impl StoreError {
@@ -118,6 +132,9 @@ impl StoreError {
             Self::CheckpointNotFound => "ExpFS checkpoint does not exist",
             Self::BaselineNotFound => "ExpFS installation baseline does not exist",
             Self::BaselineDamaged => "ExpFS installation baseline is damaged",
+            Self::StreamNotFound => "blob stream does not exist",
+            Self::StreamMode => "blob stream operation is not allowed",
+            Self::StaleStream => "Form changed before the stream committed",
         }
     }
 }
@@ -157,7 +174,20 @@ impl RuntimeStore {
 static STORE: crate::sync::SpinMutex<RuntimeStore> =
     crate::sync::SpinMutex::new(RuntimeStore::new());
 
-#[derive(Clone, Copy)]
+struct BlobStream {
+    id: u32,
+    cfc: CfcFin,
+    form: Fin,
+    writable: bool,
+    base_revision: u32,
+    content: ChunkedBlob,
+}
+
+static STREAMS: crate::sync::SpinMutex<[Option<BlobStream>; MAX_BLOB_STREAMS]> =
+    crate::sync::SpinMutex::new([const { None }; MAX_BLOB_STREAMS]);
+static NEXT_STREAM_ID: AtomicU32 = AtomicU32::new(1);
+
+#[derive(Clone)]
 struct DecodedSlot {
     snapshot: Snapshot,
     generation: u64,
@@ -297,6 +327,7 @@ pub fn initialize(
         }
     };
     if let Some(slot) = selected {
+        let form_count = slot.snapshot.forms.iter().flatten().count();
         store.snapshot = Some(slot.snapshot);
         store.generation = slot.generation;
         store.active_slot = slot.slot;
@@ -309,7 +340,7 @@ pub fn initialize(
             "EXPOS_EXPFS_READY generation={} slot={} forms={}\r\n",
             slot.generation,
             if slot.slot == 0 { "A" } else { "B" },
-            slot.snapshot.forms.iter().flatten().count()
+            form_count
         );
     } else {
         println!("[ok] blank ExpFS CFC database; first mutation will create it");
@@ -320,7 +351,7 @@ pub fn initialize(
 pub fn loaded_snapshot(cfc: CfcFin) -> Option<Snapshot> {
     let store = STORE.lock();
     (store.cfc == cfc)
-        .then_some(store.snapshot)
+        .then(|| store.snapshot.clone())
         .flatten()
         .filter(|snapshot| snapshot.form_graph_present)
 }
@@ -330,7 +361,7 @@ pub fn loaded_snapshot(cfc: CfcFin) -> Option<Snapshot> {
 /// installation policy, dimensions and package selections.
 pub fn current_snapshot(cfc: CfcFin) -> Option<Snapshot> {
     let store = STORE.lock();
-    (store.cfc == cfc).then_some(store.snapshot).flatten()
+    (store.cfc == cfc).then(|| store.snapshot.clone()).flatten()
 }
 
 /// Seed a newly installed CFC from its authenticated Genesis plan.
@@ -373,7 +404,7 @@ pub fn seed_genesis_plan(
         NetworkPolicy::Disabled
     };
 
-    let mut plan_bytes = [0_u8; FORM_CONTENT_CAPACITY];
+    let mut plan_bytes = [0_u8; 12];
     plan_bytes[..4].copy_from_slice(b"GNP2");
     plan_bytes[4] = plan.components;
     plan_bytes[5] = plan.sdks;
@@ -384,11 +415,10 @@ pub fn seed_genesis_plan(
     plan_form.revision = 1;
     snapshot.forms[0] = Some(StoredForm {
         form: plan_form,
-        content: plan_bytes,
-        content_len: 12,
+        content: ChunkedBlob::from_bytes(&plan_bytes),
     });
 
-    let mut app_bytes = [0_u8; FORM_CONTENT_CAPACITY];
+    let mut app_bytes = [0_u8; 22];
     app_bytes[..4].copy_from_slice(b"AYO1");
     app_bytes[4..8].copy_from_slice(&plan.initial_apps.to_le_bytes());
     app_bytes[8] = plan.initial_apps.trailing_zeros().min(29) as u8;
@@ -396,16 +426,16 @@ pub fn seed_genesis_plan(
     apps_form.revision = 1;
     snapshot.forms[1] = Some(StoredForm {
         form: apps_form,
-        content: app_bytes,
-        content_len: 22,
+        content: ChunkedBlob::from_bytes(&app_bytes),
     });
     snapshot.journal_sequence = 2;
     validate_snapshot(&snapshot)?;
+    let dimension_count = snapshot.dimensions.iter().flatten().count();
     let generation = commit_locked(&mut store, snapshot)?;
     slog!(
         "EXPOS_GENESIS_PLAN_SEEDED generation={} dimensions={} apps={} components={:#04x}\r\n",
         generation,
-        snapshot.dimensions.iter().flatten().count(),
+        dimension_count,
         plan.initial_apps.count_ones(),
         plan.components
     );
@@ -416,28 +446,148 @@ pub fn seed_genesis_plan(
 ///
 /// Notes uses the same generic Form records as the shell rather than a private
 /// side file, so saved text remains visible to every ExpFS-aware tool.
-pub fn load_text_form(cfc: CfcFin) -> Option<(Text, [u8; FORM_CONTENT_CAPACITY], usize)> {
+pub fn load_text_form(cfc: CfcFin) -> Option<(Text, Vec<u8>, usize)> {
     let snapshot = current_snapshot(cfc)?;
     snapshot.forms.iter().flatten().find_map(|stored| {
         (stored.form.kind == FormKind::Data
             && stored.form.lifecycle == Lifecycle::Active
             && is_text_name(stored.form.name.as_str()))
-        .then_some((
-            stored.form.name,
-            stored.content,
-            stored.content_len as usize,
-        ))
+        .then(|| (stored.form.name, stored.bytes(), stored.content_len()))
     })
 }
 
-pub fn load_data_form(cfc: CfcFin, name: &str) -> Option<([u8; FORM_CONTENT_CAPACITY], usize)> {
+pub fn load_data_form(cfc: CfcFin, name: &str) -> Option<(Vec<u8>, usize)> {
     let snapshot = current_snapshot(cfc)?;
     snapshot.forms.iter().flatten().find_map(|stored| {
         (stored.form.kind == FormKind::Data
             && stored.form.lifecycle == Lifecycle::Active
             && stored.form.name.as_str() == name)
-            .then_some((stored.content, stored.content_len as usize))
+            .then(|| (stored.bytes(), stored.content_len()))
     })
+}
+
+/// Open a version-2 chunk stream over one CFC-owned Form blob. Writes remain
+/// private until `commit_blob_stream` publishes the replacement snapshot.
+pub fn open_blob_stream(
+    cfc: CfcFin,
+    form: Fin,
+    writable: bool,
+) -> Result<(u32, usize), StoreError> {
+    let snapshot = current_snapshot(cfc).ok_or(StoreError::Unavailable)?;
+    let stored = snapshot
+        .forms
+        .iter()
+        .flatten()
+        .find(|stored| stored.form.fin == form)
+        .ok_or(StoreError::StreamNotFound)?;
+    let mut streams = STREAMS.lock();
+    let slot = streams
+        .iter_mut()
+        .find(|stream| stream.is_none())
+        .ok_or(StoreError::Full)?;
+    let id = NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed).max(1);
+    let length = stored.content_len();
+    *slot = Some(BlobStream {
+        id,
+        cfc,
+        form,
+        writable,
+        base_revision: stored.form.revision,
+        content: stored.content.clone(),
+    });
+    Ok((id, length))
+}
+
+pub fn read_blob_stream(
+    cfc: CfcFin,
+    form: Fin,
+    id: u32,
+    offset: usize,
+    output: &mut [u8],
+) -> Result<(usize, usize), StoreError> {
+    let streams = STREAMS.lock();
+    let stream = streams
+        .iter()
+        .flatten()
+        .find(|stream| stream.id == id && stream.cfc == cfc && stream.form == form)
+        .ok_or(StoreError::StreamNotFound)?;
+    Ok((stream.content.read(offset, output), stream.content.len()))
+}
+
+pub fn write_blob_stream(
+    cfc: CfcFin,
+    form: Fin,
+    id: u32,
+    offset: usize,
+    bytes: &[u8],
+) -> Result<usize, StoreError> {
+    let mut streams = STREAMS.lock();
+    let stream = streams
+        .iter_mut()
+        .flatten()
+        .find(|stream| stream.id == id && stream.cfc == cfc && stream.form == form)
+        .ok_or(StoreError::StreamNotFound)?;
+    if !stream.writable {
+        return Err(StoreError::StreamMode);
+    }
+    let end = offset
+        .checked_add(bytes.len())
+        .filter(|end| *end <= FORM_CONTENT_CAPACITY)
+        .ok_or(StoreError::Full)?;
+    stream
+        .content
+        .write(offset, bytes)
+        .map_err(|_| StoreError::InvalidSnapshot)?;
+    Ok(end)
+}
+
+pub fn abort_blob_stream(cfc: CfcFin, form: Fin, id: u32) -> Result<(), StoreError> {
+    let mut streams = STREAMS.lock();
+    let slot = streams
+        .iter_mut()
+        .find(|slot| {
+            slot.as_ref()
+                .is_some_and(|stream| stream.id == id && stream.cfc == cfc && stream.form == form)
+        })
+        .ok_or(StoreError::StreamNotFound)?;
+    *slot = None;
+    Ok(())
+}
+
+pub fn commit_blob_stream(cfc: CfcFin, form: Fin, id: u32) -> Result<(u32, u64), StoreError> {
+    let stream = {
+        let mut streams = STREAMS.lock();
+        let slot = streams
+            .iter_mut()
+            .find(|slot| {
+                slot.as_ref().is_some_and(|stream| {
+                    stream.id == id && stream.cfc == cfc && stream.form == form
+                })
+            })
+            .ok_or(StoreError::StreamNotFound)?;
+        slot.take().unwrap()
+    };
+    if !stream.writable {
+        return Err(StoreError::StreamMode);
+    }
+    let mut store = STORE.lock();
+    let mut snapshot = store.snapshot.clone().ok_or(StoreError::Unavailable)?;
+    let stored = snapshot
+        .forms
+        .iter_mut()
+        .flatten()
+        .find(|stored| stored.form.fin == form)
+        .ok_or(StoreError::StreamNotFound)?;
+    if stored.form.revision != stream.base_revision {
+        return Err(StoreError::StaleStream);
+    }
+    stored.form.revision = stored.form.revision.wrapping_add(1).max(1);
+    stored.content = stream.content;
+    let revision = stored.form.revision;
+    snapshot.journal_sequence = snapshot.journal_sequence.wrapping_add(1).max(1);
+    validate_snapshot(&snapshot)?;
+    let generation = commit_locked(&mut store, snapshot)?;
+    Ok((revision, generation))
 }
 
 pub fn is_text_name(name: &str) -> bool {
@@ -487,20 +637,24 @@ fn save_named_form(
     }
     let mut snapshot = store
         .snapshot
+        .clone()
         .unwrap_or_else(|| Snapshot::empty(store.cfc, store.cfc_name, store.primary_dimension));
-    let named = snapshot
-        .forms
-        .iter()
-        .position(|entry| entry.is_some_and(|stored| stored.form.name == name));
-    if named
-        .is_some_and(|index| snapshot.forms[index].is_some_and(|stored| stored.form.kind != kind))
-    {
+    let named = snapshot.forms.iter().position(|entry| {
+        entry
+            .as_ref()
+            .is_some_and(|stored| stored.form.name == name)
+    });
+    if named.is_some_and(|index| {
+        snapshot.forms[index]
+            .as_ref()
+            .is_some_and(|stored| stored.form.kind != kind)
+    }) {
         return Err(StoreError::InvalidSnapshot);
     }
     let existing = named;
     let slot = existing.or_else(|| snapshot.forms.iter().position(Option::is_none));
     let index = slot.ok_or(StoreError::Full)?;
-    let (fin, revision) = if let Some(stored) = snapshot.forms[index] {
+    let (fin, revision) = if let Some(stored) = snapshot.forms[index].as_ref() {
         (stored.form.fin, stored.form.revision.wrapping_add(1).max(1))
     } else {
         let fin =
@@ -508,14 +662,11 @@ fn save_named_form(
         snapshot.next_fin = snapshot.next_fin.wrapping_add(1).max(2);
         (fin, 1)
     };
-    let mut content = [0_u8; FORM_CONTENT_CAPACITY];
-    content[..bytes.len()].copy_from_slice(bytes);
     let mut form = Form::new(fin, name.as_str(), kind);
     form.revision = revision;
     snapshot.forms[index] = Some(StoredForm {
         form,
-        content,
-        content_len: bytes.len() as u16,
+        content: ChunkedBlob::from_bytes(bytes),
     });
     if existing.is_none() {
         if let Some(root) = snapshot
@@ -552,13 +703,14 @@ pub fn system_records() -> (
     let store = STORE.lock();
     store
         .snapshot
+        .as_ref()
         .map(|snapshot| (snapshot.settings, snapshot.accounts))
         .unwrap_or((None, None))
 }
 
 pub fn generation() -> Option<u64> {
     let store = STORE.lock();
-    store.snapshot.map(|_| store.generation)
+    store.snapshot.as_ref().map(|_| store.generation)
 }
 
 pub fn available() -> bool {
@@ -582,7 +734,7 @@ pub fn establish_baseline() -> Result<BaselineInfo, StoreError> {
         BaselineState::Damaged => return Err(StoreError::BaselineDamaged),
         BaselineState::Missing => {}
     }
-    let snapshot = store.snapshot.ok_or(StoreError::NoCurrentState)?;
+    let snapshot = store.snapshot.clone().ok_or(StoreError::NoCurrentState)?;
     let device = store.device.ok_or(StoreError::Unavailable)?;
     let generation = store.generation.max(1);
     let mut encoded = boxed_slot()?;
@@ -626,21 +778,22 @@ pub fn restore_baseline() -> Result<u64, StoreError> {
     } else {
         read_at(device, baseline_lba, u8::MAX, store.storage_key.as_ref())?.snapshot
     };
-    if let Some(current) = store.snapshot {
+    if let Some(current) = store.snapshot.as_ref() {
         snapshot.journal_sequence = current.journal_sequence.wrapping_add(1).max(1);
     }
+    let sequence = snapshot.journal_sequence;
     let generation = commit_locked(&mut store, snapshot)?;
     slog!(
         "EXPOS_EXPFS_BASELINE_RESTORE generation={} sequence={}\r\n",
         generation,
-        snapshot.journal_sequence
+        sequence
     );
     Ok(generation)
 }
 
 pub fn record_checkpoint() -> Result<CheckpointInfo, StoreError> {
     let mut store = STORE.lock();
-    let snapshot = store.snapshot.ok_or(StoreError::NoCurrentState)?;
+    let snapshot = store.snapshot.clone().ok_or(StoreError::NoCurrentState)?;
     let device = store.device.ok_or(StoreError::Unavailable)?;
     let state_id = store
         .checkpoints
@@ -718,15 +871,16 @@ pub fn restore_checkpoint(state_id: u64) -> Result<u64, StoreError> {
         )?
         .snapshot
     };
-    if let Some(current) = store.snapshot {
+    if let Some(current) = store.snapshot.as_ref() {
         snapshot.journal_sequence = current.journal_sequence.wrapping_add(1).max(1);
     }
+    let sequence = snapshot.journal_sequence;
     let generation = commit_locked(&mut store, snapshot)?;
     slog!(
         "EXPOS_EXPFS_RESTORE state={} generation={} sequence={}\r\n",
         state_id,
         generation,
-        snapshot.journal_sequence
+        sequence
     );
     Ok(generation)
 }
@@ -735,7 +889,7 @@ pub fn commit(snapshot: Snapshot) -> Result<u32, StoreError> {
     let mut store = STORE.lock();
     let mut snapshot = snapshot;
     snapshot.form_graph_present = true;
-    if let Some(current) = store.snapshot {
+    if let Some(current) = store.snapshot.as_ref() {
         snapshot.settings = current.settings;
         snapshot.accounts = current.accounts;
         if snapshot.journal_sequence <= current.journal_sequence {
@@ -746,8 +900,9 @@ pub fn commit(snapshot: Snapshot) -> Result<u32, StoreError> {
     if snapshot.cfc != store.cfc {
         return Err(StoreError::WrongCfc);
     }
+    let sequence = snapshot.journal_sequence;
     commit_locked(&mut store, snapshot)?;
-    Ok(snapshot.journal_sequence)
+    Ok(sequence)
 }
 
 pub fn commit_system_records(
@@ -760,6 +915,7 @@ pub fn commit_system_records(
     }
     let mut snapshot = store
         .snapshot
+        .clone()
         .unwrap_or_else(|| Snapshot::empty(store.cfc, store.cfc_name, store.primary_dimension));
     snapshot.settings = Some(settings);
     snapshot.accounts = accounts;
@@ -783,13 +939,14 @@ fn commit_locked(store: &mut RuntimeStore, snapshot: Snapshot) -> Result<u64, St
     )?;
     write_at(device, base, &encoded, encoded_len)?;
     verify_write(device, base, &encoded, encoded_len)?;
+    let sequence = snapshot.journal_sequence;
     store.snapshot = Some(snapshot);
     store.generation = generation;
     store.active_slot = target_slot;
     slog!(
         "EXPOS_EXPFS_COMMIT generation={} sequence={} slot={}\r\n",
         generation,
-        snapshot.journal_sequence,
+        sequence,
         if target_slot == 0 { "A" } else { "B" }
     );
     Ok(generation)
@@ -861,10 +1018,20 @@ fn validate_snapshot(snapshot: &Snapshot) -> Result<(), StoreError> {
         if stored.form.fin.is_zero()
             || stored.form.name.as_str().is_empty()
             || stored.form.revision == 0
-            || stored.content_len as usize > FORM_CONTENT_CAPACITY
+            || stored.content_len() > FORM_CONTENT_CAPACITY
         {
             return Err(StoreError::InvalidSnapshot);
         }
+    }
+    if snapshot
+        .forms
+        .iter()
+        .flatten()
+        .map(StoredForm::content_len)
+        .sum::<usize>()
+        > expos_core::CFC_CONTENT_CAPACITY
+    {
+        return Err(StoreError::Full);
     }
     for dimension in snapshot.dimensions.iter().flatten() {
         if dimension.fin.is_zero() || dimension.name.as_str().is_empty() {
@@ -936,12 +1103,9 @@ fn encode_slot(
             put_byte(output, &mut offset, encode_kind(stored.form.kind))?;
             put_u32_cursor(output, &mut offset, stored.form.revision)?;
             put_byte(output, &mut offset, encode_lifecycle(stored.form.lifecycle))?;
-            put_u16_cursor(output, &mut offset, stored.content_len)?;
-            put(
-                output,
-                &mut offset,
-                &stored.content[..stored.content_len as usize],
-            )?;
+            let content = stored.bytes();
+            put_u16_cursor(output, &mut offset, content.len() as u16)?;
+            put(output, &mut offset, &content)?;
         }
     }
     for slot in &snapshot.relationships {
@@ -1194,7 +1358,6 @@ fn decode_slot(
         if content_len as usize > FORM_CONTENT_CAPACITY {
             return None;
         }
-        let mut content = [0_u8; FORM_CONTENT_CAPACITY];
         let stored = read(
             input,
             &mut offset,
@@ -1204,14 +1367,12 @@ fn decode_slot(
                 content_len as usize
             },
         )?;
-        content[..content_len as usize].copy_from_slice(&stored[..content_len as usize]);
         let mut form = Form::new(fin, name.as_str(), kind);
         form.revision = revision;
         form.lifecycle = lifecycle;
         *target = Some(StoredForm {
             form,
-            content,
-            content_len,
+            content: ChunkedBlob::from_bytes(&stored[..content_len as usize]),
         });
     }
     for target in &mut snapshot.relationships {
@@ -1517,14 +1678,13 @@ mod tests {
         snapshot.journal_sequence = 7;
         snapshot.next_fin = 9;
         snapshot.dimensions[0] = Some(Dimension::new(dimension, "Primary", true));
-        let mut content = [0_u8; FORM_CONTENT_CAPACITY];
-        for (index, byte) in content[..3072].iter_mut().enumerate() {
+        let mut content = alloc::vec![0_u8; 12 * 1024 + 17];
+        for (index, byte) in content.iter_mut().enumerate() {
             *byte = (index % 251) as u8;
         }
         snapshot.forms[0] = Some(StoredForm {
             form: Form::new(form_fin, "MyNotes", FormKind::Data),
-            content,
-            content_len: 3072,
+            content: ChunkedBlob::from_bytes(&content),
         });
         snapshot.relationships[0] = Some(Relationship {
             source: Fin::from_u128(4),
@@ -1555,12 +1715,14 @@ mod tests {
         assert_eq!(decoded.generation, 11);
         assert_eq!(decoded.snapshot.cfc, source.cfc);
         assert_eq!(decoded.snapshot.journal_sequence, 7);
-        let stored = decoded.snapshot.forms[0].unwrap();
+        let stored = decoded.snapshot.forms[0].as_ref().unwrap();
         assert_eq!(stored.form.name.as_str(), "MyNotes");
-        assert_eq!(stored.content_len, 3072);
-        assert_eq!(stored.content[0], 0);
-        assert_eq!(stored.content[511], (511 % 251) as u8);
-        assert_eq!(stored.content[3071], (3071 % 251) as u8);
+        assert_eq!(stored.content_len(), 12 * 1024 + 17);
+        let bytes = stored.bytes();
+        assert_eq!(bytes[0], 0);
+        assert_eq!(bytes[511], (511 % 251) as u8);
+        assert_eq!(bytes[4096], (4096 % 251) as u8);
+        assert_eq!(bytes[12 * 1024 + 16], ((12 * 1024 + 16) % 251) as u8);
         assert_eq!(decoded.snapshot.relationships[0], source.relationships[0]);
         assert_eq!(decoded.snapshot.handles[0], source.handles[0]);
     }

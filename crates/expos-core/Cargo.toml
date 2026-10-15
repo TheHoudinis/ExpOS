@@ -7,3 +7,6 @@ license = "MIT"
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = ["alloc"]
+alloc = []

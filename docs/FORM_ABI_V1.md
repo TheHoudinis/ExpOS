@@ -118,6 +118,28 @@ capsules/EXF1 images do not receive a service reply capture and call 5 remains
 unsupported for those contexts. This is an internal built-in service protocol,
 not a new ABI version or general message queue implementation.
 
+## Additive blob streaming contract v2
+
+Form ABI v1 remains frozen at its original 72-byte request, 40-byte response
+and call numbers. Large Form content uses a separate `StreamRequest` with
+version 2 and a distinct `EXPSTRM2` gate magic. Its calls are `OPEN_READ`,
+`OPEN_WRITE`, `READ_CHUNK`, `WRITE_CHUNK`, `COMMIT` and `ABORT`; none consumes
+or reinterprets a v1 call number. ExpFS allocates 4 KiB storage chunks; each
+gate transfer is bounded to the 3,840-byte window remaining in the admitted ABI
+page after its request/response prefix.
+
+Streams are bound to the caller's CFC, target Form FIN and capability Handle.
+Writes accumulate in a private chunked blob and become visible only after a
+revision check, quota preflight and normal transactional ExpFS snapshot commit.
+`ABORT`, stale revisions, quota failure and malformed ranges publish nothing.
+Read and write Handles remain distinct through `READ` and `CONFIGURE` rights.
+
+General asynchronous IPC is scheduler-owned: each context has a bounded
+message queue, correlation value and optional blob stream ID. Delivery wakes a
+waiting context without making the sender run it synchronously. The v1
+`IPC_RECEIVE` wire call remains unsupported rather than being silently changed;
+new SDK transport for the general queue must use a separately versioned gate.
+
 Built-in ELF64 services have a private region starting at `0x400000200000`.
 The loader accepts only checked, non-overlapping page-aligned R, RX or RW
 segments, requires an RX entry point, and supplies RO/NX input at offset
