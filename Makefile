@@ -5,7 +5,11 @@ ISO        := $(BUILD)/expos.iso
 KERNEL_ELF := $(BUILD)/kernel.elf
 RUST_LIB   := target/$(TARGET)/release/libexpos_kernel.a
 STATE_IMG  := $(RUNTIME)/expos-state.img
-STATE_SIZE := 4M
+# ExpFS occupies the first MiB. The remaining unpartitioned VM-only area holds
+# three transactional 8 MiB Ayo music slots; sparse images cost no host space
+# until packages are downloaded.
+STATE_SIZE := 32M
+STATE_BYTES := 33554432
 QEMU       := qemu-system-x86_64 -machine pc -cpu max -smp 4 -m 256M -vga std -global VGA.vgamem_mb=16 -netdev user,id=net0 -device rtl8139,netdev=net0
 QEMU_AUDIO ?= -audiodev driver=pipewire,id=exposaudio -device AC97,audiodev=exposaudio
 QEMU_TEST_AUDIO := -audiodev driver=wav,id=exposaudio,path=$(BUILD)/audio-output.wav -device AC97,audiodev=exposaudio
@@ -23,9 +27,9 @@ GENESIS_ISO := $(BUILD)/ExpOS-v9-x86_64.iso
 OVMF_CODE  ?= /usr/share/edk2/x64/OVMF_CODE.4m.fd
 OVMF_VARS  ?= /usr/share/edk2/x64/OVMF_VARS.4m.fd
 
-.PHONY: all iso genesis-iso genesis-check genesis-display-check run-genesis test check display-check power-check audio-check session-check network-check internet-check https-check weather-check search-check wikipedia-check persistence-check large-file-check modern-hardware-check ring3-check run debug clean legacy-alpha-check run-alpha ayo sdk rust-sdk go-sdk c-sdk python-sdk sdk-cli-check kernel-build genesis-kernel-build
+.PHONY: all iso genesis-iso genesis-check genesis-display-check run-genesis test check display-check gpu-check power-check tickless-check audio-check hda-check modern-audio-check session-check network-check e1000-network-check virtio-network-check internet-check https-check weather-check search-check wikipedia-check persistence-check large-file-check modern-hardware-check ring3-check run debug clean legacy-alpha-check run-alpha ayo sdk rust-sdk go-sdk c-sdk python-sdk sdk-cli-check kernel-build genesis-kernel-build ensure-state-image
 
-all: test check display-check audio-check session-check network-check persistence-check large-file-check modern-hardware-check ayo sdk python-runtime-check python-check budget-check ring3-check uefi-check bootmode-check startup-check isolation-check native-image-check parser-fuzz editors-check
+all: test check display-check tickless-check audio-check hda-check modern-audio-check session-check network-check e1000-network-check virtio-network-check persistence-check large-file-check modern-hardware-check ayo sdk python-runtime-check python-check budget-check ring3-check uefi-check bootmode-check startup-check isolation-check native-image-check parser-fuzz editors-check
 
 test:
 	cargo test --workspace
@@ -51,6 +55,11 @@ $(BUILD):
 $(STATE_IMG):
 	mkdir -p $(RUNTIME)
 	truncate -s $(STATE_SIZE) $@
+
+# Existing checkouts may still have the old 4 MiB sparse image. Grow it in
+# place without rewriting ExpFS and never shrink a user-supplied larger disk.
+ensure-state-image: $(STATE_IMG)
+	current_size=$$(stat -c %s $(STATE_IMG)); test $$current_size -ge $(STATE_BYTES) || truncate -s $(STATE_BYTES) $(STATE_IMG)
 
 $(BUILD)/boot.o: boot/boot.asm | $(BUILD)
 	nasm -f elf64 $< -o $@
@@ -127,7 +136,7 @@ $(UEFI_BOOT_IMG): $(UEFI_APP) tools/make-efi-fat.py
 .PHONY: uefi run-uefi uefi-check bootmode-check startup-check
 uefi: $(UEFI_APP)
 
-run-uefi: $(UEFI_APP) $(STATE_IMG)
+run-uefi: $(UEFI_APP) $(STATE_IMG) ensure-state-image
 	cp $(OVMF_VARS) $(BUILD)/OVMF-run-vars.fd
 	$(QEMU) $(QEMU_AUDIO) -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) -drive if=pflash,format=raw,file=$(BUILD)/OVMF-run-vars.fd -drive file=$(STATE_IMG),format=raw,if=ide,index=0 -drive file=fat:rw:$(UEFI_DIR),format=raw,if=ide,index=1 -serial stdio -no-reboot
 
@@ -314,26 +323,40 @@ display-check: $(ISO)
 	grep -q "ExpOS Form ABI v1" $(BUILD)/display-serial.log
 	@echo ">>> EXPOS DISPLAY TEST PASSED <<<"
 
+gpu-check: $(ISO)
+	python3 tests/check-virtio-gpu.py
+
+tickless-check: $(ISO)
+	python3 tests/check-tickless.py
+	@echo ">>> EXPOS TICKLESS IDLE TEST PASSED <<<"
+
 audio-check: $(ISO)
 	rm -f $(BUILD)/audio-serial.log
 	rm -f $(BUILD)/audio-state.img
 	rm -f $(BUILD)/audio-output.wav
 	truncate -s $(STATE_SIZE) $(BUILD)/audio-state.img
-	set +e; timeout 90 $(QEMU) $(QEMU_TEST_AUDIO) -drive file=$(BUILD)/audio-state.img,format=raw,if=ide,index=0 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot < tests/qemu-audio-input.txt > $(BUILD)/audio-serial.log 2>&1; qemu_status=$$?; test $$qemu_status -eq 33
+	QEMU='$(QEMU)' python3 tests/check-audio.py
 	grep -q "EXPOS_AUDIO_READY backend=ac97 rate=48000 channels=2 sample=s16le descriptors=32 queue=1" $(BUILD)/audio-serial.log
 	grep -q "EXPOS_SETTING_CHANGED key=audio-volume value=85" $(BUILD)/audio-serial.log
 	grep -q "EXPOS_SETTING_CHANGED key=audio-muted value=true" $(BUILD)/audio-serial.log
 	grep -q "EXPOS_SETTING_CHANGED key=audio-test action=play" $(BUILD)/audio-serial.log
-	grep -q "EXPOS_SETTING_CHANGED key=audio-test action=stop" $(BUILD)/audio-serial.log
 	grep -q "EXPOS_AUDIO_PLAY codec=generated-tone frequency=660 frames=24000" $(BUILD)/audio-serial.log
 	grep -q "EXPOS_TERMINAL_COMMAND name=audio" $(BUILD)/audio-serial.log
-	grep -q "EXPOS_AUDIO_STATUS backend=ac97 volume=85 muted=true" $(BUILD)/audio-serial.log
+	grep -Eq "EXPOS_AUDIO_STATUS backend=ac97 completion=interrupt irq=[1-9][0-9]* interrupts=[1-9][0-9]* irq_status=0x[0-9a-f]+ hardware_status=0x[0-9a-f]+ volume=85 muted=true .* completed=[1-9][0-9]*" $(BUILD)/audio-serial.log
 	grep -q "EXPOS_AUDIO_STOP" $(BUILD)/audio-serial.log
 	grep -q "EXPOS_COMMAND_OK shutdown" $(BUILD)/audio-serial.log
 	! grep -q "EXPOS_AUDIO_FAULT" $(BUILD)/audio-serial.log
 	! grep -q "EXPOS_AUDIO_RECOVERY_FAILED" $(BUILD)/audio-serial.log
 	python3 -c "from pathlib import Path; assert Path('$(BUILD)/audio-output.wav').stat().st_size > 44"
 	@echo ">>> EXPOS AC97 AUDIO TEST PASSED <<<"
+
+hda-check: $(ISO)
+	python3 tests/check-hda.py
+	@echo ">>> EXPOS INTEL HDA AUDIO TEST PASSED <<<"
+
+modern-audio-check: $(ISO)
+	python3 tests/check-modern-audio.py
+	@echo ">>> EXPOS VIRTIO SOUND MP3 TEST PASSED <<<"
 
 session-check: $(ISO)
 	rm -f $(BUILD)/guest-serial.log
@@ -392,6 +415,15 @@ network-check: $(ISO)
 	grep -q "rtl8139-ring3 up" $(BUILD)/network-serial.log
 	! nm -C $(KERNEL_ELF) | grep -Eq 'service_(send|receive)_frame|NetworkStack::(send_frame|receive_frame|prepare_transport)'
 	@echo ">>> EXPOS NATIVE NETWORK TEST PASSED <<<"
+
+e1000-network-check: $(ISO)
+	python3 tests/check-driver-network.py e1000
+	python3 tests/check-driver-network.py e1000e
+	@echo ">>> EXPOS E1000 NETWORK TEST PASSED <<<"
+
+virtio-network-check: $(ISO)
+	python3 tests/check-driver-network.py virtio-net
+	@echo ">>> EXPOS VIRTIO NETWORK TEST PASSED <<<"
 
 internet-check: $(ISO)
 	rm -f $(BUILD)/internet-serial.log
@@ -542,10 +574,10 @@ modern-hardware-check: $(ISO)
 run: run-uefi
 
 .PHONY: run-bios
-run-bios: $(ISO) $(STATE_IMG)
+run-bios: $(ISO) $(STATE_IMG) ensure-state-image
 	$(QEMU) $(QEMU_AUDIO) -drive file=$(STATE_IMG),format=raw,if=ide,index=0 -boot once=d -cdrom $(ISO) -serial stdio -no-reboot
 
-debug: $(ISO) $(STATE_IMG)
+debug: $(ISO) $(STATE_IMG) ensure-state-image
 	$(QEMU) $(QEMU_AUDIO) -drive file=$(STATE_IMG),format=raw,if=ide,index=0 -boot once=d -cdrom $(ISO) -display none -serial stdio -no-reboot -s -S
 
 ayo:

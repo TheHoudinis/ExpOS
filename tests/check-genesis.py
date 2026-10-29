@@ -10,6 +10,7 @@ import time
 
 root = Path(__file__).resolve().parents[1]
 build = root / "build/genesis"
+TARGET_SERIAL = b"exposgenesistarget"
 code = os.environ.get("OVMF_CODE", "/usr/share/edk2/x64/OVMF_CODE.4m.fd")
 vars_template = os.environ.get("OVMF_VARS", "/usr/share/edk2/x64/OVMF_VARS.4m.fd")
 def firmware(name: str) -> list[str]:
@@ -129,14 +130,29 @@ def check_variant(
     expected_sdks: int = 0,
     expected_drivers: int = 1,
     expected_apps: int = 13,
+    expected_graphics: int = 0,
+    expected_display: int = 1,
+    expected_render: int = 1,
 ) -> None:
-    target = build / f"genesis-{name}-target.img"
+    # A unique image prevents a timed-out prior QEMU process from making a
+    # later validation run fail on an unrelated advisory file lock.
+    target = build / f"genesis-{name}-{os.getpid()}-target.img"
+    decoy = build / f"genesis-{name}-{os.getpid()}-decoy.img"
     target.write_bytes(b"")
+    decoy_marker = b"DECOY-DO-NOT-TOUCH"
+    decoy.write_bytes(decoy_marker + bytes(4096 - len(decoy_marker)))
     with target.open("r+b") as disk:
         disk.truncate(96 * 1024 * 1024)
+    with decoy.open("r+b") as disk:
+        disk.truncate(96 * 1024 * 1024)
+    with decoy.open("rb") as disk:
+        decoy_prefix = disk.read(4096)
 
     install_command = base + firmware(f"{name}-install") + [
-        "-drive", f"file={target},format=raw,if=ide,index=0",
+        "-drive", f"file={decoy},format=raw,if=none,id=decoy",
+        "-device", "ide-hd,drive=decoy,bus=ide.0,unit=0,model=Genesis Decoy Disk,serial=do-not-install-here",
+        "-drive", f"file={target},format=raw,if=none,id=target",
+        "-device", "ide-hd,drive=target,bus=ide.0,unit=1,model=ExpOS Genesis Target,serial=exposgenesistarget",
         "-cdrom", "build/ExpOS-v9-x86_64.iso", "-boot", "once=d",
         "-serial", "stdio",
     ]
@@ -146,6 +162,9 @@ def check_variant(
         b"2\n"                 # Browser + three essential Ayo apps
         b"1\n"                 # No SDK contracts
         b"1\n"                 # Enable the detected network driver
+        b"1\n"                 # Automatic graphics backend
+        b"2\n"                 # 1280x720 initial display
+        b"2\n"                 # Balanced rendering policy
         b"2\nWork\nLab\n"      # Two secondary Dimensions
         b"1\nanalyst\n2\n"     # One Guest account
         b"analyst-pass\nanalyst-pass\n"
@@ -155,14 +174,18 @@ def check_variant(
         f"{name}-install",
         install_command,
         b"Language [1-5]:",
-        b"1\n" + mode + b"\n" + common,
+        b"1\n2\n" + TARGET_SERIAL + b"\n" + mode + b"\n" + common,
         240 if encrypted else 150,
     )
     assert install_status == 0, (
         f"{name} installer failed ({install_status}); "
         f"see build/genesis/{name}-install-serial.log"
     )
+    with decoy.open("rb") as disk:
+        assert disk.read(4096) == decoy_prefix, "Genesis modified the unselected disk"
+    assert b"EXPOS_STORAGE_ENUMERATED devices=2" in install_output
     for marker in (
+        b"EXPOS_GENESIS_TARGET_SELECTED backend=ata-pio",
         b"EXPOS_GENESIS_INSTALLED",
         b"EFI/BOOT/BOOTX64.EFI installed",
         b"primary/backup manifests and boot payload verified",
@@ -183,13 +206,17 @@ def check_variant(
     assert primary_plan[12] == expected_drivers
     assert primary_plan[13] == expected_sdks
     assert int.from_bytes(primary_plan[16:20], "little") == expected_apps
+    assert primary_plan[20] == expected_graphics
+    assert primary_plan[21] == expected_display
+    assert primary_plan[22] == expected_render
     if name == "architect":
         with target.open("r+b") as disk:
             disk.seek(40 * 512)
             disk.write(b"DAMAGED!")
 
     boot_command = base + firmware(f"{name}-boot") + [
-        "-drive", f"file={target},format=raw,if=ide,index=0",
+        "-drive", f"file={target},format=raw,if=none,id=target",
+        "-device", "ide-hd,drive=target,bus=ide.0,unit=0,model=ExpOS Genesis Target,serial=exposgenesistarget",
         "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
     ]
     guest_serial = build / f"{name}-boot-guest.log"
@@ -223,13 +250,15 @@ def check_variant(
         ).encode(),
         b"EXPOS_LOGIN_OK user=operator",
         b"EXPOS_COMMAND_OK shutdown",
+        b"EXPOS_GENESIS_DISPLAY_POLICY",
     ):
         assert marker in boot_output, f"{name} installed boot omitted {marker!r}"
     if name == "architect":
         assert b"EXPOS_GENESIS_MANIFEST_RECOVERED source=backup" in boot_output
     disk_bytes = target.read_bytes()
     assert disk_bytes[41 * 512 : 41 * 512 + 8] == b"EXGEN001"
-    baseline = 304 * 512
+    # Two 128-sector live slots followed by eight 128-sector checkpoints.
+    baseline = 1344 * 512
     assert disk_bytes[baseline : baseline + 8] == b"EXPFSDB1"
     if encrypted:
         assert b"EXPOS_CFC_UNLOCKED" in boot_output
@@ -240,6 +269,7 @@ def check_variant(
         assert disk_bytes[baseline + 44] == 1, "installation baseline is not encrypted"
     else:
         assert disk_bytes[baseline + 44] == 0, "Architect baseline should be unencrypted"
+    target.unlink()
 
 
 selected_variant = os.environ.get("GENESIS_VARIANT", "both")
@@ -261,6 +291,9 @@ if selected_variant == "custom":
             b"1\n20\n0\n"      # Calculator + HashLab
             b"2\n"             # Rust + C SDK contracts
             b"2\n"             # Network driver omitted
+            b"3\n"             # Compatible framebuffer
+            b"1\n"             # 640x480 initial display
+            b"1\n"             # Efficient rendering policy
             b"0\n"             # No secondary Dimensions
             b"0\n"             # No secondary users
             b"correct-horse\ncorrect-horse\nERASE\n\n"
@@ -271,5 +304,8 @@ if selected_variant == "custom":
         expected_sdks=3,
         expected_drivers=0,
         expected_apps=(1 << 0) | (1 << 19),
+        expected_graphics=2,
+        expected_display=0,
+        expected_render=0,
     )
 print("Genesis verified install, redundant plan, protected baseline, PS/2 disk boot, login, and shutdown completed")

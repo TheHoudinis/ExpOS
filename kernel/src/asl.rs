@@ -13,11 +13,17 @@ const MAX_CAPABILITIES: usize = 32;
 pub enum Kind {
     FirmwareFramebuffer,
     Display,
+    DisplayVirtio,
     StorageAhci,
     StorageNvme,
+    StorageVirtio,
     UsbXhci,
     NetworkEthernet,
+    NetworkE1000,
+    NetworkVirtio,
     Audio,
+    AudioHda,
+    AudioVirtio,
     OtherPci,
 }
 
@@ -26,12 +32,35 @@ impl Kind {
         match self {
             Self::FirmwareFramebuffer => "firmware-framebuffer",
             Self::Display => "display",
+            Self::DisplayVirtio => "display-virtio",
             Self::StorageAhci => "storage-ahci",
             Self::StorageNvme => "storage-nvme",
+            Self::StorageVirtio => "storage-virtio",
             Self::UsbXhci => "usb-xhci",
             Self::NetworkEthernet => "network-ethernet",
+            Self::NetworkE1000 => "network-e1000",
+            Self::NetworkVirtio => "network-virtio",
             Self::Audio => "audio",
+            Self::AudioHda => "audio-hda",
+            Self::AudioVirtio => "audio-virtio",
             Self::OtherPci => "pci-function",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DriverStage {
+    Operational,
+    ProbeOnly,
+    Generic,
+}
+
+impl DriverStage {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Operational => "operational",
+            Self::ProbeOnly => "probe-only",
+            Self::Generic => "inventory",
         }
     }
 }
@@ -69,6 +98,7 @@ struct Capability {
     owner: Owner,
     msi: bool,
     msix: bool,
+    stage: DriverStage,
 }
 
 struct Inventory {
@@ -91,6 +121,7 @@ impl Inventory {
         owner: Owner,
         msi: bool,
         msix: bool,
+        stage: DriverStage,
     ) {
         if self.count == MAX_CAPABILITIES {
             return;
@@ -102,6 +133,7 @@ impl Inventory {
             owner,
             msi,
             msix,
+            stage,
         });
         self.count += 1;
     }
@@ -151,12 +183,29 @@ pub fn initialize() {
             Owner::Firmware,
             false,
             false,
+            DriverStage::Operational,
         );
     }
     pci::visit(|function| {
         let kind = classify(function);
         let (msi, msix) = interrupts::supports(function);
-        inventory.push(kind, Some(function.location), Owner::Unbound, msi, msix);
+        let stage = driver_stage(function, kind);
+        if stage == DriverStage::ProbeOnly {
+            crate::slog!(
+                "EXPOS_DRIVER_PROBE family={} vendor={:04x} device={:04x} stage=probe-only\r\n",
+                kind.label(),
+                function.vendor_id,
+                function.device_id
+            );
+        }
+        inventory.push(
+            kind,
+            Some(function.location),
+            Owner::Unbound,
+            msi,
+            msix,
+            stage,
+        );
         None::<()>
     });
     crate::slog!(
@@ -191,7 +240,7 @@ pub fn claim_firmware_framebuffer() {
 pub fn print_inventory() {
     let inventory = INVENTORY.lock();
     crate::println!("ASL v{} CAPABILITY INVENTORY", ASL_VERSION);
-    crate::println!("ID   KIND                  LOCATION     OWNER        IRQ");
+    crate::println!("ID   KIND                  LOCATION     OWNER        IRQ          DRIVER");
     for entry in inventory.entries.iter().flatten() {
         let irq = if entry.msix {
             "MSI-X"
@@ -202,28 +251,44 @@ pub fn print_inventory() {
         };
         if let Some(location) = entry.location {
             crate::println!(
-                "{:<4} {:<21} {:02x}:{:02x}.{}    {:<12} {}",
+                "{:<4} {:<21} {:02x}:{:02x}.{}    {:<12} {:<12} {}",
                 entry.id,
                 entry.kind.label(),
                 location.bus,
                 location.slot,
                 location.function,
                 entry.owner.label(),
-                irq
+                irq,
+                entry.stage.label()
             );
         } else {
             crate::println!(
-                "{:<4} {:<21} firmware     {:<12} {}",
+                "{:<4} {:<21} firmware     {:<12} {:<12} {}",
                 entry.id,
                 entry.kind.label(),
                 entry.owner.label(),
-                irq
+                irq,
+                entry.stage.label()
             );
         }
     }
 }
 
 const fn classify(function: pci::Function) -> Kind {
+    if function.vendor_id == 0x1AF4 {
+        return match function.device_id {
+            0x1000 | 0x1041 => Kind::NetworkVirtio,
+            0x1001 | 0x1042 => Kind::StorageVirtio,
+            0x1050 => Kind::DisplayVirtio,
+            0x1059 => Kind::AudioVirtio,
+            _ => Kind::OtherPci,
+        };
+    }
+    if function.vendor_id == 0x8086
+        && matches!(function.device_id, 0x100E | 0x100F | 0x10D3 | 0x153A)
+    {
+        return Kind::NetworkE1000;
+    }
     match (
         function.class_code,
         function.subclass,
@@ -234,9 +299,51 @@ const fn classify(function: pci::Function) -> Kind {
         (0x03, _, _) => Kind::Display,
         (0x0C, 0x03, 0x30) => Kind::UsbXhci,
         (0x02, 0x00, _) => Kind::NetworkEthernet,
+        (0x04, 0x03, _) => Kind::AudioHda,
         (0x04, _, _) => Kind::Audio,
         _ => Kind::OtherPci,
     }
+}
+
+const fn driver_stage(function: pci::Function, kind: Kind) -> DriverStage {
+    match kind {
+        Kind::FirmwareFramebuffer
+        | Kind::Display
+        | Kind::DisplayVirtio
+        | Kind::AudioVirtio
+        | Kind::StorageAhci
+        | Kind::StorageNvme
+        | Kind::UsbXhci => DriverStage::Operational,
+        Kind::NetworkEthernet if function.vendor_id == 0x10EC && function.device_id == 0x8139 => {
+            DriverStage::Operational
+        }
+        Kind::Audio if function.vendor_id == 0x8086 && function.device_id == 0x2415 => {
+            DriverStage::Operational
+        }
+        Kind::NetworkE1000 | Kind::AudioHda => DriverStage::Operational,
+        Kind::StorageVirtio if function.device_id == 0x1001 => DriverStage::Operational,
+        Kind::NetworkVirtio if function.device_id == 0x1000 => DriverStage::Operational,
+        Kind::StorageVirtio | Kind::NetworkVirtio => DriverStage::ProbeOnly,
+        _ => DriverStage::Generic,
+    }
+}
+
+#[cfg_attr(not(feature = "genesis-installer"), allow(dead_code))]
+pub fn driver_summary() -> (usize, usize) {
+    let inventory = INVENTORY.lock();
+    let operational = inventory
+        .entries
+        .iter()
+        .flatten()
+        .filter(|entry| entry.stage == DriverStage::Operational)
+        .count();
+    let probe_only = inventory
+        .entries
+        .iter()
+        .flatten()
+        .filter(|entry| entry.stage == DriverStage::ProbeOnly)
+        .count();
+    (operational, probe_only)
 }
 
 #[cfg(test)]
@@ -267,6 +374,49 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_operational_legacy_transports_and_probe_only_modern_virtio() {
+        let mut candidate = function(0x02, 0x00, 0);
+        candidate.vendor_id = 0x8086;
+        candidate.device_id = 0x100E;
+        assert_eq!(classify(candidate), Kind::NetworkE1000);
+        assert_eq!(
+            driver_stage(candidate, classify(candidate)),
+            DriverStage::Operational
+        );
+
+        candidate.vendor_id = 0x1AF4;
+        candidate.device_id = 0x1042;
+        assert_eq!(classify(candidate), Kind::StorageVirtio);
+        assert_eq!(
+            driver_stage(candidate, classify(candidate)),
+            DriverStage::ProbeOnly
+        );
+
+        candidate.device_id = 0x1001;
+        assert_eq!(
+            driver_stage(candidate, classify(candidate)),
+            DriverStage::Operational
+        );
+
+        candidate.device_id = 0x1059;
+        assert_eq!(classify(candidate), Kind::AudioVirtio);
+        assert_eq!(
+            driver_stage(candidate, classify(candidate)),
+            DriverStage::Operational
+        );
+
+        candidate.vendor_id = 0x1234;
+        candidate.device_id = 0x5678;
+        candidate.class_code = 0x04;
+        candidate.subclass = 0x03;
+        assert_eq!(classify(candidate), Kind::AudioHda);
+        assert_eq!(
+            driver_stage(candidate, classify(candidate)),
+            DriverStage::Operational
+        );
+    }
+
+    #[test]
     fn ownership_is_exclusive() {
         let mut inventory = Inventory::new();
         let location = pci::Location {
@@ -280,6 +430,7 @@ mod tests {
             Owner::Unbound,
             true,
             true,
+            DriverStage::Operational,
         );
         assert!(inventory.claim(location, Owner::ExpStorage));
         assert!(!inventory.claim(location, Owner::ExpUsb));

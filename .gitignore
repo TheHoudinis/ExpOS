@@ -11,6 +11,8 @@ target/
 *.img
 *.iso
 *.log
+/kernel/assets/audio/IMTQ.mp3
+/kernel/assets/audio/-_-.mp3
 
 
 __pycache__/

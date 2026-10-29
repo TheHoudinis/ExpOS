@@ -1047,7 +1047,7 @@ impl SettingsCategory {
             Self::Network => 4,
             Self::Bluetooth => 2,
             Self::Display => 6,
-            Self::Audio => 5,
+            Self::Audio => 7,
             Self::Performance => 4,
             Self::Input => 5,
             Self::Windows => 9,
@@ -1647,6 +1647,63 @@ struct DesktopPreferences {
     window_tiling: u8,
     audio_volume: u8,
     audio_muted: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WallpaperCacheKey {
+    width: usize,
+    height: usize,
+    wallpaper: WallpaperChoice,
+    wallpaper_variant: u8,
+    accent: AccentChoice,
+    backdrop: BackdropChoice,
+    effects: bool,
+}
+
+const MAX_SCENE_DAMAGE_REGIONS: usize = 16;
+
+#[derive(Clone, Copy)]
+struct SceneDamage {
+    regions: [framebuffer::DamageRegion; MAX_SCENE_DAMAGE_REGIONS],
+    len: usize,
+}
+
+impl SceneDamage {
+    const fn empty() -> Self {
+        Self {
+            regions: [framebuffer::DamageRegion::new(0, 0, 0, 0); MAX_SCENE_DAMAGE_REGIONS],
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, region: framebuffer::DamageRegion) {
+        if self.len < self.regions.len() {
+            self.regions[self.len] = region;
+            self.len += 1;
+        } else {
+            self.regions = [framebuffer::DamageRegion::new(
+                0,
+                0,
+                framebuffer::width() as i32,
+                framebuffer::height() as i32,
+            ); MAX_SCENE_DAMAGE_REGIONS];
+            self.len = 1;
+        }
+    }
+}
+
+impl WallpaperCacheKey {
+    fn current(preferences: DesktopPreferences) -> Self {
+        Self {
+            width: framebuffer::width(),
+            height: framebuffer::height(),
+            wallpaper: preferences.wallpaper,
+            wallpaper_variant: preferences.wallpaper_variant,
+            accent: preferences.accent,
+            backdrop: preferences.backdrop,
+            effects: preferences.wallpaper_effects,
+        }
+    }
 }
 
 impl DesktopPreferences {
@@ -2267,12 +2324,18 @@ struct DesktopState {
     should_exit: bool,
     frame_pacer: FramePacer,
     responsive_commits: u64,
+    tickless_frame_waits: u64,
+    coalesced_compositions: u64,
+    consecutive_coalesced_compositions: u8,
+    input_backlog_hint: bool,
     full_frame_commits: u64,
     damaged_frame_commits: u64,
     frame_callbacks: u64,
     pointer_packets_merged: u64,
     deferred_presents: u64,
     full_redraw_requested: bool,
+    wallpaper_cache_key: Option<WallpaperCacheKey>,
+    last_scene_damage: SceneDamage,
     display_debug_overlay: bool,
     display_restart_requested: bool,
 }
@@ -2790,12 +2853,18 @@ impl DesktopState {
             should_exit: false,
             frame_pacer,
             responsive_commits: 0,
+            tickless_frame_waits: 0,
+            coalesced_compositions: 0,
+            consecutive_coalesced_compositions: 0,
+            input_backlog_hint: false,
             full_frame_commits: 0,
             damaged_frame_commits: 0,
             frame_callbacks: 0,
             pointer_packets_merged: 0,
             deferred_presents: 0,
             full_redraw_requested: false,
+            wallpaper_cache_key: None,
+            last_scene_damage: SceneDamage::empty(),
             display_debug_overlay: false,
             display_restart_requested: false,
         };
@@ -5320,6 +5389,26 @@ impl DesktopState {
                 self.settings_notice = "Audio playback stopped.";
                 slog!("EXPOS_SETTING_CHANGED key=audio-test action=stop\r\n");
             }
+            (SettingsCategory::Audio, 5) => {
+                self.settings_notice = match audio::play_track(audio::Track::Imtq) {
+                    Ok(_) => "Streaming IMTQ from bounded MP3 decode buffers.",
+                    Err(audio::AudioError::MediaNotInstalled) => {
+                        "Download IMTQ first with Ayo in Terminal."
+                    }
+                    Err(_) => "The MP3 track could not start on this output.",
+                };
+                slog!("EXPOS_SETTING_CHANGED key=audio-track value=imtq action=play\r\n");
+            }
+            (SettingsCategory::Audio, 6) => {
+                self.settings_notice = match audio::play_track(audio::Track::Dash) {
+                    Ok(_) => "Streaming -_-.mp3 from bounded MP3 decode buffers.",
+                    Err(audio::AudioError::MediaNotInstalled) => {
+                        "Download -_-.mp3 first with Ayo in Terminal."
+                    }
+                    Err(_) => "The MP3 track could not start on this output.",
+                };
+                slog!("EXPOS_SETTING_CHANGED key=audio-track value=dash action=play\r\n");
+            }
             (SettingsCategory::Performance, 0) => {
                 self.full_redraw_requested = true;
                 self.preferences.window_shadows = !self.preferences.window_shadows;
@@ -6287,13 +6376,13 @@ impl DesktopState {
             "  help clear status version hostname pwd whoami id uname uptime neofetch",
         );
         self.terminal_push(
-            "  users display resolution network netstat storage theme history cpus audio",
+            "  users display resolution network netstat storage theme history cpus audio music",
         );
         self.terminal_push("  apps ls ps forms read <name> write <filename> <text>");
         self.terminal_push("  bootlog [filter] trace [filter] serviceinfo style");
         self.terminal_push("  ayo list | ayo install <app> | ayo remove <app>");
         self.terminal_push(
-            "  echo <text> audiotest audiostop windowreset displaydebug [on|off] displayrepair",
+            "  echo <text> play <imtq|dash> audiotest audiostop windowreset displayrepair",
         );
         self.terminal_push("  open <app> close console shutdown reboot");
         self.terminal_push("Use Up/Down for command history.");
@@ -6627,7 +6716,12 @@ impl DesktopState {
             || operation.eq_ignore_ascii_case(b"glance")
         {
             self.terminal_push("Ayo: list, install/slap <app>, remove/yeet <app>, open <app>");
+            self.terminal_push("     music list | install <imtq|dash> <web-url> | remove <track>");
             self.terminal_push("Apps are not installed until you choose them.");
+            return;
+        }
+        if operation.eq_ignore_ascii_case(b"music") {
+            self.terminal_ayo_music(package);
             return;
         }
         if operation.eq_ignore_ascii_case(b"list") {
@@ -6692,6 +6786,146 @@ impl DesktopState {
             }
         } else {
             self.terminal_push("usage: ayo <list|install|remove|open> [app]");
+        }
+    }
+
+    fn terminal_ayo_music(&mut self, arguments: &[u8]) {
+        let (operation, rest) = split_command(arguments);
+        if operation.is_empty()
+            || operation.eq_ignore_ascii_case(b"list")
+            || operation.eq_ignore_ascii_case(b"status")
+        {
+            self.terminal_push("Ayo music packages:");
+            for track in audio::Track::ALL {
+                self.terminal_push_parts(&[
+                    "  ",
+                    track.info().command_name,
+                    " - ",
+                    if audio::track_installed(track) {
+                        "installed"
+                    } else {
+                        "download needed"
+                    },
+                ]);
+            }
+            return;
+        }
+        if self.session.authority() == Authority::Guest {
+            self.terminal_push("DIESE denied music package changes for Guest authority.");
+            return;
+        }
+        let (track_name, url_bytes) = split_command(rest);
+        let track = if track_name.eq_ignore_ascii_case(b"imtq") || track_name == b"1" {
+            Some(audio::Track::Imtq)
+        } else if track_name.eq_ignore_ascii_case(b"dash")
+            || track_name.eq_ignore_ascii_case(b"-_-.mp3")
+            || track_name == b"2"
+        {
+            Some(audio::Track::Dash)
+        } else {
+            None
+        };
+        let Some(track) = track else {
+            self.terminal_push("usage: ayo music install <imtq|dash> <web-url>");
+            self.terminal_push("       ayo music remove <imtq|dash>");
+            return;
+        };
+        if operation.eq_ignore_ascii_case(b"remove") {
+            match crate::media_store::remove(track) {
+                Ok(true) => self.terminal_push_parts(&["Removed ", track.info().display_name, "."]),
+                Ok(false) => self.terminal_push("That track is not installed."),
+                Err(error) => self.terminal_push_parts(&["Remove failed: ", error.message()]),
+            }
+            return;
+        }
+        if !operation.eq_ignore_ascii_case(b"install") {
+            self.terminal_push("usage: ayo music <list|install|remove> ...");
+            return;
+        }
+        let Ok(url) = core::str::from_utf8(trim_ascii(url_bytes)) else {
+            self.terminal_push("Music URL must be UTF-8.");
+            return;
+        };
+        if url.is_empty() || url.bytes().any(|byte| byte.is_ascii_whitespace()) {
+            self.terminal_push("usage: ayo music install <imtq|dash> <web-url>");
+            return;
+        }
+        let Some(handle_id) = self.apps_network_handle else {
+            self.terminal_push("Ayo music did not receive a Network Handle.");
+            return;
+        };
+        let mut install = match crate::media_store::begin_install(track) {
+            Ok(install) => install,
+            Err(error) => {
+                self.terminal_push_parts(&["Install failed: ", error.message()]);
+                return;
+            }
+        };
+        self.terminal_push_parts(&[
+            "Downloading and verifying ",
+            track.info().display_name,
+            "...",
+        ]);
+        const CHUNK: usize = 52 * 1024;
+        let mut next_progress = 512 * 1024;
+        while install.written() < install.expected_length() {
+            let start = install.written();
+            let end = (start + CHUNK).min(install.expected_length());
+            let mut attempts = 0_u8;
+            let response = loop {
+                attempts += 1;
+                match network::web_get_range(
+                    &self.broker,
+                    handle_id,
+                    APPS_FIN,
+                    STABLE_FIN,
+                    url,
+                    start,
+                    end,
+                ) {
+                    Ok(response) => break response,
+                    Err(error) if attempts < 3 => {
+                        self.terminal_push_number("retrying byte ", start as u64, "");
+                        slog!(
+                            "EXPOS_AYO_MUSIC_RETRY track={} offset={} attempt={} error={:?}\r\n",
+                            track.info().command_name,
+                            start,
+                            attempts + 1,
+                            error
+                        );
+                    }
+                    Err(error) => {
+                        self.terminal_push_parts(&["Download failed: ", error.message()]);
+                        slog!(
+                            "EXPOS_AYO_MUSIC_DOWNLOAD_ERROR track={} offset={} attempts={} error={:?}\r\n",
+                            track.info().command_name,
+                            start,
+                            attempts,
+                            error
+                        );
+                        return;
+                    }
+                }
+            };
+            if response.status != 206 || response.truncated || response.body_len != end - start {
+                self.terminal_push("Server rejected the bounded Range download.");
+                return;
+            }
+            if let Err(error) = install.write(start, response.body()) {
+                self.terminal_push_parts(&["Music store failed: ", error.message()]);
+                return;
+            }
+            if install.written() >= next_progress || install.written() == install.expected_length()
+            {
+                self.terminal_push_number("downloaded ", install.written() as u64, " bytes");
+                next_progress = next_progress.saturating_add(512 * 1024);
+            }
+        }
+        match install.commit() {
+            Ok(()) => {
+                self.terminal_push_parts(&["Installed. Run: play ", track.info().command_name])
+            }
+            Err(error) => self.terminal_push_parts(&["Package rejected: ", error.message()]),
         }
     }
 
@@ -6760,12 +6994,18 @@ impl DesktopState {
         } else if name.eq_ignore_ascii_case(b"audio") {
             let status = audio::status();
             slog!(
-                "EXPOS_AUDIO_STATUS backend={} volume={} muted={} playing={} queued={} submitted={} completed={} queue_total={} underruns={} fifo_errors={} recoveries={}\r\n",
-                if status.backend == audio::Backend::Ac97 {
-                    "ac97"
-                } else {
-                    "unavailable"
+                "EXPOS_AUDIO_STATUS backend={} completion={} irq={} interrupts={} irq_status={:#x} hardware_status={:#x} volume={} muted={} playing={} queued={} submitted={} completed={} queue_total={} underruns={} fifo_errors={} recoveries={}\r\n",
+                match status.backend {
+                    audio::Backend::Ac97 => "ac97",
+                    audio::Backend::Hda => "hda",
+                    audio::Backend::VirtioSound => "virtio-sound",
+                    audio::Backend::Unavailable => "unavailable",
                 },
+                status.completion_mode.label(),
+                status.irq.unwrap_or(0),
+                status.interrupts,
+                status.last_irq_status,
+                status.hardware_status,
                 status.volume,
                 status.muted,
                 status.playing,
@@ -6778,6 +7018,8 @@ impl DesktopState {
                 status.recoveries
             );
             self.terminal_push_parts(&["audio backend: ", status.backend.label()]);
+            self.terminal_push_parts(&["completion: ", status.completion_mode.label()]);
+            self.terminal_push_number("interrupts: ", status.interrupts, "");
             self.terminal_push_number("volume: ", status.volume as u64, "%");
             self.terminal_push_parts(&[
                 "muted: ",
@@ -6790,6 +7032,55 @@ impl DesktopState {
             self.terminal_push_number("submitted frames: ", status.submitted_frames, "");
             self.terminal_push_number("completed buffers: ", status.completed_buffers, "");
             self.terminal_push_number("underruns: ", status.underruns, "");
+            if let Some(track) = status.media_track {
+                self.terminal_push_parts(&["media: MP3 ", track]);
+                self.terminal_push_number("media bytes: ", status.media_bytes as u64, "");
+                self.terminal_push_number(
+                    "decoded frames: ",
+                    status.media_decoded_frames,
+                    " @ 48 kHz",
+                );
+            }
+        } else if name.eq_ignore_ascii_case(b"music") {
+            self.terminal_push("Ayo MP3 packages:");
+            for track in audio::tracks() {
+                self.terminal_push_parts(&[
+                    "  ",
+                    track.command_name,
+                    " - ",
+                    track.display_name,
+                    if audio::track_installed(track.track) {
+                        " [installed]"
+                    } else {
+                        " [download needed: ayo music install]"
+                    },
+                ]);
+            }
+        } else if name.eq_ignore_ascii_case(b"play") {
+            let track = trim_ascii(arguments);
+            let selected = if track.eq_ignore_ascii_case(b"imtq") || track == b"1" {
+                Some(audio::Track::Imtq)
+            } else if track.eq_ignore_ascii_case(b"dash")
+                || track.eq_ignore_ascii_case(b"-_-.mp3")
+                || track == b"2"
+            {
+                Some(audio::Track::Dash)
+            } else {
+                None
+            };
+            match selected.map(audio::play_track) {
+                Some(Ok(info)) => self.terminal_push_parts(&[
+                    "Playing MP3: ",
+                    info.display_name,
+                    " (streaming 48 kHz stereo)",
+                ]),
+                Some(Err(audio::AudioError::MediaNotInstalled)) => self.terminal_push(
+                    "Track not installed. Run: ayo music install <imtq|dash> <web-url>",
+                ),
+                None if selected.is_none() => self.terminal_push("usage: play <imtq|dash>"),
+                Some(Err(_)) => self.terminal_push("MP3 playback could not start on this output."),
+                None => unreachable!(),
+            }
         } else if name.eq_ignore_ascii_case(b"audiotest") {
             if audio::play_tone(660, 120).is_ok() {
                 self.terminal_push("Playing a bounded 660 Hz stereo test tone.");
@@ -7135,15 +7426,10 @@ fn run_session(
     let weather_animation_ticks = (clock.tsc_hz / 4).max(1);
     let mut next_weather_animation =
         crate::hardware::timestamp().saturating_add(weather_animation_ticks);
-    let audio_poll_ticks = (clock.tsc_hz / 200).max(1);
-    let mut next_audio_poll = crate::hardware::timestamp().saturating_add(audio_poll_ticks);
-
     while !desktop.should_exit {
-        let loop_now = crate::hardware::timestamp();
-        if loop_now >= next_audio_poll {
-            let _ = audio::poll();
-            next_audio_poll = loop_now.saturating_add(audio_poll_ticks);
-        }
+        // This is an atomic event drain, not a hardware register poll. AC'97
+        // completion is acknowledged by its IRQ handler.
+        let _ = audio::poll();
         // External navigation is queued by input handlers so a pointer/key
         // event never retains its hit-testing and compositor frames while the
         // Browser performs DNS, transport, parsing and resource hydration.
@@ -7155,6 +7441,7 @@ fn run_session(
             continue;
         }
         let Some(event) = input.poll_event() else {
+            desktop.input_backlog_hint = false;
             let now = crate::hardware::timestamp();
             let clock_changed = if now >= next_clock_poll {
                 next_clock_poll = now.saturating_add(clock_poll_ticks);
@@ -7188,14 +7475,21 @@ fn run_session(
                 render_active_window(&mut desktop);
             } else {
                 let _ = desktop.frame_pacer.decide(now, false);
-                core::hint::spin_loop();
+                // The PIT is one-shot while the desktop is idle, eliminating
+                // the old 1 kHz wake storm.  The 50 ms cap keeps animations
+                // responsive and is also the maximum useful 16-bit PIT span.
+                crate::form_runtime::wait_tickless(50_000);
             }
             continue;
         };
         let key = match event {
-            InputEvent::Key(key) => key,
+            InputEvent::Key(key) => {
+                desktop.input_backlog_hint = input.prefetch_event();
+                key
+            }
             InputEvent::Pointer(pointer) => {
                 let (pointer, merged) = input.coalesce_pointer_motion(pointer);
+                desktop.input_backlog_hint = input.prefetch_event();
                 desktop.pointer_packets_merged =
                     desktop.pointer_packets_merged.saturating_add(merged as u64);
                 if desktop.locked {
@@ -7497,15 +7791,17 @@ fn run_session(
     let presentation = framebuffer::presentation_stats();
     let portal = desktop.server.diagnostics();
     slog!(
-        "EXPOS_PRESENTATION_STATS frames={} missed={} idle={} vblank_timeouts={} responsive_commits={}\r\n",
+        "EXPOS_PRESENTATION_STATS frames={} missed={} idle={} vblank_timeouts={} responsive_commits={} tickless_frame_waits={} coalesced_compositions={}\r\n",
         presentation.frames,
         pacing.missed_frames,
         pacing.idle_frames,
         presentation.vblank_timeouts,
-        desktop.responsive_commits
+        desktop.responsive_commits,
+        desktop.tickless_frame_waits,
+        desktop.coalesced_compositions
     );
     slog!(
-        "EXPOS_RENDER_STATS full={} damaged={} callbacks={} surface_frames={} pointer_merged={} submitted_regions={} copied_regions={} copied_pixels={} collapses={} promotions={} gop_full={} gop_partial={} readback_failures={} recoveries={} max_copy_ticks={} deferred={}\r\n",
+        "EXPOS_RENDER_STATS full={} damaged={} callbacks={} surface_frames={} pointer_merged={} submitted_regions={} copied_regions={} copied_pixels={} collapses={} promotions={} gop_full={} gop_partial={} readback_failures={} recoveries={} max_copy_ticks={} deferred={} backdrop_hits={} backdrop_captures={}\r\n",
         desktop.full_frame_commits,
         desktop.damaged_frame_commits,
         desktop.frame_callbacks,
@@ -7521,7 +7817,9 @@ fn run_session(
         presentation.gop_readback_failures,
         presentation.gop_recoveries,
         presentation.max_copy_ticks,
-        desktop.deferred_presents
+        desktop.deferred_presents,
+        presentation.backdrop_cache_hits,
+        presentation.backdrop_cache_captures
     );
     slog!(
         "EXPOS_PORTAL_V3_STATS commits={} frames={} callbacks={} queued={} pending={} frame_coalesced={} motion_coalesced={} recovered_slots={} dropped={}\r\n",
@@ -7769,9 +8067,19 @@ fn draw_wallpaper(preferences: DesktopPreferences) {
 }
 
 fn render(desktop: &mut DesktopState) {
+    if defer_composition_for_input(desktop) {
+        return;
+    }
+    begin_composition(desktop);
     desktop.full_redraw_requested = false;
     desktop.cursor.invalidate();
-    draw_wallpaper(desktop.preferences);
+    let wallpaper_key = WallpaperCacheKey::current(desktop.preferences);
+    let restored =
+        desktop.wallpaper_cache_key == Some(wallpaper_key) && framebuffer::restore_backdrop();
+    if !restored {
+        draw_wallpaper(desktop.preferences);
+        desktop.wallpaper_cache_key = framebuffer::capture_backdrop().then_some(wallpaper_key);
+    }
 
     for app in AppKind::ALL {
         if app != desktop.active && desktop.app_is_visible(app) {
@@ -7800,7 +8108,64 @@ fn render(desktop: &mut DesktopState) {
         draw_display_debug_overlay(desktop);
     }
     desktop.cursor.draw();
-    present_frame(desktop);
+    let current_scene = scene_damage(desktop);
+    if restored && desktop.last_scene_damage.len != 0 {
+        let mut damage = [framebuffer::DamageRegion::new(0, 0, 0, 0); MAX_SCENE_DAMAGE_REGIONS * 2];
+        let previous_len = desktop.last_scene_damage.len;
+        damage[..previous_len].copy_from_slice(&desktop.last_scene_damage.regions[..previous_len]);
+        damage[previous_len..previous_len + current_scene.len]
+            .copy_from_slice(&current_scene.regions[..current_scene.len]);
+        present_composed_damage(desktop, &damage[..previous_len + current_scene.len]);
+    } else {
+        present_frame(desktop);
+    }
+    desktop.last_scene_damage = current_scene;
+}
+
+fn scene_damage(desktop: &DesktopState) -> SceneDamage {
+    let mut damage = SceneDamage::empty();
+    let full_screen_overlay = desktop.launcher_open
+        || desktop.shell_confirmation
+        || desktop.power_menu_open
+        || desktop.locked;
+    if full_screen_overlay {
+        damage.push(framebuffer::DamageRegion::new(
+            0,
+            0,
+            framebuffer::width() as i32,
+            framebuffer::height() as i32,
+        ));
+        return damage;
+    }
+    for app in AppKind::ALL {
+        if !desktop.app_is_visible(app) {
+            continue;
+        }
+        if let Some(surface) = desktop.server.surface(desktop.app_surfaces[app.index()]) {
+            let rect = surface.current.rect;
+            // Include the bounded compositor shadow and focus decoration.
+            damage.push(framebuffer::DamageRegion::new(
+                rect.x as i32 - 2,
+                rect.y as i32 - 2,
+                rect.width as i32 + 14,
+                rect.height as i32 + 16,
+            ));
+        }
+    }
+    if desktop.taskbar_should_show() {
+        let dock = taskbar_rect(desktop.preferences);
+        damage.push(framebuffer::DamageRegion::new(
+            dock.x as i32,
+            dock.y as i32,
+            dock.width as i32,
+            dock.height as i32,
+        ));
+    }
+    if desktop.display_debug_overlay {
+        damage.push(display_debug_region());
+    }
+    damage.push(desktop.cursor.damage_region());
+    damage
 }
 
 fn render_active_window(desktop: &mut DesktopState) {
@@ -7812,6 +8177,10 @@ fn render_active_window(desktop: &mut DesktopState) {
         render(desktop);
         return;
     }
+    if defer_composition_for_input(desktop) {
+        return;
+    }
+    begin_composition(desktop);
     desktop.cursor.restore();
     let mut damage = [desktop.cursor.damage_region(); 2];
     let mut damage_count = 1;
@@ -7845,6 +8214,10 @@ fn render_taskbar_damage(desktop: &mut DesktopState) {
         render(desktop);
         return;
     }
+    if defer_composition_for_input(desktop) {
+        return;
+    }
+    begin_composition(desktop);
     desktop.cursor.restore();
     let cursor_damage = desktop.cursor.damage_region();
     draw_dock(desktop);
@@ -7885,6 +8258,18 @@ fn present_frame_damage(desktop: &mut DesktopState, damage: &[framebuffer::Damag
     };
     let visible = framebuffer::present_damage(desktop.preferences.vsync, damage);
     desktop.damaged_frame_commits = desktop.damaged_frame_commits.saturating_add(1);
+    complete_visible_frame(desktop, visible);
+    desktop.drain_protocol_events();
+}
+
+/// Publish a fully recomposed scene through its actual changed footprints.
+/// This keeps full-composition accounting distinct from a full-screen GPU
+/// upload and is safe because both the previous and current footprints are
+/// restored from the cached wallpaper before the new scene is drawn.
+fn present_composed_damage(desktop: &mut DesktopState, damage: &[framebuffer::DamageRegion]) {
+    pace_frame(desktop, false);
+    let visible = framebuffer::present_damage(desktop.preferences.vsync, damage);
+    desktop.full_frame_commits = desktop.full_frame_commits.saturating_add(1);
     complete_visible_frame(desktop, visible);
     desktop.drain_protocol_events();
 }
@@ -7962,12 +8347,14 @@ fn pace_frame(desktop: &mut DesktopState, damaged_commit: bool) {
         desktop.responsive_commits = desktop.responsive_commits.saturating_add(1);
         return;
     }
+    let mut interrupt_waits = 0_u8;
     loop {
         let now = crate::hardware::timestamp();
         match desktop.frame_pacer.decide(now, true) {
             FrameDecision::WaitUntil { deadline } => {
                 let started = crate::hardware::timestamp();
-                let max_wait = crate::hardware::clock_info().tsc_hz.max(1) / 20;
+                let tsc_hz = crate::hardware::clock_info().tsc_hz.max(1);
+                let max_wait = tsc_hz / 20;
                 let mut polls = 0_u32;
                 while crate::hardware::timestamp() < deadline.not_before_tick() {
                     let now = crate::hardware::timestamp();
@@ -7978,7 +8365,22 @@ fn pace_frame(desktop: &mut DesktopState, damaged_commit: bool) {
                         slog!("EXPOS_FRAME_WAIT_RECOVERED polls={}\r\n", polls);
                         break;
                     }
-                    core::hint::spin_loop();
+                    let remaining = deadline.not_before_tick().saturating_sub(now);
+                    let remaining_us =
+                        (remaining as u128 * 1_000_000_u128 / tsc_hz as u128).min(50_000) as u32;
+                    if remaining_us >= 250 && interrupt_waits < 4 {
+                        if desktop.tickless_frame_waits == 0 {
+                            slog!(
+                                "EXPOS_FRAME_WAIT mode=pit-one-shot spin_tail_us=250 max_sleep_us=50000\r\n"
+                            );
+                        }
+                        desktop.tickless_frame_waits =
+                            desktop.tickless_frame_waits.saturating_add(1);
+                        interrupt_waits += 1;
+                        crate::form_runtime::wait_tickless(remaining_us);
+                    } else {
+                        core::hint::spin_loop();
+                    }
                 }
             }
             FrameDecision::PresentNow { missed_frames, .. } => {
@@ -7993,6 +8395,42 @@ fn pace_frame(desktop: &mut DesktopState, damaged_commit: bool) {
             }
             FrameDecision::Idle { .. } => {}
         }
+    }
+}
+
+/// Mark elapsed cadence slots as idle before rasterization begins. Without
+/// this boundary, time spent in synchronous application work was charged as
+/// thousands of missed frames even though no composed frame was pending.
+fn begin_composition(desktop: &mut DesktopState) {
+    let _ = desktop
+        .frame_pacer
+        .decide(crate::hardware::timestamp(), false);
+}
+
+/// Collapse a bounded burst of already-queued keyboard or pointer input into
+/// its newest visual state. At least every eighth request is composed, so a
+/// continuously busy device cannot starve scanout or frame callbacks.
+fn defer_composition_for_input(desktop: &mut DesktopState) -> bool {
+    const MAX_COALESCED_COMPOSITIONS: u8 = 7;
+    // A new display session must publish its first complete scene even when a
+    // test harness or fast typist has already queued the next command.
+    let has_visible_scene = desktop.full_frame_commits != 0 || desktop.damaged_frame_commits != 0;
+    if has_visible_scene
+        && desktop.input_backlog_hint
+        && desktop.consecutive_coalesced_compositions < MAX_COALESCED_COMPOSITIONS
+    {
+        desktop.consecutive_coalesced_compositions += 1;
+        desktop.coalesced_compositions = desktop.coalesced_compositions.saturating_add(1);
+        if desktop.coalesced_compositions == 1 {
+            slog!(
+                "EXPOS_COMPOSITOR_COALESCE source=input max_deferred={} policy=latest-state\r\n",
+                MAX_COALESCED_COMPOSITIONS
+            );
+        }
+        true
+    } else {
+        desktop.consecutive_coalesced_compositions = 0;
+        false
     }
 }
 
@@ -9924,6 +10362,44 @@ fn draw_settings(rect: Rect, desktop: &DesktopState) {
                 status.backend.label(),
                 SettingControl::Status {
                     ready: status.backend != audio::Backend::Unavailable,
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                5,
+                "IMTQ",
+                "Ayo download, verified VBR MP3 - 4:03",
+                if status.media_track == Some("IMTQ") {
+                    "Playing"
+                } else if audio::track_installed(audio::Track::Imtq) {
+                    "Play"
+                } else {
+                    "Not installed"
+                },
+                SettingControl::Action {
+                    available: audio::available() && audio::track_installed(audio::Track::Imtq),
+                },
+            );
+            settings_row(
+                desktop,
+                content_x,
+                y,
+                content_width,
+                6,
+                "-_-.mp3",
+                "Ayo download, verified VBR MP3 - 1:13",
+                if status.media_track == Some("-_-.mp3") {
+                    "Playing"
+                } else if audio::track_installed(audio::Track::Dash) {
+                    "Play"
+                } else {
+                    "Not installed"
+                },
+                SettingControl::Action {
+                    available: audio::available() && audio::track_installed(audio::Track::Dash),
                 },
             );
         }
@@ -12626,7 +13102,7 @@ mod tests {
         assert_eq!(SettingsCategory::ALL.len(), 18);
         assert_eq!(SettingsCategory::Audio.index(), 5);
         assert_eq!(SettingsCategory::Performance.index(), 6);
-        assert_eq!(SettingsCategory::Audio.row_count(), 5);
+        assert_eq!(SettingsCategory::Audio.row_count(), 7);
         assert_eq!(SettingsCategory::Performance.row_count(), 4);
     }
 

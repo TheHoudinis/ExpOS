@@ -1,5 +1,7 @@
 //! Bounded HTTP response decoding shared by the isolated network worker and host tests.
-pub const HTTP_BODY_CAPACITY: usize = 14 * 1024;
+// Ring 3 network replies are 64 KiB. Leave headroom for status/headers while
+// allowing Ayo Range downloads to advance in useful 56 KiB chunks.
+pub const HTTP_BODY_CAPACITY: usize = 56 * 1024;
 const HTTP_LOCATION_CAPACITY: usize = 512;
 const HTTP_CONTENT_TYPE_CAPACITY: usize = 96;
 const HTTP_COOKIE_CAPACITY: usize = 384;

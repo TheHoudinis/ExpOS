@@ -430,6 +430,8 @@ extern expos_form_timer_interrupt
 extern expos_form_interrupt_eoi
 extern expos_form_abi_interrupt
 extern expos_form_fault_interrupt
+extern expos_legacy_irq_interrupt
+extern expos_device_interrupt
 
 global expos_form_timer_stub
 expos_form_timer_stub:
@@ -466,6 +468,52 @@ expos_form_abi_stub:
         call expos_form_abi_interrupt
         test rax, rax
         jnz expos_arch_leave_form
+        FORM_POP_REGS
+        FORM_IRET
+
+; Legacy PCI devices such as AC'97 use a firmware-routed INTx line. Keep the
+; handler lock-free: Rust acknowledges the device, records a bounded event and
+; EOIs the PIC. The main loop performs the heavier queue transition.
+%macro LEGACY_IRQ_STUB 2
+global %1
+%1:
+        test byte [rsp + 8], 3
+        jz %%kernel_gs
+        swapgs
+%%kernel_gs:
+        KERNEL_ENTRY_FLAGS
+        FORM_PUSH_REGS
+        mov edi, %2
+        call expos_legacy_irq_interrupt
+        FORM_POP_REGS
+        FORM_IRET
+%endmacro
+
+LEGACY_IRQ_STUB expos_legacy_irq1_stub, 1
+LEGACY_IRQ_STUB expos_legacy_irq2_stub, 2
+LEGACY_IRQ_STUB expos_legacy_irq3_stub, 3
+LEGACY_IRQ_STUB expos_legacy_irq4_stub, 4
+LEGACY_IRQ_STUB expos_legacy_irq5_stub, 5
+LEGACY_IRQ_STUB expos_legacy_irq6_stub, 6
+LEGACY_IRQ_STUB expos_legacy_irq7_stub, 7
+LEGACY_IRQ_STUB expos_legacy_irq8_stub, 8
+LEGACY_IRQ_STUB expos_legacy_irq9_stub, 9
+LEGACY_IRQ_STUB expos_legacy_irq10_stub, 10
+LEGACY_IRQ_STUB expos_legacy_irq11_stub, 11
+LEGACY_IRQ_STUB expos_legacy_irq12_stub, 12
+LEGACY_IRQ_STUB expos_legacy_irq13_stub, 13
+LEGACY_IRQ_STUB expos_legacy_irq14_stub, 14
+LEGACY_IRQ_STUB expos_legacy_irq15_stub, 15
+
+global expos_device_irq_stub
+expos_device_irq_stub:
+        test byte [rsp + 8], 3
+        jz .kernel_gs
+        swapgs
+.kernel_gs:
+        KERNEL_ENTRY_FLAGS
+        FORM_PUSH_REGS
+        call expos_device_interrupt
         FORM_POP_REGS
         FORM_IRET
 

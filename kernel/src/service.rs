@@ -11,9 +11,12 @@ pub const BASE: u64 = 0x400000200000;
 pub const MEMORY_BYTES: usize = 2 * 1024 * 1024;
 pub const INPUT_OFFSET: usize = 0x180000;
 pub const INPUT_BYTES: usize = 64 * 1024;
-pub const STACK_OFFSET: usize = 0x1c0000;
-pub const STACK_BYTES: usize = 128 * 1024;
-pub const OUTPUT_BYTES: usize = 32 * 1024;
+// The network worker can hold a 60 KiB bounded TCP reply plus TLS/parser
+// frames. Keep a guard gap after the 64 KiB input and give that isolated
+// worker enough private stack without enlarging its fixed 2 MiB arena.
+pub const STACK_OFFSET: usize = 0x1a0000;
+pub const STACK_BYTES: usize = 256 * 1024;
+pub const OUTPUT_BYTES: usize = 64 * 1024;
 const DIMENSION: Fin = Fin::from_u128(0x53455256494345000000000000000001);
 const REPLY: Fin = Fin::from_u128(0x53455256494345000000000000000002);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -121,6 +124,24 @@ impl Memory {
         let offset = usize::try_from(user_address.checked_sub(BASE)?).ok()?;
         let end = offset.checked_add(length)?;
         if length == 0 || end > INPUT_OFFSET {
+            return None;
+        }
+        let required = 1 | 2 | 4 | (1_u64 << 63);
+        for page in offset / 4096..end.div_ceil(4096) {
+            if self.table[page] & required != required {
+                return None;
+            }
+        }
+        Some(self.bytes.as_ptr() as usize + offset)
+    }
+
+    /// Translate a short-lived writable service range for a kernel copy. This
+    /// includes the private stack but never grants DMA ownership or retains the
+    /// alias after the ABI call returns.
+    pub(crate) fn writable_alias_range(&self, user_address: u64, length: usize) -> Option<usize> {
+        let offset = usize::try_from(user_address.checked_sub(BASE)?).ok()?;
+        let end = offset.checked_add(length)?;
+        if length == 0 || end > MEMORY_BYTES {
             return None;
         }
         let required = 1 | 2 | 4 | (1_u64 << 63);

@@ -52,7 +52,11 @@ artifact = "build/hello"
                 self.assertTrue(payload.startswith(b"EXF1"))
                 self.assertLessEqual(len(payload), 4096)
                 script = subprocess.check_output([str(CLI), "--manifest", str(root / "expos.toml"), "import-script", "--no-build"], text=True)
-                self.assertIn("mkform NativeRust executable", script)
+                self.assertIn(
+                    f"ayo native begin NativeRust {len(payload)} {hashlib.sha256(payload).hexdigest()}",
+                    script,
+                )
+                self.assertIn("ayo native commit", script)
                 self.assertTrue(all(len(line) < 128 for line in script.splitlines()))
                 outputs.append(payload)
             self.assertEqual(*outputs)
@@ -103,9 +107,14 @@ artifact = "build/hello"
                 script = subprocess.check_output([*command, "import-script", "--no-build"], text=True)
                 lines = script.splitlines()
                 self.assertTrue(all(len(line) < 128 for line in lines))
-                chunks = [line.split() for line in lines if line.startswith("writehex ")]
-                self.assertEqual(b"".join(bytes.fromhex(line[3]) for line in chunks), payload)
-                self.assertEqual([int(line[2]) for line in chunks], list(range(0, len(payload), 32)))
+                begin = next(line.split() for line in lines if line.startswith("ayo native begin "))
+                self.assertEqual(begin[3], "NativeHello")
+                self.assertEqual(int(begin[4]), len(payload))
+                self.assertEqual(begin[5], hashlib.sha256(payload).hexdigest())
+                chunks = [line.split() for line in lines if line.startswith("ayo native write ")]
+                self.assertEqual(b"".join(bytes.fromhex(line[4]) for line in chunks), payload)
+                self.assertEqual([int(line[3]) for line in chunks], list(range(0, len(payload), 32)))
+                self.assertIn("ayo native commit", lines)
                 subprocess.run([*command, "package", "--no-build"], check=True, capture_output=True)
                 with tarfile.open(root / "dist/NativeHello-0.1.0.tar") as package:
                     metadata = json.load(package.extractfile("forms/NativeHello/form.json"))
@@ -152,7 +161,11 @@ artifact = "build/hello"
                 script = subprocess.check_output(
                     [*command, "import-script", "--no-build"], text=True
                 )
-                self.assertIn("mkform NativeGo executable", script)
+                self.assertIn(
+                    f"ayo native begin NativeGo {len(payload)} {hashlib.sha256(payload).hexdigest()}",
+                    script,
+                )
+                self.assertIn("ayo native commit", script)
                 images.append(payload)
         self.assertEqual(*images)
 

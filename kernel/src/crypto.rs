@@ -38,7 +38,7 @@ const SHA256_K: [u32; 64] = [
 ];
 
 #[derive(Clone, Copy)]
-struct Sha256 {
+pub(crate) struct Sha256 {
     state: [u32; 8],
     buffer: [u8; 64],
     buffered: usize,
@@ -46,7 +46,7 @@ struct Sha256 {
 }
 
 impl Sha256 {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             state: SHA256_INITIAL,
             buffer: [0; 64],
@@ -55,7 +55,7 @@ impl Sha256 {
         }
     }
 
-    fn update(&mut self, mut input: &[u8]) {
+    pub(crate) fn update(&mut self, mut input: &[u8]) {
         self.total_len = self.total_len.wrapping_add(input.len() as u64);
         if self.buffered != 0 {
             let take = (64 - self.buffered).min(input.len());
@@ -80,7 +80,7 @@ impl Sha256 {
         }
     }
 
-    fn finalize(mut self) -> [u8; 32] {
+    pub(crate) fn finalize(mut self) -> [u8; 32] {
         let bit_len = self.total_len.wrapping_mul(8);
         self.buffer[self.buffered] = 0x80;
         self.buffered += 1;
@@ -206,6 +206,15 @@ fn pbkdf2_hmac_sha256(password: &[u8], salt: &[u8], rounds: u32) -> [u8; 32] {
     }
     wipe(&mut u);
     result
+}
+
+/// Hash a complete bounded artifact. Package installation uses this public
+/// one-shot wrapper so the private incremental state never leaks across the
+/// Ayo/ExpFS trust boundary.
+pub fn sha256(input: &[u8]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(input);
+    digest.finalize()
 }
 
 /// Compare secret-derived values without data-dependent early returns.

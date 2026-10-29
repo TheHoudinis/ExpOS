@@ -54,6 +54,12 @@ impl SerialPort {
         }
     }
 
+    /// Observe queued receive data without consuming it. The compositor uses
+    /// this to collapse a burst of input into the newest bounded frame.
+    pub fn input_ready(&self) -> bool {
+        unsafe { port::inb(self.base + LSR) & LSR_DATA_READY != 0 }
+    }
+
     pub fn write_str(&mut self, s: &str) {
         for &b in s.as_bytes() {
             if b == b'\n' {

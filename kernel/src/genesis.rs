@@ -71,6 +71,72 @@ pub enum EncryptionProfile {
     Paranoid,
 }
 
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GraphicsProfile {
+    #[default]
+    Automatic = 0,
+    VirtioGpu = 1,
+    CompatibleFramebuffer = 2,
+}
+
+impl GraphicsProfile {
+    const fn from_persisted(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Automatic),
+            1 => Some(Self::VirtioGpu),
+            2 => Some(Self::CompatibleFramebuffer),
+            _ => None,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Automatic => "Automatic",
+            Self::VirtioGpu => "VirtIO GPU 2D",
+            Self::CompatibleFramebuffer => "Compatible framebuffer",
+        }
+    }
+
+    pub const fn framebuffer_preference(self) -> crate::framebuffer::GraphicsBackendPreference {
+        match self {
+            Self::Automatic => crate::framebuffer::GraphicsBackendPreference::Automatic,
+            Self::VirtioGpu => crate::framebuffer::GraphicsBackendPreference::VirtioGpu,
+            Self::CompatibleFramebuffer => {
+                crate::framebuffer::GraphicsBackendPreference::CompatibleFramebuffer
+            }
+        }
+    }
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RenderProfile {
+    Efficient = 0,
+    #[default]
+    Balanced = 1,
+    Responsive = 2,
+}
+
+impl RenderProfile {
+    const fn from_persisted(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Efficient),
+            1 => Some(Self::Balanced),
+            2 => Some(Self::Responsive),
+            _ => None,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Efficient => "Efficient",
+            Self::Balanced => "Balanced",
+            Self::Responsive => "Responsive",
+        }
+    }
+}
+
 impl EncryptionProfile {
     pub const fn label(self) -> &'static str {
         match self {
@@ -120,6 +186,9 @@ pub struct GenesisPlan {
     pub sdks: u8,
     pub drivers: u8,
     pub encryption: EncryptionProfile,
+    pub graphics: GraphicsProfile,
+    pub display_mode: u8,
+    pub render_profile: RenderProfile,
 }
 
 impl GenesisPlan {
@@ -132,6 +201,9 @@ impl GenesisPlan {
             sdks: 0,
             drivers: DRIVER_NETWORK,
             encryption,
+            graphics: GraphicsProfile::Automatic,
+            display_mode: crate::framebuffer::DisplayMode::P720.persisted(),
+            render_profile: RenderProfile::Balanced,
         }
     }
 
@@ -145,6 +217,20 @@ impl GenesisPlan {
 
     pub fn browser_allowed(self) -> bool {
         self.components & COMPONENT_BROWSER != 0 && self.encryption != EncryptionProfile::Paranoid
+    }
+
+    pub fn initial_preferences(self) -> crate::state::PersistentPreferences {
+        let mut preferences = crate::state::PersistentPreferences::new();
+        preferences.display_mode = self.display_mode;
+        preferences.animation_level = match self.render_profile {
+            RenderProfile::Efficient => 0,
+            RenderProfile::Balanced | RenderProfile::Responsive => 1,
+        };
+        if self.render_profile == RenderProfile::Responsive {
+            preferences.flags |= crate::state::PREF_RESPONSIVE_PRESENTATION;
+            preferences.vsync = false;
+        }
+        preferences
     }
 }
 
@@ -390,10 +476,11 @@ pub fn run() -> ! {
         }
     };
     crate::locale::set_active(locale);
-    let mut device = match storage::initialize() {
-        Ok(device) => device,
+    let devices = match storage::enumerate() {
+        Ok(devices) => devices,
         Err(error) => fatal(GenesisError::Storage(error)),
     };
+    let mut device = confirm_install_target(&mut input, &devices);
     show_hardware_overview(&input, device);
     if installed_metadata_present(device) {
         println!();
@@ -518,6 +605,14 @@ pub fn run() -> ! {
             "disabled"
         },
         plan.sdks
+    );
+    println!(
+        "  Graphics: {}  Resolution: {}  Rendering: {}",
+        plan.graphics.label(),
+        crate::framebuffer::DisplayMode::from_persisted(plan.display_mode)
+            .unwrap_or_default()
+            .label(),
+        plan.render_profile.label()
     );
     println!("  Target: {} block device (whole disk)", device.backend());
     println!("{}", locale.text(LocalText::DestructiveWarning));
@@ -692,6 +787,34 @@ fn prompt_plan(input: &mut crate::input::Input, encryption: EncryptionProfile) -
     {
         plan.drivers &= !DRIVER_NETWORK;
     }
+    crate::println!();
+    crate::println!("Graphics driver");
+    crate::println!("1. Automatic - prefer VirtIO GPU, then safe framebuffer fallback");
+    crate::println!("2. VirtIO GPU 2D - accelerated QEMU scanout with safe fallback");
+    crate::println!("3. Compatible framebuffer - GOP/Bochs only");
+    plan.graphics = match read_choice(input, "Graphics [1/3]: ", 1, 3) {
+        2 => GraphicsProfile::VirtioGpu,
+        3 => GraphicsProfile::CompatibleFramebuffer,
+        _ => GraphicsProfile::Automatic,
+    };
+
+    crate::println!();
+    crate::println!("Initial display resolution");
+    crate::println!("1. 640x480 - lowest rendering cost");
+    crate::println!("2. 1280x720 - balanced default");
+    crate::println!("3. 1920x1080 - highest workspace and rendering cost");
+    plan.display_mode = read_choice(input, "Resolution [1/3]: ", 1, 3) - 1;
+
+    crate::println!();
+    crate::println!("Rendering policy");
+    crate::println!("1. Efficient - paced damage rendering, animations off");
+    crate::println!("2. Balanced - paced damage rendering, light animations");
+    crate::println!("3. Responsive - unpaced damage commits, VSync off");
+    plan.render_profile = match read_choice(input, "Rendering [1/3]: ", 1, 3) {
+        1 => RenderProfile::Efficient,
+        3 => RenderProfile::Responsive,
+        _ => RenderProfile::Balanced,
+    };
     plan
 }
 
@@ -808,6 +931,70 @@ fn progress(step: usize, total: usize, title: &str, detail: &str) {
 }
 
 #[cfg(feature = "genesis-installer")]
+fn confirm_install_target(
+    input: &mut crate::input::Input,
+    devices: &storage::DeviceSet,
+) -> storage::Device {
+    crate::println!();
+    crate::println!("Genesis storage target picker");
+    crate::println!("Only whole devices are eligible; partitions are never listed.");
+    for index in 0..devices.len() {
+        let device = devices.get(index).expect("bounded storage inventory");
+        let identity = device.identity();
+        crate::println!("{}. {}", index + 1, identity.model());
+        crate::println!("   serial: {}", identity.serial());
+        crate::println!(
+            "   backend: {}  capacity: {} MiB  removable: {}",
+            identity.backend(),
+            identity.sectors() / 2048,
+            yes_no(identity.removable())
+        );
+        if let Some(location) = identity.controller() {
+            crate::println!(
+                "   controller: {:02x}:{:02x}.{}",
+                location.bus,
+                location.slot,
+                location.function
+            );
+        } else {
+            crate::println!("   controller: legacy primary ATA");
+        }
+        crate::println!("   fingerprint: {:016X}", identity.fingerprint());
+    }
+    let selection = read_choice(
+        input,
+        "Select the whole-disk target: ",
+        1,
+        devices.len() as u8,
+    ) as usize
+        - 1;
+    let device = devices.get(selection).expect("validated storage selection");
+    let identity = device.identity();
+    if !identity.trustworthy() {
+        crate::println!("[fatal] target has no trustworthy model/serial identity");
+        fatal(GenesisError::Storage(
+            storage::StorageError::UnsupportedDevice,
+        ));
+    }
+    loop {
+        let confirmation = read_line(input, "Type the target serial exactly: ", false);
+        if line(&confirmation).as_bytes() == identity.serial().as_bytes() {
+            break;
+        }
+        crate::println!("Serial mismatch; no disk changes were made.");
+    }
+    crate::slog!(
+        "EXPOS_GENESIS_TARGET_SELECTED backend={} sectors={} model={} serial={} fingerprint={:016X}\r\n",
+        identity.backend(),
+        identity.sectors(),
+        identity.model(),
+        identity.serial(),
+        identity.fingerprint()
+    );
+    device
+}
+
+#[cfg(feature = "genesis-installer")]
 fn show_hardware_overview(input: &crate::input::Input, device: storage::Device) {
     let maximum_extended = core::arch::x86_64::__cpuid(0x8000_0000).eax;
     let extended = if maximum_extended >= 0x8000_0001 {
@@ -858,6 +1045,12 @@ fn show_hardware_overview(input: &crate::input::Input, device: storage::Device) 
         }
     );
     crate::println!("  Ethernet: RTL8139 only; other adapters remain unsupported");
+    let (operational_drivers, probe_only_drivers) = crate::asl::driver_summary();
+    crate::println!(
+        "  Drivers: {} operational, {} newly recognized/probe-only",
+        operational_drivers,
+        probe_only_drivers
+    );
     crate::println!(
         "  Overall: {}",
         if long_mode && nx && smep && rdrand && input_ready {
@@ -1691,6 +1884,9 @@ fn encode_plan(plan: GenesisPlan) -> [u8; 512] {
     sector[14] = plan.secondary_dimensions.iter().flatten().count() as u8;
     sector[15] = plan.secondary_accounts.iter().flatten().count() as u8;
     put_u32(&mut sector, 16, plan.initial_apps);
+    sector[20] = plan.graphics as u8;
+    sector[21] = plan.display_mode;
+    sector[22] = plan.render_profile as u8;
     for (index, dimension) in plan.secondary_dimensions.into_iter().flatten().enumerate() {
         let offset = PLAN_DIMENSION_OFFSET + index * PLAN_DIMENSION_BYTES;
         sector[offset..offset + 16].copy_from_slice(&dimension.fin.bytes());
@@ -1722,6 +1918,9 @@ fn decode_plan(sector: &[u8; 512]) -> Option<GenesisPlan> {
     let dimension_count = sector[14] as usize;
     let account_count = sector[15] as usize;
     let initial_apps = get_u32(sector, 16);
+    let graphics = GraphicsProfile::from_persisted(sector[20])?;
+    let display_mode = crate::framebuffer::DisplayMode::from_persisted(sector[21])?.persisted();
+    let render_profile = RenderProfile::from_persisted(sector[22])?;
     if dimension_count > MAX_GENESIS_DIMENSIONS
         || account_count > MAX_GENESIS_USERS
         || components & !(COMPONENT_DESKTOP | COMPONENT_BROWSER | COMPONENT_PYTHON) != 0
@@ -1776,6 +1975,9 @@ fn decode_plan(sector: &[u8; 512]) -> Option<GenesisPlan> {
         sdks,
         drivers,
         encryption,
+        graphics,
+        display_mode,
+        render_profile,
     })
 }
 
@@ -1971,6 +2173,9 @@ mod tests {
         plan.initial_apps = (1 << 0) | (1 << 2) | (1 << 3);
         plan.components = COMPONENT_DESKTOP | COMPONENT_BROWSER;
         plan.sdks = SDK_RUST | SDK_C;
+        plan.graphics = GraphicsProfile::CompatibleFramebuffer;
+        plan.display_mode = crate::framebuffer::DisplayMode::P1080.persisted();
+        plan.render_profile = RenderProfile::Responsive;
         let decoded = decode_plan(&encode_plan(plan)).unwrap();
         assert_eq!(decoded, plan);
         assert_eq!(
@@ -1980,6 +2185,13 @@ mod tests {
         assert_eq!(decoded.secondary_accounts[0].unwrap().name(), "analyst");
         assert!(!decoded.python_allowed());
         assert!(decoded.browser_allowed());
+        let preferences = decoded.initial_preferences();
+        assert_eq!(preferences.display_mode, 2);
+        assert!(!preferences.vsync);
+        assert_ne!(
+            preferences.flags & crate::state::PREF_RESPONSIVE_PRESENTATION,
+            0
+        );
     }
 
     #[test]

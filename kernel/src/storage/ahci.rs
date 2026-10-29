@@ -6,7 +6,7 @@
 //! ports.  Interrupt delivery can replace the completion poll through the
 //! shared MSI layer without changing the storage contract.
 
-use super::{StorageError, SECTOR_SIZE};
+use super::{DeviceIdentity, StorageError, SECTOR_SIZE};
 use crate::{pci, sync::SpinMutex};
 use core::sync::atomic::{compiler_fence, Ordering};
 
@@ -67,11 +67,17 @@ pub struct Device {
     abar: usize,
     port: u8,
     sectors: u32,
+    identity: DeviceIdentity,
 }
 
 impl Device {
     pub const fn sectors(self) -> u32 {
         self.sectors
+    }
+
+    #[cfg_attr(not(feature = "genesis-installer"), allow(dead_code))]
+    pub const fn identity(self) -> DeviceIdentity {
+        self.identity
     }
 
     pub fn read_sector(self, lba: u32, output: &mut [u8; SECTOR_SIZE]) -> Result<(), StorageError> {
@@ -176,12 +182,25 @@ fn initialize_controller() -> Result<Device, StorageError> {
                 abar,
                 port,
                 sectors: u32::MAX,
+                identity: DeviceIdentity::new(
+                    "ahci",
+                    Some(function.location),
+                    0,
+                    ([0; 40], 0),
+                    ([0; 20], 0),
+                    false,
+                ),
             };
             issue_identify(provisional)?;
             let sectors = identify_sector_count();
             if sectors == 0 {
                 return Err(StorageError::UnsupportedDevice);
             }
+            let serial_words: [u16; 10] = core::array::from_fn(|index| identify_word(10 + index));
+            let model_words: [u16; 20] = core::array::from_fn(|index| identify_word(27 + index));
+            let (serial, serial_len) = super::ata_identity_text(&serial_words);
+            let (model, model_len) = super::ata_identity_text(&model_words);
+            let sectors = sectors.min(u32::MAX as u64) as u32;
             let _ = crate::asl::claim(function, crate::asl::Owner::ExpStorage);
             if let Some(binding) = crate::interrupts::prepare(function) {
                 crate::slog!(
@@ -191,7 +210,15 @@ fn initialize_controller() -> Result<Device, StorageError> {
                 );
             }
             return Ok(Device {
-                sectors: sectors.min(u32::MAX as u64) as u32,
+                sectors,
+                identity: DeviceIdentity::new(
+                    "ahci",
+                    Some(function.location),
+                    sectors,
+                    (model, model_len),
+                    (serial, serial_len),
+                    identify_word(0) & (1 << 7) != 0,
+                ),
                 ..provisional
             });
         }
@@ -351,20 +378,23 @@ unsafe fn execute(device: Device) -> Result<(), StorageError> {
 }
 
 fn identify_sector_count() -> u64 {
-    let word = |index: usize| unsafe {
+    if identify_word(83) & (1 << 10) != 0 {
+        identify_word(100) as u64
+            | ((identify_word(101) as u64) << 16)
+            | ((identify_word(102) as u64) << 32)
+            | ((identify_word(103) as u64) << 48)
+    } else {
+        identify_word(60) as u64 | ((identify_word(61) as u64) << 16)
+    }
+}
+
+fn identify_word(index: usize) -> u16 {
+    unsafe {
         let bytes = core::ptr::addr_of!(DATA_BUFFER.0).cast::<u8>();
         u16::from_le_bytes([
             core::ptr::read(bytes.add(index * 2)),
             core::ptr::read(bytes.add(index * 2 + 1)),
         ])
-    };
-    if word(83) & (1 << 10) != 0 {
-        word(100) as u64
-            | ((word(101) as u64) << 16)
-            | ((word(102) as u64) << 32)
-            | ((word(103) as u64) << 48)
-    } else {
-        word(60) as u64 | ((word(61) as u64) << 16)
     }
 }
 

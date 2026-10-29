@@ -67,5 +67,18 @@ The compiled seed catalog is useful offline and release-trusted, but its small
 `.form` activation artifacts are not a substitute for a public repository full
 of third-party native implementations. Desktop Ayo transactions now pass the
 native frozen Form ABI v1 gate with a requester-owned Package Handle and store
-durable app state in ExpFS. Deploying the signed public registry and an isolated
-third-party implementation loader remain platform work.
+durable app state in ExpFS. SDK-generated EXF1 imports use `ayo native` private
+staging: exact length, SHA-256 and EXF1 validation precede one atomic ExpFS
+publication, while Execute authority remains a separate grant. The kernel
+`ayo registry install` path now downloads a pinned-Ed25519, same-origin HTTPS
+manifest and EXF1 artifact into this transaction. Deploying a production public
+registry, release key and transparency service remains platform work.
+
+Music packages use a separate VM-only transaction because multi-megabyte MP3s
+do not fit the ExpFS Form quota. `ayo music install <imtq|dash> <web-url>` knows
+the exact length and SHA-256 of each accepted identity, fetches retryable 52 KiB
+HTTP/HTTPS ranges, writes an inactive 8 MiB raw slot, verifies the complete
+transfer and a disk read-back, then publishes one redundant catalog header.
+The supplied MP3 binaries are not repository or ISO assets. Interrupted,
+wrong-sized or digest-mismatched downloads remain invisible, and the store
+refuses GPT/Genesis disks rather than risk an EFI partition.

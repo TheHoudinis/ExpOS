@@ -38,24 +38,36 @@ make native-image-check
 ```
 
 Run the emitted import commands in the ExpOS console as an authorized operator.
-They create `NativeHello`, transfer the binary in bounded hex chunks, grant
-Execute, and execute it. The sample logs `Hello from compiled C in Ring 3` and
-exits with result 42 after checking initialized data, zeroed BSS and writable
-storage. Use a new Form name for new projects. `expos run` deliberately rejects
-native targets because it is the host development launcher.
+They open a private Ayo native transaction with the exact byte length and
+SHA-256, transfer bounded chunks, validate the complete EXF1 image, atomically
+publish `NativeHello`, grant Execute, and execute it. The sample logs `Hello
+from compiled C in Ring 3` and exits with result 42 after checking initialized
+data, zeroed BSS and writable storage. `expos run` deliberately rejects native
+targets because it is the host development launcher.
+
+`ayo native begin <Form> <bytes> <sha256>` never changes the installed Form.
+`ayo native write <offset> <hex>` accepts only contiguous bounded chunks into
+private staging memory. `ayo native commit` publishes only when the declared
+length, digest and full EXF1 validation all pass. An incomplete, malformed or
+digest-mismatched replacement is discarded, leaving the preceding executable
+and its revision intact. `ayo native abort` explicitly drops a stage. Execute
+authority is still granted separately so package bytes cannot grant themselves
+capabilities.
 
 `writehex <Form> <offset> <hex>` shares the existing mutation policy, lifecycle,
 resource accounting and persistence path. Offset zero replaces content;
 nonzero offsets must equal its current length. Invalid hex, offsets or capacity
-leave content unchanged. Each accepted chunk commits independently. This is a
-development import interface, **not a transactional package installation**:
-interrupted imports may leave a partial image, which cannot pass image length
-validation. An interrupted replacement does not preserve the old executable.
+leave content unchanged. Each accepted chunk commits independently. This
+remains a low-level development mutation interface, **not a package
+installation path**. SDK-generated native imports now use the Ayo transaction
+above; interrupted Ayo staging never replaces the old executable.
 
 `package` marks native metadata `implementation_format: "exf1"`, architecture
 `x86_64`, and hashes the actual executable. Host builds are marked `host`.
-The host Ayo archive and the kernel's installed-app catalog are still separate;
-automatic native download/install and a published signed registry remain open.
+The host Ayo archive and the kernel's installed-app catalog are still separate.
+The kernel can automatically download a same-origin HTTPS manifest/artifact,
+verify a caller-pinned Ed25519 key and SHA-256, then use the same transactional
+EXF1 installer. A published production registry and release key remain open.
 Deterministic tar metadata and two-directory native build equality are tested
 with the installed toolchain; cross-toolchain reproducibility is not claimed.
 

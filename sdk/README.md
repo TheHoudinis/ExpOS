@@ -46,9 +46,11 @@ artifacts remain accepted unchanged; bounded native Go currently emits v1.
 ./sdk/bin/expos --manifest sdk/examples/native-hello/expos.toml import-script --no-build
 ```
 
-Run the emitted commands in the ExpOS console. The sample logs from Ring 3 and
-exits with result 42. `package` preserves the executable bytes and declares
-`implementation_format: "exf1"`; automatic native Ayo installation is still
+Run the emitted commands in the ExpOS console. They use Ayo's private staged
+EXF1 transaction, complete-length and SHA-256 verification, and one atomic
+ExpFS publication before the separate Execute grant. The sample logs from Ring
+3 and exits with result 42. `package` preserves the executable bytes and
+declares `implementation_format: "exf1"`; automatic registry download remains
 pending. See [native image format, bootstrap and limitations](../docs/NATIVE_IMAGES.md).
 
 

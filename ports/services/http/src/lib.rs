@@ -26,11 +26,11 @@ pub unsafe extern "C" fn _start(
 ) -> ! {
     let input = core::slice::from_raw_parts(input, length);
     let mut result = 1;
-    if input.len() >= 5 && input.len() <= 16389 && input[4] <= 1 {
+    if input.len() >= 5 && input.len() <= 60 * 1024 + 5 && input[4] <= 1 {
         if let Ok(parsed) =
             parse_http_response(input[..4].try_into().unwrap(), &input[5..], input[4] != 0)
         {
-            let mut encoded = [0_u8; 16384];
+            let mut encoded = [0_u8; 60 * 1024];
             if let Ok(length) = parsed.encode(&mut encoded) {
                 result = 0;
                 for bytes in encoded[..length].chunks(512) {

@@ -49,9 +49,10 @@ device it offers:
    baseline regions.
 
 Recovery intentionally does not guess about unknown non-ExpOS disks. The
-current installer still selects storage by driver probe order and therefore is
-not approved for physical-disk installation until a model/serial/stable-device
-selector and physical test matrix land.
+current installer still selects storage by driver probe order. Populis shows
+the chosen whole-device model, serial, capacity, controller and fingerprint and
+requires exact serial re-entry before `ERASE`, but physical installation remains
+unapproved until multi-target enumeration and a physical test matrix land.
 
 ## UI and verification
 
@@ -60,6 +61,8 @@ final summary, eight visible progress bars and stage-specific errors. Install
 verification reads back GPT, FAT32, the complete UEFI application, redundant
 manifest v4 copies and redundant plan copies before reporting completion.
 
-The current UI remains a keyboard-driven framebuffer console. A mouse-first
-widget wizard, stable physical disk picker, Secure Boot and additional hardware
-drivers are later Genesis v2 work.
+The current UI remains a keyboard-driven framebuffer console. It now presents
+a bounded multi-disk identity picker; the QEMU safety gate selects an ATA slave
+beside an unchanged decoy master. Multi-port AHCI/multi-namespace NVMe expansion,
+a mouse-first widget wizard, Secure Boot and physical-device validation remain
+later Genesis v2 work.

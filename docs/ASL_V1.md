@@ -57,9 +57,19 @@ The interrupt foundation has three separate phases:
 - `arm`: program MSI or MSI-X only after a device-specific IDT handler exists.
 
 Current NVMe and xHCI drivers stop after `prepare` and continue bounded polling.
-The `arm` implementation exists for the next delivery phase, but no driver
-claims interrupt-driven completion yet. PIC/PIT continues to provide the live
-preemptive Form scheduler tick.
+The `arm` implementation exists for their next delivery phase. AC'97, Intel HDA
+and e1000/e1000e use firmware-routed PCI INTx through the I/O APIC when present,
+with the remapped PIC retained as fallback. Lock-free handlers acknowledge
+device status and publish bounded atomic events before normal kernel code
+advances queues. The PIT remains periodic for live Ring 3 preemption but switches
+to bounded one-shot mode during shell/desktop idle.
+
+ASL classifies Intel HDA, Intel e1000/e1000e, transitional virtio-net/block,
+modern VirtIO GPU and modern VirtIO Sound as operational after their reset,
+queue, DMA and QEMU data paths initialize. The modern capability transport
+serves GPU 2D control and sound control/event/TX/RX queues; modern-only VirtIO
+net/block IDs remain `probe-only` until their device drivers move to that
+transport.
 
 ## Portability boundary
 

@@ -34,6 +34,7 @@ mod interrupts;
 mod isolation_self_test;
 mod kernel_controls;
 mod locale;
+mod media_store;
 mod memory;
 mod network;
 mod paging;
@@ -55,6 +56,8 @@ mod sync;
 mod tls;
 mod usb;
 mod vga;
+mod virtio;
+mod virtio_gpu;
 mod volatile;
 
 use core::fmt;
@@ -225,6 +228,7 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
         let runtime_plan = genesis_config
             .map(|config| config.plan)
             .unwrap_or_else(|| genesis::GenesisPlan::standard(genesis::EncryptionProfile::Easy));
+        framebuffer::set_backend_preference(runtime_plan.graphics.framebuffer_preference());
         security::configure(
             runtime_plan.network_allowed(),
             runtime_plan.python_allowed(),
@@ -284,6 +288,25 @@ pub extern "C" fn kernel_main(magic: u32, mbi_phys: u64) -> ! {
             }
         }
         state::initialize();
+        if state::loaded_generation().is_none() && genesis_config.is_some() {
+            let initial_preferences = runtime_plan.initial_preferences();
+            state::apply_runtime_preferences(initial_preferences);
+            match state::save_preferences(initial_preferences) {
+                Ok(()) => slog!(
+                    "EXPOS_GENESIS_DISPLAY_POLICY graphics={} mode={} render={} persisted=true\r\n",
+                    runtime_plan.graphics.label(),
+                    initial_preferences.display_mode,
+                    runtime_plan.render_profile.label()
+                ),
+                Err(error) => slog!(
+                    "EXPOS_GENESIS_DISPLAY_POLICY graphics={} mode={} render={} persisted=false error={:?}\r\n",
+                    runtime_plan.graphics.label(),
+                    initial_preferences.display_mode,
+                    runtime_plan.render_profile.label(),
+                    error
+                ),
+            }
+        }
         let preferences = state::preferences();
         if let Some(mode) = framebuffer::DisplayMode::from_persisted(preferences.display_mode) {
             let _ = framebuffer::request_mode(mode);

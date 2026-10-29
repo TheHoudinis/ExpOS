@@ -410,13 +410,11 @@ def main(arguments: list[str] | None = None) -> int:
                 build(project)
             payload = project.artifact.read_bytes()
             validate_native(payload)
-            chunks = (len(payload) + 31) // 32
-            if chunks + 2 > 64:
-                soft = chunks + 2
-                print(f"expbudget set form-operations {soft} {min(4096, soft + 32)}")
-            print(f"mkform {project.name} executable")
+            digest = hashlib.sha256(payload).hexdigest()
+            print(f"ayo native begin {project.name} {len(payload)} {digest}")
             for offset in range(0, len(payload), 32):
-                print(f"writehex {project.name} {offset} {payload[offset:offset + 32].hex()}")
+                print(f"ayo native write {offset} {payload[offset:offset + 32].hex()}")
+            print("ayo native commit")
             print(f"grant {project.name} execute")
             print(f"execute {project.name}")
         elif options.command == "package":

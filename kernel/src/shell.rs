@@ -15,7 +15,7 @@ use expos_core::{
     RelationshipGraph, RelationshipKind, ResourceKind, Scheduler, SpecKey, Text, FORM_ABI_VERSION,
 };
 
-const MAX_LINE: usize = 128;
+const MAX_LINE: usize = 256;
 const MAX_FORMS: usize = 12;
 const MAX_HANDLES: usize = 16;
 const MAX_CONTENT: usize = crate::expfs_store::FORM_CONTENT_CAPACITY;
@@ -38,7 +38,14 @@ pub fn run(report: BootReport, mut input: Input, session: Session) -> ! {
     loop {
         let Some(byte) = input.poll() else {
             shell.poll_background();
-            core::hint::spin_loop();
+            // The shell is an idle surface too. Arm a bounded one-shot PIT so
+            // device completions can run without keeping the CPU in a 1 kHz
+            // spin/poll loop; active background Forms retain a short quantum.
+            crate::form_runtime::wait_tickless(if shell.background.is_empty() {
+                50_000
+            } else {
+                1_000
+            });
             continue;
         };
         match byte {
@@ -113,6 +120,14 @@ struct Shell {
     scheduler: Scheduler,
     background: alloc::vec::Vec<ParallelLaunch>,
     background_cursor: usize,
+    native_package: Option<NativePackageTransaction>,
+}
+
+struct NativePackageTransaction {
+    name: Text,
+    expected_length: usize,
+    expected_sha256: [u8; 32],
+    bytes: alloc::vec::Vec<u8>,
 }
 
 struct ParallelLaunch {
@@ -388,6 +403,7 @@ impl Shell {
             scheduler,
             background: alloc::vec::Vec::new(),
             background_cursor: 0,
+            native_package: None,
         }
     }
 
@@ -1136,9 +1152,27 @@ impl Shell {
     fn ayo(&mut self, arguments: &str) {
         let mut words = arguments.split_ascii_whitespace();
         let operation = words.next().unwrap_or("help");
+        if operation == "native" {
+            let native_arguments = arguments.strip_prefix(operation).unwrap_or("").trim_start();
+            self.ayo_native(native_arguments);
+            return;
+        }
+        if operation == "registry" {
+            let registry_arguments = arguments.strip_prefix(operation).unwrap_or("").trim_start();
+            self.ayo_registry(registry_arguments);
+            return;
+        }
+        if operation == "music" {
+            let music_arguments = arguments.strip_prefix(operation).unwrap_or("").trim_start();
+            self.ayo_music(music_arguments);
+            return;
+        }
         if matches!(operation, "help" | "glance") {
             println!("ayo v3 Package Form {}", AYO_FIN);
             println!("ayo list | ayo install/slap <app> | ayo remove/yeet <app>");
+            println!("ayo native begin|write|commit|abort|status (transactional EXF1)");
+            println!("ayo registry install <https-manifest> <ed25519-public-key-hex>");
+            println!("ayo music list | install <imtq|dash> <web-url> | remove <track>");
             println!("Thirty desktop apps are available and remain uninstalled until selected.");
             return;
         }
@@ -1225,6 +1259,489 @@ impl Shell {
             }
             Err(error) => println!("ayo: {}", error.message()),
         }
+    }
+
+    fn ayo_music(&mut self, arguments: &str) {
+        let mut words = arguments.split_ascii_whitespace();
+        let operation = words.next().unwrap_or("list");
+        if matches!(operation, "list" | "status") {
+            println!("TRACK          STATE          BYTES");
+            for track in crate::audio::Track::ALL {
+                let info = track.info();
+                println!(
+                    "{:<14} {:<14} {}",
+                    info.command_name,
+                    if crate::media_store::installed(track) {
+                        "installed"
+                    } else {
+                        "download needed"
+                    },
+                    info.compressed_bytes
+                );
+            }
+            return;
+        }
+        if self.session.authority() == Authority::Guest {
+            println!("DIESE denied music package changes for Guest authority.");
+            return;
+        }
+        let Some(track) = words.next().and_then(parse_music_track) else {
+            println!("usage: ayo music install <imtq|dash> <web-url>");
+            println!("       ayo music remove <imtq|dash>");
+            return;
+        };
+        if operation == "remove" {
+            match crate::media_store::remove(track) {
+                Ok(true) => println!("Removed downloaded track '{}'.", track.info().display_name),
+                Ok(false) => println!("Track '{}' is not installed.", track.info().display_name),
+                Err(error) => println!("Ayo music remove failed: {}.", error.message()),
+            }
+            return;
+        }
+        if operation != "install" {
+            println!("usage: ayo music <list|install|remove> ...");
+            return;
+        }
+        let (Some(url), None) = (words.next(), words.next()) else {
+            println!("usage: ayo music install <imtq|dash> <web-url>");
+            return;
+        };
+        let Some(handle_id) = self.network_handle("ayo music") else {
+            return;
+        };
+        let mut install = match crate::media_store::begin_install(track) {
+            Ok(install) => install,
+            Err(error) => {
+                println!("Ayo music install failed: {}.", error.message());
+                return;
+            }
+        };
+        println!(
+            "Downloading {} ({} bytes) in verified ranges...",
+            track.info().display_name,
+            install.expected_length()
+        );
+        const CHUNK: usize = 52 * 1024;
+        let mut next_progress = 512 * 1024;
+        while install.written() < install.expected_length() {
+            let start = install.written();
+            let end = (start + CHUNK).min(install.expected_length());
+            let mut attempts = 0_u8;
+            let response = loop {
+                attempts += 1;
+                match crate::network::web_get_range(
+                    &self.broker,
+                    handle_id,
+                    self.report.root_fin,
+                    self.report.stable_fin,
+                    url,
+                    start,
+                    end,
+                ) {
+                    Ok(response) => break response,
+                    Err(error) if attempts < 3 => {
+                        println!("  retrying byte {} (attempt {})", start, attempts + 1);
+                        slog!(
+                            "EXPOS_AYO_MUSIC_RETRY track={} offset={} attempt={} error={:?}\r\n",
+                            track.info().command_name,
+                            start,
+                            attempts + 1,
+                            error
+                        );
+                    }
+                    Err(error) => {
+                        println!(
+                            "Ayo music download failed at byte {} after {} attempts: {}.",
+                            start,
+                            attempts,
+                            error.message()
+                        );
+                        slog!(
+                            "EXPOS_AYO_MUSIC_DOWNLOAD_ERROR track={} offset={} attempts={} error={:?}\r\n",
+                            track.info().command_name,
+                            start,
+                            attempts,
+                            error
+                        );
+                        return;
+                    }
+                }
+            };
+            if response.status != 206 || response.truncated || response.body_len != end - start {
+                println!(
+                    "Ayo rejected range {}-{}: HTTP {}, bytes {}, truncated {}.",
+                    start,
+                    end - 1,
+                    response.status,
+                    response.body_len,
+                    response.truncated
+                );
+                return;
+            }
+            if let Err(error) = install.write(start, response.body()) {
+                println!("Ayo music store failed: {}.", error.message());
+                return;
+            }
+            if install.written() >= next_progress || install.written() == install.expected_length()
+            {
+                println!(
+                    "  {} / {} bytes",
+                    install.written(),
+                    install.expected_length()
+                );
+                next_progress = next_progress.saturating_add(512 * 1024);
+            }
+        }
+        match install.commit() {
+            Ok(()) => println!(
+                "Installed '{}'. Play it with: play {}",
+                track.info().display_name,
+                track.info().command_name
+            ),
+            Err(error) => println!("Ayo rejected the music package: {}.", error.message()),
+        }
+    }
+
+    fn ayo_registry(&mut self, arguments: &str) {
+        let mut words = arguments.split_ascii_whitespace();
+        let (Some("install"), Some(manifest_url), Some(public_key), None) =
+            (words.next(), words.next(), words.next(), words.next())
+        else {
+            println!("usage: ayo registry install <https-manifest> <ed25519-public-key-hex>");
+            return;
+        };
+        if self.session.authority() == Authority::Guest {
+            println!("DIESE denied registry package changes for Guest authority.");
+            return;
+        }
+        if self.native_package.is_some() {
+            println!("Ayo already has a staged native transaction; abort it first.");
+            return;
+        }
+        let Some(handle_id) = self.network_handle("ayo registry") else {
+            return;
+        };
+        let key = match parse_fixed_hex::<32>(public_key) {
+            Some(key) => key,
+            None => {
+                println!("Ayo rejected the Ed25519 public key; expected 64 hex digits.");
+                return;
+            }
+        };
+        let manifest = match crate::network::https_get_same_origin(
+            &self.broker,
+            handle_id,
+            self.report.root_fin,
+            self.report.stable_fin,
+            manifest_url,
+            manifest_url,
+        ) {
+            Ok(response)
+                if response.status == 200 && !response.truncated && response.body_len != 0 =>
+            {
+                response
+            }
+            Ok(response) => {
+                println!(
+                    "Ayo registry rejected HTTP {} (truncated={}).",
+                    response.status, response.truncated
+                );
+                return;
+            }
+            Err(error) => {
+                println!("Ayo registry download failed: {}.", error.message());
+                return;
+            }
+        };
+        let parsed = match parse_signed_registry_manifest(manifest.body(), &key) {
+            Ok(parsed) => parsed,
+            Err(reason) => {
+                println!("Ayo rejected the signed registry manifest: {}.", reason);
+                slog!(
+                    "EXPOS_AYO_REGISTRY_REJECT stage=manifest reason={}\r\n",
+                    reason
+                );
+                return;
+            }
+        };
+        let artifact = match crate::network::https_get_same_origin(
+            &self.broker,
+            handle_id,
+            self.report.root_fin,
+            self.report.stable_fin,
+            manifest_url,
+            parsed.url,
+        ) {
+            Ok(response)
+                if response.status == 200
+                    && !response.truncated
+                    && response.body_len == parsed.length =>
+            {
+                response
+            }
+            Ok(response) => {
+                println!(
+                    "Ayo rejected artifact response: HTTP {}, bytes {}, truncated {}.",
+                    response.status, response.body_len, response.truncated
+                );
+                return;
+            }
+            Err(error) => {
+                println!("Ayo artifact download failed: {}.", error.message());
+                return;
+            }
+        };
+        if !crate::crypto::constant_time_eq(&crate::crypto::sha256(artifact.body()), &parsed.sha256)
+        {
+            println!("Ayo rejected the downloaded artifact: SHA-256 mismatch.");
+            return;
+        }
+        self.native_package = Some(NativePackageTransaction {
+            name: parsed.name,
+            expected_length: parsed.length,
+            expected_sha256: parsed.sha256,
+            bytes: artifact.body().to_vec(),
+        });
+        slog!(
+            "EXPOS_AYO_REGISTRY_VERIFIED name={} bytes={} signature=ed25519 origin=same-host\r\n",
+            parsed.name,
+            parsed.length
+        );
+        self.commit_native_package();
+    }
+
+    fn ayo_native(&mut self, arguments: &str) {
+        let mut words = arguments.split_ascii_whitespace();
+        let operation = words.next().unwrap_or("help");
+        if operation == "status" {
+            if let Some(transaction) = self.native_package.as_ref() {
+                println!(
+                    "Ayo native stage: {} {}/{} bytes.",
+                    transaction.name,
+                    transaction.bytes.len(),
+                    transaction.expected_length
+                );
+            } else {
+                println!("Ayo native stage: idle.");
+            }
+            return;
+        }
+        if operation == "help" {
+            println!("ayo native begin <Form> <bytes> <sha256>");
+            println!("ayo native write <offset> <hex> | commit | abort | status");
+            return;
+        }
+        if self.session.authority() == Authority::Guest {
+            println!("DIESE denied native package changes for Guest authority.");
+            slog!(
+                "EXPOS_PACKAGE_AUDIT result=denied authority=Guest operation=native-{}\r\n",
+                operation
+            );
+            return;
+        }
+        match operation {
+            "begin" => {
+                let (Some(name), Some(length), Some(digest), None) =
+                    (words.next(), words.next(), words.next(), words.next())
+                else {
+                    println!("usage: ayo native begin <Form> <bytes> <sha256>");
+                    return;
+                };
+                if self.native_package.is_some() {
+                    println!("Ayo already has a staged native transaction; abort it first.");
+                    return;
+                }
+                let (Ok(name), Ok(expected_length), Some(expected_sha256)) = (
+                    Text::new(name),
+                    length.parse::<usize>(),
+                    parse_sha256(digest),
+                ) else {
+                    println!("Ayo rejected invalid native package metadata.");
+                    return;
+                };
+                if !(expos_core::NATIVE_IMAGE_HEADER..=MAX_CONTENT).contains(&expected_length) {
+                    println!("Ayo rejected the native package length.");
+                    return;
+                }
+                if self.find_form(name.as_str()).is_some_and(|form| {
+                    form.kind != FormKind::Executable || form.lifecycle != Lifecycle::Active
+                }) {
+                    println!("Ayo cannot replace a non-active executable Form.");
+                    return;
+                }
+                if self.find_form(name.as_str()).is_none() && self.forms.iter().all(Option::is_some)
+                {
+                    println!("Ayo cannot install the package: the Form registry is full.");
+                    return;
+                }
+                self.native_package = Some(NativePackageTransaction {
+                    name,
+                    expected_length,
+                    expected_sha256,
+                    bytes: alloc::vec::Vec::with_capacity(expected_length),
+                });
+                println!(
+                    "Ayo staged '{}' privately; the installed Form is unchanged.",
+                    name
+                );
+                slog!(
+                    "EXPOS_AYO_NATIVE_STAGE name={} bytes={}\r\n",
+                    name,
+                    expected_length
+                );
+            }
+            "write" => {
+                let (Some(offset), Some(hex), None) = (words.next(), words.next(), words.next())
+                else {
+                    println!("usage: ayo native write <offset> <hex>");
+                    return;
+                };
+                let Some(transaction) = self.native_package.as_mut() else {
+                    println!("Ayo has no staged native transaction.");
+                    return;
+                };
+                let Ok(offset) = offset.parse::<usize>() else {
+                    println!("Ayo rejected the native chunk offset.");
+                    return;
+                };
+                if offset != transaction.bytes.len()
+                    || hex.is_empty()
+                    || hex.len() % 2 != 0
+                    || hex.len() / 2 > transaction.expected_length.saturating_sub(offset)
+                {
+                    println!("Ayo rejected the native chunk range; the stage is unchanged.");
+                    return;
+                }
+                let mut decoded = alloc::vec::Vec::with_capacity(hex.len() / 2);
+                for pair in hex.as_bytes().as_chunks::<2>().0 {
+                    let (Some(high), Some(low)) = (hex_digit(pair[0]), hex_digit(pair[1])) else {
+                        println!("Ayo rejected invalid native hex; the stage is unchanged.");
+                        return;
+                    };
+                    decoded.push((high << 4) | low);
+                }
+                transaction.bytes.extend_from_slice(&decoded);
+                println!(
+                    "Ayo staged {}/{} bytes for '{}'.",
+                    transaction.bytes.len(),
+                    transaction.expected_length,
+                    transaction.name
+                );
+            }
+            "abort" => {
+                if let Some(mut transaction) = self.native_package.take() {
+                    crate::crypto::wipe(&mut transaction.bytes);
+                    println!("Ayo discarded the private native stage; no Form changed.");
+                    slog!("EXPOS_AYO_NATIVE_ABORT\r\n");
+                } else {
+                    println!("Ayo has no staged native transaction.");
+                }
+            }
+            "commit" => self.commit_native_package(),
+            _ => println!("usage: ayo native begin|write|commit|abort|status"),
+        }
+    }
+
+    fn commit_native_package(&mut self) {
+        let Some(mut transaction) = self.native_package.take() else {
+            println!("Ayo has no staged native transaction.");
+            return;
+        };
+        let reject = |transaction: &mut NativePackageTransaction, reason: &str| {
+            crate::crypto::wipe(&mut transaction.bytes);
+            println!("Ayo rejected the staged native package: {}.", reason);
+            slog!("EXPOS_AYO_NATIVE_REJECT reason={}\r\n", reason);
+        };
+        if transaction.bytes.len() != transaction.expected_length {
+            reject(&mut transaction, "incomplete artifact");
+            return;
+        }
+        let actual_sha256 = crate::crypto::sha256(&transaction.bytes);
+        if !crate::crypto::constant_time_eq(&actual_sha256, &transaction.expected_sha256) {
+            reject(&mut transaction, "SHA-256 mismatch");
+            return;
+        }
+        if expos_core::NativeImage::parse(&transaction.bytes).is_err() {
+            reject(&mut transaction, "invalid EXF1 image");
+            return;
+        }
+        if !self.kernel_control_allowed(false, "install a native Ayo package") {
+            reject(&mut transaction, "missing Execute authority");
+            return;
+        }
+        if let Err(error) = self.kernel_controls.charge_form_operation() {
+            reject(&mut transaction, error.message());
+            return;
+        }
+        let existing = self.find_form_index(transaction.name.as_str());
+        let index = existing.unwrap_or_else(|| {
+            self.forms
+                .iter()
+                .position(Option::is_none)
+                .expect("native stage reserved a Form slot")
+        });
+        let old_length = existing
+            .map(|index| self.content[index].length as usize)
+            .unwrap_or(0);
+        if let Err(error) = self
+            .kernel_controls
+            .resize_form_content(old_length, transaction.expected_length)
+        {
+            reject(&mut transaction, error.message());
+            return;
+        }
+        let result = crate::expfs_store::save_executable_form(
+            self.report.cfc_fin,
+            transaction.name.as_str(),
+            &transaction.bytes,
+        );
+        let (fin, revision) = match result {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = self
+                    .kernel_controls
+                    .resize_form_content(transaction.expected_length, old_length);
+                reject(&mut transaction, error.message());
+                return;
+            }
+        };
+
+        let mut form = Form::new(fin, transaction.name.as_str(), FormKind::Executable);
+        form.revision = revision;
+        self.forms[index] = Some(form);
+        self.content[index].bytes[..transaction.expected_length]
+            .copy_from_slice(&transaction.bytes);
+        self.content[index].bytes[transaction.expected_length..].fill(0);
+        self.content[index].length = transaction.expected_length as u16;
+        if let Some(snapshot) = crate::expfs_store::current_snapshot(self.report.cfc_fin) {
+            self.next_fin = snapshot.next_fin;
+            self.journal_sequence = snapshot.journal_sequence;
+            let mut relationships = RelationshipGraph::new();
+            for relationship in snapshot.relationships.into_iter().flatten() {
+                let _ = relationships.relate(relationship);
+            }
+            self.relationships = relationships;
+        }
+        crate::crypto::wipe(&mut transaction.bytes);
+        println!(
+            "[ok] Ayo atomically installed '{}' as EXF1 revision {}.",
+            transaction.name, revision
+        );
+        println!(
+            "Grant Execute separately with: grant {} execute",
+            transaction.name
+        );
+        slog!(
+            "EXPOS_AYO_NATIVE_COMMIT name={} fin={} revision={} bytes={} sha256={:02x}{:02x}{:02x}{:02x}\r\n",
+            transaction.name,
+            fin,
+            revision,
+            transaction.expected_length,
+            actual_sha256[0],
+            actual_sha256[1],
+            actual_sha256[2],
+            actual_sha256[3]
+        );
     }
 
     fn help(&self) {
@@ -3636,6 +4153,119 @@ fn split_first(args: &str) -> Option<(&str, &str)> {
     Some((&args[..split], args[split..].trim_start()))
 }
 
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn parse_sha256(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 {
+        return None;
+    }
+    let mut digest = [0_u8; 32];
+    for (output, pair) in digest.iter_mut().zip(value.as_bytes().as_chunks::<2>().0) {
+        *output = (hex_digit(pair[0])? << 4) | hex_digit(pair[1])?;
+    }
+    Some(digest)
+}
+
+fn parse_music_track(value: &str) -> Option<crate::audio::Track> {
+    if value.eq_ignore_ascii_case("imtq") || value == "1" {
+        Some(crate::audio::Track::Imtq)
+    } else if value.eq_ignore_ascii_case("dash")
+        || value.eq_ignore_ascii_case("-_-.mp3")
+        || value == "2"
+    {
+        Some(crate::audio::Track::Dash)
+    } else {
+        None
+    }
+}
+
+fn parse_fixed_hex<const N: usize>(value: &str) -> Option<[u8; N]> {
+    if value.len() != N * 2 {
+        return None;
+    }
+    let mut output = [0_u8; N];
+    for (byte, pair) in output.iter_mut().zip(value.as_bytes().as_chunks::<2>().0) {
+        *byte = (hex_digit(pair[0])? << 4) | hex_digit(pair[1])?;
+    }
+    Some(output)
+}
+
+struct RegistryManifest<'a> {
+    name: Text,
+    url: &'a str,
+    length: usize,
+    sha256: [u8; 32],
+}
+
+/// Parse the deliberately small on-device registry envelope. Signature bytes
+/// cover every byte before the newline that introduces `signature=`. Keeping
+/// the envelope line-oriented avoids admitting a second general JSON parser to
+/// the privileged package path.
+fn parse_signed_registry_manifest<'a>(
+    bytes: &'a [u8],
+    public_key: &[u8; 32],
+) -> Result<RegistryManifest<'a>, &'static str> {
+    const HEADER: &str = "EXPOS-AYO-REGISTRY-V1";
+    let text = core::str::from_utf8(bytes).map_err(|_| "manifest is not UTF-8")?;
+    if !text.starts_with(&alloc::format!("{}\n", HEADER)) {
+        return Err("unsupported registry schema");
+    }
+    let signature_marker = text.find("\nsignature=").ok_or("missing signature")?;
+    let signed = &bytes[..signature_marker];
+    let signature_text = text[signature_marker + "\nsignature=".len()..].trim_end();
+    if signature_text.contains('\n') {
+        return Err("signature must be the final field");
+    }
+    let signature_bytes = parse_fixed_hex::<64>(signature_text).ok_or("invalid signature hex")?;
+    let key = ed25519_dalek::VerifyingKey::from_bytes(public_key)
+        .map_err(|_| "invalid Ed25519 public key")?;
+    let signature = ed25519_dalek::Signature::from_bytes(&signature_bytes);
+    key.verify_strict(signed, &signature)
+        .map_err(|_| "Ed25519 verification failed")?;
+
+    let fields = &text[HEADER.len()..signature_marker];
+    let field = |name: &str| -> Result<&str, &'static str> {
+        let prefix = alloc::format!("{}=", name);
+        let mut found = None;
+        for line in fields.lines().filter(|line| !line.is_empty()) {
+            if let Some(value) = line.strip_prefix(&prefix) {
+                if found.is_some() || value.is_empty() {
+                    return Err("duplicate or empty manifest field");
+                }
+                found = Some(value);
+            }
+        }
+        found.ok_or("missing manifest field")
+    };
+    let name = Text::new(field("name")?).map_err(|_| "invalid Form name")?;
+    let url = field("url")?;
+    if !url.starts_with("https://") {
+        return Err("artifact URL must use HTTPS");
+    }
+    let length = field("bytes")?
+        .parse::<usize>()
+        .map_err(|_| "invalid artifact length")?;
+    if !(expos_core::NATIVE_IMAGE_HEADER..=crate::network::HTTP_BODY_CAPACITY).contains(&length)
+        || length > MAX_CONTENT
+    {
+        return Err("artifact length exceeds the bounded registry transfer");
+    }
+    let sha256 = parse_sha256(field("sha256")?).ok_or("invalid SHA-256")?;
+    Ok(RegistryManifest {
+        name,
+        url,
+        length,
+        sha256,
+    })
+}
+
 fn print_tunable(node: TunableNode) {
     let access = match node.access {
         TunableAccess::ReadOnly => "read-only",
@@ -4117,8 +4747,19 @@ const fn execution_runtime_name(runtime: ExecutionRuntime) -> &'static str {
 mod tests {
     use super::{
         is_mutating_command, is_operator_command, is_shell_command, milliseconds_to_ticks,
-        milliseconds_to_ticks_at, parse_positive_u64, should_mask_shell_input,
+        milliseconds_to_ticks_at, parse_positive_u64, parse_sha256, parse_signed_registry_manifest,
+        should_mask_shell_input,
     };
+    use ed25519_dalek::{Signer, SigningKey};
+
+    fn hex(bytes: &[u8]) -> alloc::string::String {
+        use core::fmt::Write;
+        let mut output = alloc::string::String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            write!(&mut output, "{byte:02x}").unwrap();
+        }
+        output
+    }
 
     #[test]
     fn masks_account_password_arguments_only() {
@@ -4208,5 +4849,48 @@ mod tests {
                 "non-operator recovery: {command}"
             );
         }
+    }
+
+    #[test]
+    fn native_package_digest_requires_exact_sha256_hex() {
+        let digest =
+            parse_sha256("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+                .unwrap();
+        assert_eq!(digest[0..4], [0xba, 0x78, 0x16, 0xbf]);
+        assert!(parse_sha256("ba78").is_none());
+        assert!(
+            parse_sha256("za7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn signed_registry_manifest_accepts_pinned_key_and_rejects_tampering() {
+        let signing = SigningKey::from_bytes(&[0x42; 32]);
+        let signed = alloc::format!(
+            "EXPOS-AYO-REGISTRY-V1\nname=Clock\nurl=https://registry.example/Clock.exf1\nbytes={}\nsha256={}",
+            expos_core::NATIVE_IMAGE_HEADER,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let signature = signing.sign(signed.as_bytes());
+        let manifest = alloc::format!("{}\nsignature={}", signed, hex(&signature.to_bytes()));
+        let key = signing.verifying_key().to_bytes();
+        let parsed = parse_signed_registry_manifest(manifest.as_bytes(), &key).unwrap();
+        assert_eq!(parsed.name.as_str(), "Clock");
+        assert_eq!(parsed.url, "https://registry.example/Clock.exf1");
+        assert_eq!(parsed.length, expos_core::NATIVE_IMAGE_HEADER);
+
+        let tampered = manifest.replace("name=Clock", "name=Block");
+        assert_eq!(
+            parse_signed_registry_manifest(tampered.as_bytes(), &key).err(),
+            Some("Ed25519 verification failed")
+        );
+        let wrong_key = SigningKey::from_bytes(&[0x24; 32])
+            .verifying_key()
+            .to_bytes();
+        assert_eq!(
+            parse_signed_registry_manifest(manifest.as_bytes(), &wrong_key).err(),
+            Some("Ed25519 verification failed")
+        );
     }
 }

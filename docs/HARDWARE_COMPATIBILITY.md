@@ -5,39 +5,42 @@ is not a promise that a physical machine will boot.
 
 | Platform | UEFI boot | Install | Storage | Keyboard / mouse | Ethernet | Audio | Display | Status |
 |---|---:|---:|---|---|---|---|---|---|
-| QEMU `pc` + OVMF/SeaBIOS | Yes | Yes | NVMe, AHCI, ATA-PIO | xHCI HID, PS/2 | RTL8139 | AC'97 PCM output | direct UEFI GOP; Bochs BIOS fallback | Automated by modern-hardware, startup, audio and Genesis checks |
-| Framework Laptop 13 | Untested | Not approved | NVMe implemented, untested | xHCI HID implemented, untested | Untested | Unsupported (HDA) | GOP implemented, untested | Not ready for destructive install |
-| ThinkPad T480 | Untested | Not approved | NVMe/AHCI implemented, untested | xHCI HID implemented, untested | Untested | Unsupported (HDA) | GOP implemented, untested | Not ready for destructive install |
-| Dell OptiPlex 7060 | Untested | Not approved | NVMe/AHCI implemented, untested | xHCI HID implemented, untested | Untested | Unsupported (HDA) | GOP implemented, untested | Not ready for destructive install |
-| Intel NUC | Untested | Not approved | NVMe/AHCI implemented, untested | xHCI HID implemented, untested | Untested | Unsupported (HDA) | GOP implemented, untested | Not ready for destructive install |
-| Generic Ryzen desktop | Untested | Not approved | NVMe/AHCI implemented, untested | xHCI HID implemented, untested | Untested | Unsupported (HDA/USB) | GOP implemented, untested | Not ready for destructive install |
+| QEMU `pc` + OVMF/SeaBIOS | Yes | Yes | NVMe, AHCI, ATA-PIO, transitional VirtIO-block | xHCI HID, PS/2 | RTL8139, e1000/e1000e, transitional VirtIO-net | AC'97, Intel HDA and modern VirtIO Sound PCM output; Ayo-installed VBR MP3 | direct UEFI GOP; Bochs BIOS fallback | Automated by modern-hardware, driver-network, HDA/audio/modern-audio and Genesis checks |
+| Framework Laptop 13 | Untested | Not approved | NVMe implemented, untested | xHCI HID implemented, untested | Untested | HDA implemented, untested | GOP implemented, untested | Not ready for destructive install |
+| ThinkPad T480 | Untested | Not approved | NVMe/AHCI implemented, untested | xHCI HID implemented, untested | Untested | HDA implemented, untested | GOP implemented, untested | Not ready for destructive install |
+| Dell OptiPlex 7060 | Untested | Not approved | NVMe/AHCI implemented, untested | xHCI HID implemented, untested | Untested | HDA implemented, untested | GOP implemented, untested | Not ready for destructive install |
+| Intel NUC | Untested | Not approved | NVMe/AHCI implemented, untested | xHCI HID implemented, untested | Untested | HDA implemented, untested | GOP implemented, untested | Not ready for destructive install |
+| Generic Ryzen desktop | Untested | Not approved | NVMe/AHCI implemented, untested | xHCI HID implemented, untested | Untested | HDA implemented, USB audio unsupported | GOP implemented, untested | Not ready for destructive install |
 
 The first modern-driver milestone is intentionally bounded:
 
-- storage selects the first usable NVMe controller/namespace, then AHCI SATA,
-  then legacy ATA-PIO; NVMe currently requires a 512-byte LBA namespace and
-  neither driver supports hotplug, power management or IOMMU remapping;
+- runtime storage selects the first usable NVMe controller/namespace, AHCI SATA,
+  transitional VirtIO block or legacy ATA-PIO target; NVMe currently requires
+  a 512-byte LBA namespace and no backend supports hotplug or IOMMU remapping;
 - xHCI supports one controller, fixed DMA rings, up to four boot-protocol HID
   devices and eight scratchpads; it does not provide hubs, USB mass storage,
   Bluetooth, audio or arbitrary HID report parsing;
-- ExpAudio supports the Intel/QEMU-compatible AC'97 PCM-out interface with a
-  bounded 32-descriptor 48 kHz stereo DMA ring, double-buffered one-request
-  queue, strict integer-PCM WAV conversion and FIFO/underrun diagnostics. It
-  does not yet drive the HDA or USB audio
-  hardware used by the listed physical systems, so physical audio is not
-  claimed;
+- ExpAudio supports QEMU VirtIO Sound plus Intel/QEMU-compatible AC'97 and
+  Intel HDA PCM-out. VirtIO Sound uses modern PCI capabilities, output-stream
+  discovery, SET_PARAMS/PREPARE/START and TX used-ring completion; the Intel
+  paths use bounded descriptor rings and legacy PCI INTx. All share 48 kHz
+  stereo signed-16 buffers, strict integer-PCM WAV conversion, bounded VBR MP3
+  streaming from the VM-only Ayo media store, and underrun diagnostics. The
+  store deliberately refuses partitioned Genesis disks. USB audio and physical audio validation
+  remain absent, so physical audio is not claimed;
 - UEFI uses validated GOP address, size, geometry, stride and RGB/BGR order
   directly. The kernel does not change firmware modes or negotiate EDID;
-- PCI MSI/MSI-X capability discovery, vector reservation and programming exist,
-  but storage, USB and networking still use bounded polling because device IDT
-  handlers are not armed yet; and
+- PCI MSI/MSI-X capability discovery, vector reservation and programming exist.
+  The I/O APIC routes live AC'97, HDA and e1000/e1000e INTx completion; NVMe and
+  xHCI retain bounded polling; and
 - DMA relies on the current below-4-GiB identity-mapped kernel allocation model.
 
-Genesis can issue I/O through NVMe or AHCI, but it still chooses by driver probe
-order and does not show a model, serial number or stable device identity before
-the whole-disk `ERASE` gate. Do not run the destructive installer against a
-physical machine until identity-based disk selection and physical-hardware
-validation land. VirtIO-block is not implemented.
+Genesis inventories up to eight implemented targets, shows model, serial,
+capacity, controller and a stable fingerprint, then requires an explicit index
+and exact serial before the separate whole-disk `ERASE` gate. The QEMU test
+selects an ATA slave beside an unchanged decoy master. Multi-port AHCI and
+multi-namespace NVMe enumeration and physical-hardware validation remain open.
+Do not run the destructive installer against a physical machine yet.
 
 Genesis v2 prints a preflight overview for x86-64, NX, SMEP, RDRAND, storage,
 GOP and detected PS/2/xHCI keyboard paths. The installed runtime explicitly

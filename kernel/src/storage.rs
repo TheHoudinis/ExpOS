@@ -4,10 +4,11 @@
 //! persistent state layer above it owns versioning, checksums, and atomic slot
 //! selection.  Polls are bounded so absent or faulty hardware cannot hang boot.
 
-use crate::port;
+use crate::{pci, port};
 
 mod ahci;
 mod nvme;
+mod virtio_block;
 
 pub const SECTOR_SIZE: usize = 512;
 
@@ -35,6 +36,7 @@ const COMMAND_IDENTIFY: u8 = 0xEC;
 // deschedule the device thread while the guest is polling. Keep the operation
 // bounded while leaving enough headroom for parallel integration tests.
 const MAX_POLLS: usize = 12_000_000;
+pub const MAX_STORAGE_DEVICES: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StorageError {
@@ -47,8 +49,107 @@ pub enum StorageError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeviceIdentity {
+    backend: &'static str,
+    controller: Option<pci::Location>,
+    sectors: u32,
+    model: [u8; 40],
+    model_len: u8,
+    serial: [u8; 20],
+    serial_len: u8,
+    removable: bool,
+}
+
+#[cfg_attr(not(feature = "genesis-installer"), allow(dead_code))]
+impl DeviceIdentity {
+    pub(super) const fn new(
+        backend: &'static str,
+        controller: Option<pci::Location>,
+        sectors: u32,
+        model: ([u8; 40], u8),
+        serial: ([u8; 20], u8),
+        removable: bool,
+    ) -> Self {
+        Self {
+            backend,
+            controller,
+            sectors,
+            model: model.0,
+            model_len: model.1,
+            serial: serial.0,
+            serial_len: serial.1,
+            removable,
+        }
+    }
+
+    pub const fn backend(self) -> &'static str {
+        self.backend
+    }
+
+    pub const fn sectors(self) -> u32 {
+        self.sectors
+    }
+
+    pub const fn controller(self) -> Option<pci::Location> {
+        self.controller
+    }
+
+    pub const fn removable(self) -> bool {
+        self.removable
+    }
+
+    pub fn model(&self) -> &str {
+        core::str::from_utf8(&self.model[..self.model_len as usize]).unwrap_or("unknown")
+    }
+
+    pub fn serial(&self) -> &str {
+        core::str::from_utf8(&self.serial[..self.serial_len as usize]).unwrap_or("unknown")
+    }
+
+    pub fn trustworthy(self) -> bool {
+        self.model_len != 0
+            && self.serial_len != 0
+            && self.sectors != 0
+            && self.model[..self.model_len as usize]
+                .iter()
+                .all(|byte| byte.is_ascii_graphic() || *byte == b' ')
+            && self.serial[..self.serial_len as usize]
+                .iter()
+                .all(|byte| byte.is_ascii_graphic() || *byte == b' ')
+    }
+
+    /// Stable within a physical device identity. This is a destructive-action
+    /// confirmation token, not a cryptographic authentication primitive.
+    pub fn fingerprint(&self) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        for byte in self
+            .backend
+            .as_bytes()
+            .iter()
+            .chain(self.sectors.to_le_bytes().iter())
+            .chain(self.model[..self.model_len as usize].iter())
+            .chain(self.serial[..self.serial_len as usize].iter())
+        {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(0x100_0000_01b3);
+        }
+        if let Some(location) = self.controller {
+            for byte in [location.bus, location.slot, location.function] {
+                hash ^= byte as u64;
+                hash = hash.wrapping_mul(0x100_0000_01b3);
+            }
+        }
+        hash ^= self.removable as u64;
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+        hash
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AtaDevice {
     sectors: u32,
+    drive: u8,
+    identity: DeviceIdentity,
 }
 
 impl AtaDevice {
@@ -56,11 +157,16 @@ impl AtaDevice {
         self.sectors
     }
 
+    #[cfg_attr(not(feature = "genesis-installer"), allow(dead_code))]
+    pub const fn identity(self) -> DeviceIdentity {
+        self.identity
+    }
+
     pub fn read_sector(self, lba: u32, output: &mut [u8; SECTOR_SIZE]) -> Result<(), StorageError> {
         if lba >= self.sectors || lba > 0x0FFF_FFFF {
             return Err(StorageError::OutOfRange);
         }
-        select_lba(lba)?;
+        select_lba(self.drive, lba)?;
         unsafe { port::outb(STATUS_COMMAND, COMMAND_READ) };
         wait_for_data()?;
         for index in 0..SECTOR_SIZE / 2 {
@@ -89,7 +195,7 @@ impl AtaDevice {
         if lba >= self.sectors || lba > 0x0FFF_FFFF {
             return Err(StorageError::OutOfRange);
         }
-        select_lba(lba)?;
+        select_lba(self.drive, lba)?;
         unsafe { port::outb(STATUS_COMMAND, COMMAND_WRITE) };
         wait_for_data()?;
         for index in 0..SECTOR_SIZE / 2 {
@@ -116,11 +222,48 @@ enum Backend {
     Ata(AtaDevice),
     Ahci(ahci::Device),
     Nvme(nvme::Device),
+    Virtio(virtio_block::Device),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Device {
     backend: Backend,
+}
+
+/// Fixed-capacity, allocation-free storage inventory used by Genesis.  Device
+/// handles remain fully usable after enumeration; selecting an entry does not
+/// re-probe or silently fall back to another disk.
+pub struct DeviceSet {
+    entries: [Option<Device>; MAX_STORAGE_DEVICES],
+    count: usize,
+}
+
+impl DeviceSet {
+    const fn new() -> Self {
+        Self {
+            entries: [None; MAX_STORAGE_DEVICES],
+            count: 0,
+        }
+    }
+
+    fn push(&mut self, device: Device) {
+        if self.count < self.entries.len() {
+            self.entries[self.count] = Some(device);
+            self.count += 1;
+        }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.count
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn get(&self, index: usize) -> Option<Device> {
+        self.entries.get(index).copied().flatten()
+    }
 }
 
 impl Device {
@@ -129,6 +272,7 @@ impl Device {
             Backend::Ata(device) => device.sectors(),
             Backend::Ahci(device) => device.sectors(),
             Backend::Nvme(device) => device.sectors(),
+            Backend::Virtio(device) => device.sectors(),
         }
     }
 
@@ -137,6 +281,17 @@ impl Device {
             Backend::Ata(_) => "ata-pio",
             Backend::Ahci(_) => "ahci",
             Backend::Nvme(_) => "nvme",
+            Backend::Virtio(_) => "virtio-block",
+        }
+    }
+
+    #[cfg_attr(not(feature = "genesis-installer"), allow(dead_code))]
+    pub const fn identity(self) -> DeviceIdentity {
+        match self.backend {
+            Backend::Ata(device) => device.identity(),
+            Backend::Ahci(device) => device.identity(),
+            Backend::Nvme(device) => device.identity(),
+            Backend::Virtio(device) => device.identity(),
         }
     }
 
@@ -145,6 +300,7 @@ impl Device {
             Backend::Ata(device) => device.read_sector(lba, output),
             Backend::Ahci(device) => device.read_sector(lba, output),
             Backend::Nvme(device) => device.read_sector(lba, output),
+            Backend::Virtio(device) => device.read_sector(lba, output),
         }
     }
 
@@ -153,6 +309,7 @@ impl Device {
             Backend::Ata(device) => device.write_sector(lba, input),
             Backend::Ahci(device) => device.write_sector(lba, input),
             Backend::Nvme(device) => device.write_sector(lba, input),
+            Backend::Virtio(device) => device.write_sector(lba, input),
         }
     }
 
@@ -165,6 +322,7 @@ impl Device {
             Backend::Ata(device) => device.write_sector_unflushed(lba, input),
             Backend::Ahci(device) => device.write_sector_unflushed(lba, input),
             Backend::Nvme(device) => device.write_sector_unflushed(lba, input),
+            Backend::Virtio(device) => device.write_sector_unflushed(lba, input),
         }
     }
 
@@ -173,25 +331,20 @@ impl Device {
             Backend::Ata(device) => device.flush(),
             Backend::Ahci(device) => device.flush(),
             Backend::Nvme(device) => device.flush(),
+            Backend::Virtio(device) => device.flush(),
         }
     }
 }
 
-/// Probe modern PCI storage first, then fall back to the primary ATA master.
-pub fn initialize() -> Result<Device, StorageError> {
+/// Enumerate every storage target that can be represented by the current
+/// bounded drivers.  PCI controllers are listed before the two legacy primary
+/// ATA positions so the displayed order is deterministic across boots.
+pub fn enumerate() -> Result<DeviceSet, StorageError> {
+    let mut devices = DeviceSet::new();
     match nvme::initialize() {
-        Ok(device) => {
-            let result = Device {
-                backend: Backend::Nvme(device),
-            };
-            crate::slog!(
-                "EXPOS_STORAGE_READY backend={} sectors={} sector_bytes={}\r\n",
-                result.backend(),
-                result.sectors(),
-                SECTOR_SIZE
-            );
-            return Ok(result);
-        }
+        Ok(device) => devices.push(Device {
+            backend: Backend::Nvme(device),
+        }),
         Err(StorageError::NoDevice) => {}
         Err(error) => crate::slog!(
             "EXPOS_STORAGE_PROBE_FAILED backend=nvme error={:?}\r\n",
@@ -199,28 +352,64 @@ pub fn initialize() -> Result<Device, StorageError> {
         ),
     }
     match ahci::initialize() {
-        Ok(device) => {
-            let result = Device {
-                backend: Backend::Ahci(device),
-            };
-            crate::slog!(
-                "EXPOS_STORAGE_READY backend={} sectors={} sector_bytes={}\r\n",
-                result.backend(),
-                result.sectors(),
-                SECTOR_SIZE
-            );
-            return Ok(result);
-        }
+        Ok(device) => devices.push(Device {
+            backend: Backend::Ahci(device),
+        }),
         Err(StorageError::NoDevice) => {}
         Err(error) => crate::slog!(
             "EXPOS_STORAGE_PROBE_FAILED backend=ahci error={:?}\r\n",
             error
         ),
     }
-    let device = initialize_ata()?;
-    let result = Device {
-        backend: Backend::Ata(device),
-    };
+    match virtio_block::initialize() {
+        Ok(device) => devices.push(Device {
+            backend: Backend::Virtio(device),
+        }),
+        Err(StorageError::NoDevice) => {}
+        Err(error) => crate::slog!(
+            "EXPOS_STORAGE_PROBE_FAILED backend=virtio-block error={:?}\r\n",
+            error
+        ),
+    }
+    for drive in 0_u8..=1 {
+        match initialize_ata(drive) {
+            Ok(device) => devices.push(Device {
+                backend: Backend::Ata(device),
+            }),
+            Err(StorageError::NoDevice | StorageError::UnsupportedDevice) => {}
+            Err(error) => crate::slog!(
+                "EXPOS_STORAGE_PROBE_FAILED backend=ata-pio position={} error={:?}\r\n",
+                if drive == 0 {
+                    "primary-master"
+                } else {
+                    "primary-slave"
+                },
+                error
+            ),
+        }
+    }
+    if devices.is_empty() {
+        return Err(StorageError::NoDevice);
+    }
+    crate::slog!(
+        "EXPOS_STORAGE_ENUMERATED devices={} bounded_max={}\r\n",
+        devices.len(),
+        MAX_STORAGE_DEVICES
+    );
+    Ok(devices)
+}
+
+pub fn handle_legacy_interrupt(irq: u8) {
+    virtio_block::handle_legacy_interrupt(irq);
+}
+
+pub fn handle_message_interrupt() {}
+
+/// Probe modern PCI storage first, then fall back to legacy ATA. Runtime boot
+/// keeps the historical first-device policy; destructive Genesis installation
+/// always uses [`enumerate`] and requires an explicit selection.
+pub fn initialize() -> Result<Device, StorageError> {
+    let result = enumerate()?.get(0).ok_or(StorageError::NoDevice)?;
     crate::slog!(
         "EXPOS_STORAGE_READY backend={} sectors={} sector_bytes={}\r\n",
         result.backend(),
@@ -230,9 +419,11 @@ pub fn initialize() -> Result<Device, StorageError> {
     Ok(result)
 }
 
-fn initialize_ata() -> Result<AtaDevice, StorageError> {
+fn initialize_ata(drive: u8) -> Result<AtaDevice, StorageError> {
+    let selector = if drive == 0 { 0xA0 } else { 0xB0 };
     unsafe {
-        port::outb(DRIVE, 0xA0);
+        port::outb(DRIVE, selector);
+        acknowledge_delay();
         port::outb(SECTOR_COUNT, 0);
         port::outb(LBA_LOW, 0);
         port::outb(LBA_MID, 0);
@@ -258,12 +449,63 @@ fn initialize_ata() -> Result<AtaDevice, StorageError> {
     if sectors == 0 {
         return Err(StorageError::UnsupportedDevice);
     }
-    Ok(AtaDevice { sectors })
+    let (serial, serial_len) = ata_identity_text::<20>(&identify[10..20]);
+    let (model, model_len) = ata_identity_text::<40>(&identify[27..47]);
+    Ok(AtaDevice {
+        sectors,
+        drive,
+        identity: DeviceIdentity::new(
+            "ata-pio",
+            None,
+            sectors,
+            (model, model_len),
+            (serial, serial_len),
+            identify[0] & (1 << 7) != 0,
+        ),
+    })
 }
 
-fn select_lba(lba: u32) -> Result<(), StorageError> {
+pub(super) fn ata_identity_text<const N: usize>(words: &[u16]) -> ([u8; N], u8) {
+    let mut output = [0_u8; N];
+    let mut length = 0_usize;
+    for word in words.iter().take(N / 2) {
+        let bytes = word.to_be_bytes();
+        output[length] = bytes[0];
+        output[length + 1] = bytes[1];
+        length += 2;
+    }
+    while length != 0 && matches!(output[length - 1], 0 | b' ') {
+        length -= 1;
+    }
+    let leading = output[..length]
+        .iter()
+        .position(|byte| !matches!(*byte, 0 | b' '))
+        .unwrap_or(length);
+    if leading != 0 && leading != length {
+        output.copy_within(leading..length, 0);
+        length -= leading;
+        output[length..].fill(0);
+    }
+    (output, length as u8)
+}
+
+pub(super) fn nvme_identity_text<const N: usize>(bytes: &[u8]) -> ([u8; N], u8) {
+    let mut output = [0_u8; N];
+    let amount = N.min(bytes.len());
+    output[..amount].copy_from_slice(&bytes[..amount]);
+    let mut length = amount;
+    while length != 0 && matches!(output[length - 1], 0 | b' ') {
+        length -= 1;
+    }
+    (output, length as u8)
+}
+
+fn select_lba(drive: u8, lba: u32) -> Result<(), StorageError> {
     unsafe {
-        port::outb(DRIVE, 0xE0 | ((lba >> 24) as u8 & 0x0F));
+        port::outb(
+            DRIVE,
+            0xE0 | ((drive & 1) << 4) | ((lba >> 24) as u8 & 0x0F),
+        );
     }
     acknowledge_delay();
     wait_ready()?;
@@ -324,5 +566,48 @@ fn acknowledge_delay() {
     // delay without acknowledging a pending interrupt.
     for _ in 0..4 {
         let _ = unsafe { port::inb(ALT_STATUS) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ata_identity_text_swaps_words_and_trims_padding() {
+        let words = [
+            u16::from_be_bytes(*b"EX"),
+            u16::from_be_bytes(*b"PO"),
+            u16::from_be_bytes(*b"S "),
+        ];
+        let (text, length) = ata_identity_text::<8>(&words);
+        assert_eq!(&text[..length as usize], b"EXPOS");
+    }
+
+    #[test]
+    fn disk_fingerprint_binds_backend_geometry_model_serial_and_controller() {
+        let mut model = [0_u8; 40];
+        model[..10].copy_from_slice(b"Test Drive");
+        let mut serial = [0_u8; 20];
+        serial[..6].copy_from_slice(b"ABC123");
+        let identity = DeviceIdentity::new(
+            "nvme",
+            Some(pci::Location {
+                bus: 2,
+                slot: 0,
+                function: 0,
+            }),
+            1_000_000,
+            (model, 10),
+            (serial, 6),
+            false,
+        );
+        assert!(identity.trustworthy());
+        assert_eq!(identity.fingerprint(), identity.fingerprint());
+        assert_ne!(
+            identity.fingerprint(),
+            DeviceIdentity::new("nvme", None, 1_000_000, (model, 10), (serial, 6), false)
+                .fingerprint()
+        );
     }
 }

@@ -24,6 +24,17 @@ pub fn halt() {
     }
 }
 
+/// Sleep until the next interrupt without leaving interrupts enabled while
+/// ordinary kernel code or a non-IRQ-safe spin lock is running. `sti` delays
+/// delivery until after the following instruction, so `sti; hlt` cannot lose
+/// an interrupt in the enable/sleep window.
+#[inline]
+pub fn wait_for_interrupt() {
+    unsafe {
+        core::arch::asm!("sti", "hlt", "cli", options(nomem, nostack));
+    }
+}
+
 pub fn reboot() -> ! {
     unsafe {
         while inb(0x64) & 0x02 != 0 {

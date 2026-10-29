@@ -58,6 +58,13 @@ impl Function {
         write(self.location, offset, value);
     }
 
+    /// Firmware-routed PCI INTx line. Values 0, 2 and 0xff are not usable
+    /// device IRQs on the remapped dual-8259 compatibility path.
+    pub fn interrupt_line(self) -> Option<u8> {
+        let line = self.read(0x3C) as u8;
+        (line < 16 && line != 0 && line != 2).then_some(line)
+    }
+
     /// Enable MMIO decoding and DMA for a claimed device while preserving all
     /// firmware-selected command bits.
     pub fn enable_memory_bus_master(self) {

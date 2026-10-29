@@ -42,7 +42,10 @@ const DHCP_POLLS: usize = 1_000_000;
 const TCP_HEADER_SIZE: usize = 20;
 const TCP_SYN_HEADER_SIZE: usize = 24;
 const TCP_PAYLOAD_CAPACITY: usize = 1500 - 20 - TCP_HEADER_SIZE;
-const TCP_OUTPUT_CAPACITY: usize = 16 * 1024;
+// Keep this aligned with the kernel's bounded HTTP wire buffer. The larger
+// reply cuts Ayo's multi-megabyte Range installs from hundreds of isolated
+// worker launches to a few dozen without changing the public Form ABI.
+const TCP_OUTPUT_CAPACITY: usize = 60 * 1024;
 const TCP_SOURCE_PORT: u16 = SOURCE_PORT + 1;
 const TCP_RECEIVE_WINDOW: u16 = 32 * 1024;
 const TCP_FIN: u8 = 0x01;
@@ -106,12 +109,14 @@ static mut SERVICE_DMA: DmaBuffers = DmaBuffers {
 #[derive(Clone, Copy)]
 struct DriverState {
     initialized: bool,
+    backend: u8,
     receive_offset: usize,
     transmit_index: usize,
 }
 
 static mut DRIVER: DriverState = DriverState {
     initialized: false,
+    backend: 0,
     receive_offset: 0,
     transmit_index: 0,
 };
@@ -357,6 +362,52 @@ unsafe fn configuration(
     response: *mut AbiResponse,
     network: u32,
 ) -> Option<Interface> {
+    (*request).call = AbiCall::NetworkReceive as u16;
+    (*request).handle_id = network;
+    (*request).arguments = [0, 0, 1, 0, 0, 0];
+    call(request, response);
+    if (*response).status != AbiStatus::Ok as u16 || (*response).values[3] & 1 == 0 {
+        return None;
+    }
+    let identity_value = (*response).values[0];
+    let address_value = (*response).values[1];
+    let route_value = (*response).values[2];
+    let backend = ((*response).values[3] >> 8) as u8;
+    let unpack = |value: u64, offset: usize| ((value >> (offset * 8)) & 0xff) as u8;
+    let mut mac = [0_u8; 6];
+    for (index, octet) in mac.iter_mut().enumerate() {
+        *octet = unpack(identity_value, index);
+    }
+    if mac == [0; 6] || mac == [0xff; 6] || !(1..=3).contains(&backend) {
+        return None;
+    }
+    if backend != 1 {
+        DRIVER = DriverState {
+            initialized: true,
+            backend,
+            receive_offset: 0,
+            transmit_index: 0,
+        };
+        return Some(Interface {
+            mac,
+            address: [
+                unpack(address_value, 0), unpack(address_value, 1),
+                unpack(address_value, 2), unpack(address_value, 3),
+            ],
+            netmask: [
+                unpack(address_value, 4), unpack(address_value, 5),
+                unpack(address_value, 6), unpack(address_value, 7),
+            ],
+            gateway: [
+                unpack(route_value, 0), unpack(route_value, 1),
+                unpack(route_value, 2), unpack(route_value, 3),
+            ],
+            dns: [
+                unpack(route_value, 4), unpack(route_value, 5),
+                unpack(route_value, 6), unpack(route_value, 7),
+            ],
+        });
+    }
     let dma = core::ptr::addr_of_mut!(SERVICE_DMA);
     (*request).call = AbiCall::NetworkReceive as u16;
     (*request).handle_id = network;
@@ -388,12 +439,8 @@ unsafe fn configuration(
     if !reset {
         return None;
     }
-    let mut mac = [0_u8; 6];
     for (index, octet) in mac.iter_mut().enumerate() {
         *octet = driver_read(request, response, network, IDR0 + index as u16, 1)? as u8;
-    }
-    if mac == [0; 6] || mac == [0xff; 6] {
-        return None;
     }
     (*dma).receive.fill(0);
     for buffer in &mut (*dma).transmit {
@@ -433,6 +480,7 @@ unsafe fn configuration(
     }
     DRIVER = DriverState {
         initialized: true,
+        backend,
         receive_offset: 0,
         transmit_index: 0,
     };
@@ -440,16 +488,6 @@ unsafe fn configuration(
         return None;
     }
 
-    (*request).call = AbiCall::NetworkReceive as u16;
-    (*request).handle_id = network;
-    (*request).arguments = [0, 0, 1, 0, 0, 0];
-    call(request, response);
-    if (*response).status != AbiStatus::Ok as u16 || (*response).values[3] == 0 {
-        return None;
-    }
-    let unpack = |value: u64, offset: usize| ((value >> (offset * 8)) & 0xff) as u8;
-    let address_value = (*response).values[1];
-    let route_value = (*response).values[2];
     Some(Interface {
         mac,
         address: [
@@ -517,6 +555,13 @@ unsafe fn send(
     if !DRIVER.initialized || frame.len() > FRAME_CAPACITY {
         return false;
     }
+    if DRIVER.backend != 1 {
+        (*request).call = AbiCall::NetworkSend as u16;
+        (*request).handle_id = network;
+        (*request).arguments = [frame.as_ptr() as u64, frame.len() as u64, 4, 0, 0, 0];
+        call(request, response);
+        return (*response).status == AbiStatus::Ok as u16;
+    }
     let length = frame.len().max(60);
     let index = DRIVER.transmit_index;
     let status_register = TSD0 + index as u16 * 4;
@@ -572,6 +617,20 @@ unsafe fn receive(
 ) -> Option<usize> {
     if !DRIVER.initialized {
         return Some(0);
+    }
+    if DRIVER.backend != 1 {
+        (*request).call = AbiCall::NetworkReceive as u16;
+        (*request).handle_id = network;
+        (*request).arguments = [frame.as_mut_ptr() as u64, frame.len() as u64, 4, 0, 0, 0];
+        call(request, response);
+        if (*response).status != AbiStatus::Ok as u16 {
+            return Some(0);
+        }
+        let length = (*response).values[0] as usize;
+        if length == 0 {
+            return None;
+        }
+        return (length <= frame.len()).then_some(length);
     }
     if driver_read(request, response, network, COMMAND, 1)? as u8 & COMMAND_RX_BUFFER_EMPTY != 0 {
         return None;

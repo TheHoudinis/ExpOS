@@ -11,7 +11,7 @@ use core::{
     marker::PhantomData,
     mem::size_of,
     ptr,
-    sync::atomic::{AtomicU8, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, Ordering},
 };
 
 use expos_core::{
@@ -451,6 +451,22 @@ unsafe extern "C" {
     fn expos_form_mf_stub();
     fn expos_form_ac_stub();
     fn expos_form_xm_stub();
+    fn expos_legacy_irq1_stub();
+    fn expos_legacy_irq2_stub();
+    fn expos_legacy_irq3_stub();
+    fn expos_legacy_irq4_stub();
+    fn expos_legacy_irq5_stub();
+    fn expos_legacy_irq6_stub();
+    fn expos_legacy_irq7_stub();
+    fn expos_legacy_irq8_stub();
+    fn expos_legacy_irq9_stub();
+    fn expos_legacy_irq10_stub();
+    fn expos_legacy_irq11_stub();
+    fn expos_legacy_irq12_stub();
+    fn expos_legacy_irq13_stub();
+    fn expos_legacy_irq14_stub();
+    fn expos_legacy_irq15_stub();
+    fn expos_device_irq_stub();
 }
 
 /// Install the TSS, interrupt gates, remapped PIC and a 1 kHz PIT. IRQs remain
@@ -476,6 +492,26 @@ pub fn initialize() {
         IDT[17] = IdtEntry::interrupt(expos_form_ac_stub, 0);
         IDT[19] = IdtEntry::interrupt(expos_form_xm_stub, 0);
         IDT[32] = IdtEntry::interrupt(expos_form_timer_stub, 0);
+        IDT[33] = IdtEntry::interrupt(expos_legacy_irq1_stub, 0);
+        IDT[34] = IdtEntry::interrupt(expos_legacy_irq2_stub, 0);
+        IDT[35] = IdtEntry::interrupt(expos_legacy_irq3_stub, 0);
+        IDT[36] = IdtEntry::interrupt(expos_legacy_irq4_stub, 0);
+        IDT[37] = IdtEntry::interrupt(expos_legacy_irq5_stub, 0);
+        IDT[38] = IdtEntry::interrupt(expos_legacy_irq6_stub, 0);
+        IDT[39] = IdtEntry::interrupt(expos_legacy_irq7_stub, 0);
+        IDT[40] = IdtEntry::interrupt(expos_legacy_irq8_stub, 0);
+        IDT[41] = IdtEntry::interrupt(expos_legacy_irq9_stub, 0);
+        IDT[42] = IdtEntry::interrupt(expos_legacy_irq10_stub, 0);
+        IDT[43] = IdtEntry::interrupt(expos_legacy_irq11_stub, 0);
+        IDT[44] = IdtEntry::interrupt(expos_legacy_irq12_stub, 0);
+        IDT[45] = IdtEntry::interrupt(expos_legacy_irq13_stub, 0);
+        IDT[46] = IdtEntry::interrupt(expos_legacy_irq14_stub, 0);
+        IDT[47] = IdtEntry::interrupt(expos_legacy_irq15_stub, 0);
+        let mut vector = 0x40;
+        while vector <= 0x7F {
+            IDT[vector] = IdtEntry::interrupt(expos_device_irq_stub, 0);
+            vector += 1;
+        }
         IDT[0x80] = IdtEntry::interrupt(expos_form_abi_stub, 3);
         let descriptor = DescriptorTablePointer {
             limit: (size_of::<[IdtEntry; 256]>() - 1) as u16,
@@ -623,11 +659,53 @@ unsafe fn initialize_pic_and_pit() {
     port::outb(0x21, 0xFE);
     port::outb(0xA1, 0xFF);
 
-    // PIT channel 0, square-wave mode, approximately 1000 Hz.
-    let divisor = 1193_u16;
+    program_periodic_pit();
+}
+
+const PIT_HZ: u64 = 1_193_182;
+const PERIODIC_DIVISOR: u16 = 1193;
+static TICKLESS_REPORTED: AtomicBool = AtomicBool::new(false);
+
+unsafe fn program_periodic_pit() {
+    // PIT channel 0, square-wave mode, approximately 1000 Hz. This remains the
+    // preemption source while a Ring 3 Form owns the CPU.
     port::outb(0x43, 0x36);
-    port::outb(0x40, divisor as u8);
-    port::outb(0x40, (divisor >> 8) as u8);
+    port::outb(0x40, PERIODIC_DIVISOR as u8);
+    port::outb(0x40, (PERIODIC_DIVISOR >> 8) as u8);
+}
+
+const fn one_shot_divisor(microseconds: u32) -> u16 {
+    let ticks = (microseconds as u64 * PIT_HZ).div_ceil(1_000_000);
+    if ticks == 0 {
+        1
+    } else if ticks > u16::MAX as u64 {
+        u16::MAX
+    } else {
+        ticks as u16
+    }
+}
+
+/// Enter a bounded tickless idle period on the bootstrap CPU. Device and input
+/// IRQs may wake the CPU early. Ring 3 execution always restores the 1 kHz
+/// preemption source before it can run, so this optimization cannot weaken the
+/// ExpBudget boundary.
+pub fn wait_tickless(max_microseconds: u32) {
+    let divisor = one_shot_divisor(max_microseconds);
+    unsafe {
+        // Channel 0, access low/high byte, interrupt-on-terminal-count mode.
+        port::outb(0x43, 0x30);
+        port::outb(0x40, divisor as u8);
+        port::outb(0x40, (divisor >> 8) as u8);
+    }
+    if !TICKLESS_REPORTED.swap(true, Ordering::AcqRel) {
+        crate::slog!(
+            "EXPOS_TICKLESS_IDLE mode=pit-one-shot maximum_us={} divisor={} ring3_preemption_hz=1000\r\n",
+            max_microseconds,
+            divisor
+        );
+    }
+    crate::port::wait_for_interrupt();
+    unsafe { program_periodic_pit() };
 }
 
 unsafe fn io_wait() {
@@ -1165,6 +1243,16 @@ pub extern "C" fn expos_form_interrupt_eoi() {
 }
 
 #[no_mangle]
+pub extern "C" fn expos_legacy_irq_interrupt(irq: u64) {
+    crate::interrupts::handle_legacy_irq(irq as u8);
+}
+
+#[no_mangle]
+pub extern "C" fn expos_device_interrupt() {
+    crate::interrupts::handle_message_interrupt();
+}
+
+#[no_mangle]
 pub extern "C" fn expos_form_abi_interrupt(frame: *mut TrapFrame) -> u64 {
     #[cfg(feature = "isolation-self-test")]
     crate::isolation_self_test::smap(current_slot());
@@ -1397,7 +1485,21 @@ fn capture_reply(
 }
 
 fn service_network_send(active: &mut ActiveExecution, arguments: [u64; 6]) -> AbiResponse {
-    let _ = active;
+    if arguments[2] == 4 {
+        let Some(memory) = (unsafe { active.service_memory.as_ref() }) else {
+            return AbiResponse::status(AbiStatus::Denied);
+        };
+        let Some(physical) = memory.writable_alias_range(arguments[0], arguments[1] as usize)
+        else {
+            return AbiResponse::status(AbiStatus::Invalid);
+        };
+        let frame =
+            unsafe { core::slice::from_raw_parts(physical as *const u8, arguments[1] as usize) };
+        return match crate::network::service_frame_send(frame) {
+            Ok(()) => AbiResponse::ok([arguments[1], 0, 0, 0]),
+            Err(_) => AbiResponse::status(AbiStatus::Denied),
+        };
+    }
     if arguments[2] == 3 {
         return match crate::network::service_driver_write(
             arguments[0] as u16,
@@ -1412,6 +1514,21 @@ fn service_network_send(active: &mut ActiveExecution, arguments: [u64; 6]) -> Ab
 }
 
 fn service_network_receive(active: &mut ActiveExecution, arguments: [u64; 6]) -> AbiResponse {
+    if arguments[2] == 4 {
+        let Some(memory) = (unsafe { active.service_memory.as_ref() }) else {
+            return AbiResponse::status(AbiStatus::Denied);
+        };
+        let Some(physical) = memory.writable_alias_range(arguments[0], arguments[1] as usize)
+        else {
+            return AbiResponse::status(AbiStatus::Invalid);
+        };
+        let frame =
+            unsafe { core::slice::from_raw_parts_mut(physical as *mut u8, arguments[1] as usize) };
+        return match crate::network::service_frame_receive(frame) {
+            Ok(length) => AbiResponse::ok([length as u64, 0, 0, 0]),
+            Err(_) => AbiResponse::status(AbiStatus::Denied),
+        };
+    }
     if arguments[2] == 2 {
         let Some(memory) = (unsafe { active.service_memory.as_ref() }) else {
             return AbiResponse::status(AbiStatus::Denied);

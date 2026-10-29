@@ -1,4 +1,5 @@
 use crate::port;
+use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 /// Maximum scanout geometry supported by the mapped Bochs/QEMU framebuffer.
@@ -35,6 +36,7 @@ static mut GOP_SHADOW: ShadowBuffer = ShadowBuffer([0; LFB_APERTURE_BYTES / BYTE
 static LFB_ADDRESS: AtomicUsize = AtomicUsize::new(0);
 static LFB_DEVICE_BYTES: AtomicUsize = AtomicUsize::new(0);
 static GOP_ACTIVE: AtomicBool = AtomicBool::new(false);
+static VIRTIO_GPU_ACTIVE: AtomicBool = AtomicBool::new(false);
 static GOP_RGB_ORDER: AtomicBool = AtomicBool::new(false);
 static ACTIVE_WIDTH: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_HEIGHT: AtomicUsize = AtomicUsize::new(0);
@@ -69,6 +71,10 @@ const MAX_DAMAGE_REGIONS: usize = 32;
 /// image. This bounds the lifetime of any caller-side missing damage without
 /// turning normal cursor motion into full-screen traffic.
 const GOP_RECONCILE_INTERVAL: u64 = 120;
+/// MMIO readback is useful recovery evidence but serializing every cursor-sized
+/// commit on uncached GOP memory is needlessly expensive. Full publications
+/// are always sampled; partial publications are sampled at this bounded rate.
+const GOP_READBACK_INTERVAL: u64 = 16;
 /// Above this visible-pixel ratio one sequential full publication is cheaper
 /// and simpler than many row fragments.
 const FULL_DAMAGE_PROMOTION_NUMERATOR: u64 = 2;
@@ -290,11 +296,17 @@ static GOP_PARTIAL_PRESENTS: AtomicU64 = AtomicU64::new(0);
 static GOP_READBACK_FAILURES: AtomicU64 = AtomicU64::new(0);
 static GOP_RECOVERIES: AtomicU64 = AtomicU64::new(0);
 static GOP_PARTIAL_SINCE_FULL: AtomicU64 = AtomicU64::new(0);
+static GOP_PARTIAL_SINCE_VERIFY: AtomicU64 = AtomicU64::new(0);
 static FORCE_FULL_RECONCILE: AtomicBool = AtomicBool::new(false);
+static CPU_ACCEL_LOGGED: AtomicBool = AtomicBool::new(false);
+static GRAPHICS_BACKEND_PREFERENCE: AtomicU8 = AtomicU8::new(0);
 static LAST_COPY_TICKS: AtomicU64 = AtomicU64::new(0);
 static MAX_COPY_TICKS: AtomicU64 = AtomicU64::new(0);
 static LAST_COPIED_REGIONS: AtomicU64 = AtomicU64::new(0);
 static LAST_COPIED_PIXELS: AtomicU64 = AtomicU64::new(0);
+static BACKDROP_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+static BACKDROP_CACHE_CAPTURES: AtomicU64 = AtomicU64::new(0);
+static VIRTIO_SCATTER_LOGGED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Mode {
@@ -353,6 +365,10 @@ pub struct PresentationStats {
     pub max_copy_ticks: u64,
     pub last_copied_regions: u64,
     pub last_copied_pixels: u64,
+    /// Full wallpaper regenerations avoided by restoring the cached base layer.
+    pub backdrop_cache_hits: u64,
+    /// Wallpaper base layers captured after procedural rasterization.
+    pub backdrop_cache_captures: u64,
 }
 
 /// A clipped scanout area that must be copied to the newly hidden page after
@@ -364,6 +380,43 @@ pub struct DamageRegion {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum GraphicsBackendPreference {
+    #[default]
+    Automatic = 0,
+    VirtioGpu = 1,
+    CompatibleFramebuffer = 2,
+}
+
+impl GraphicsBackendPreference {
+    pub const fn from_persisted(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Automatic),
+            1 => Some(Self::VirtioGpu),
+            2 => Some(Self::CompatibleFramebuffer),
+            _ => None,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Automatic => "automatic",
+            Self::VirtioGpu => "virtio-gpu",
+            Self::CompatibleFramebuffer => "compatible-framebuffer",
+        }
+    }
+}
+
+pub fn set_backend_preference(preference: GraphicsBackendPreference) {
+    GRAPHICS_BACKEND_PREFERENCE.store(preference as u8, Ordering::Release);
+}
+
+pub fn backend_preference() -> GraphicsBackendPreference {
+    GraphicsBackendPreference::from_persisted(GRAPHICS_BACKEND_PREFERENCE.load(Ordering::Acquire))
+        .unwrap_or_default()
 }
 
 impl DamageRegion {
@@ -702,7 +755,7 @@ fn discover_aperture() -> bool {
 
 fn framebuffer_pointer() -> Option<*mut u32> {
     active_display_mode()?;
-    if GOP_ACTIVE.load(Ordering::Acquire) {
+    if GOP_ACTIVE.load(Ordering::Acquire) || VIRTIO_GPU_ACTIVE.load(Ordering::Acquire) {
         // SAFETY: the compositor owns the shadow surface while graphics mode
         // is active; presentation only reads it after drawing completes.
         return Some(unsafe { core::ptr::addr_of_mut!(GOP_SHADOW.0).cast::<u32>() });
@@ -749,7 +802,9 @@ pub fn current_mode() -> DisplayMode {
 /// Human-readable active output. Firmware GOP geometry may not match one of
 /// the three user-selectable Bochs presets.
 pub fn active_output_label() -> &'static str {
-    if GOP_ACTIVE.load(Ordering::Acquire) {
+    if VIRTIO_GPU_ACTIVE.load(Ordering::Acquire) {
+        "virtio-gpu"
+    } else if GOP_ACTIVE.load(Ordering::Acquire) {
         "firmware"
     } else {
         current_mode().label()
@@ -822,6 +877,8 @@ pub fn presentation_stats() -> PresentationStats {
         max_copy_ticks: MAX_COPY_TICKS.load(Ordering::Acquire),
         last_copied_regions: LAST_COPIED_REGIONS.load(Ordering::Acquire),
         last_copied_pixels: LAST_COPIED_PIXELS.load(Ordering::Acquire),
+        backdrop_cache_hits: BACKDROP_CACHE_HITS.load(Ordering::Acquire),
+        backdrop_cache_captures: BACKDROP_CACHE_CAPTURES.load(Ordering::Acquire),
     }
 }
 
@@ -846,7 +903,7 @@ pub fn enter() -> bool {
     crate::slog!("EXPOS_DISPLAY_ENTER requested={}\r\n", requested.label());
     let active_matches = active_display_mode() == Some(requested)
         && FRONT_CONTENT_VISIBLE.load(Ordering::Acquire)
-        && if GOP_ACTIVE.load(Ordering::Acquire) {
+        && if GOP_ACTIVE.load(Ordering::Acquire) || VIRTIO_GPU_ACTIVE.load(Ordering::Acquire) {
             true
         } else {
             let aperture_bytes = LFB_DEVICE_BYTES.load(Ordering::Acquire);
@@ -858,6 +915,17 @@ pub fn enter() -> bool {
             requested.label()
         );
         return true;
+    }
+    let backend = backend_preference();
+    if backend != GraphicsBackendPreference::CompatibleFramebuffer && program_virtio_gpu(requested)
+    {
+        return true;
+    }
+    if backend == GraphicsBackendPreference::VirtioGpu {
+        crate::slog!(
+            "EXPOS_VIRTIO_GPU_FALLBACK requested={} fallback=compatible-framebuffer\r\n",
+            requested.label()
+        );
     }
     if let Some(info) = crate::boot::firmware_framebuffer() {
         let firmware_mode = DisplayMode::from_dimensions(info.width as usize, info.height as usize);
@@ -910,10 +978,12 @@ pub fn print_diagnostics() {
     let presentation = presentation_stats();
     crate::println!("DISPLAY DIAGNOSTICS");
     crate::println!(
-        "adapter: id={:#06X} bochs-vbe={} uefi-gop={}",
+        "adapter: id={:#06X} bochs-vbe={} uefi-gop={} virtio-gpu={} preference={}",
         adapter_id,
         available(),
-        GOP_ACTIVE.load(Ordering::Acquire)
+        GOP_ACTIVE.load(Ordering::Acquire),
+        VIRTIO_GPU_ACTIVE.load(Ordering::Acquire),
+        backend_preference().label()
     );
     crate::println!(
         "requested: {} {}x{}x{} required={} bytes double-buffer={} bytes",
@@ -978,6 +1048,7 @@ pub fn print_diagnostics() {
 }
 
 fn program_mode(requested: DisplayMode) -> bool {
+    VIRTIO_GPU_ACTIVE.store(false, Ordering::Release);
     GOP_ACTIVE.store(false, Ordering::Release);
     reset_presentation_state();
     if !available() || !discover_aperture() {
@@ -1053,8 +1124,47 @@ fn program_mode(requested: DisplayMode) -> bool {
         page_flip,
         mode.virtual_height
     );
+    log_cpu_acceleration();
     clear(color::BACKGROUND);
     true
+}
+
+fn program_virtio_gpu(requested: DisplayMode) -> bool {
+    reset_presentation_state();
+    GOP_ACTIVE.store(false, Ordering::Release);
+    VIRTIO_GPU_ACTIVE.store(false, Ordering::Release);
+    let backing = unsafe { core::ptr::addr_of_mut!(GOP_SHADOW.0).cast::<u32>() };
+    if !crate::virtio_gpu::initialize(
+        requested.width(),
+        requested.height(),
+        backing,
+        requested.scanout_bytes(),
+    ) {
+        return false;
+    }
+    ACTIVE_DISPLAY_MODE.store(requested.persisted(), Ordering::Release);
+    ACTIVE_WIDTH.store(requested.width(), Ordering::Release);
+    ACTIVE_HEIGHT.store(requested.height(), Ordering::Release);
+    ACTIVE_STRIDE_BYTES.store(requested.stride_bytes(), Ordering::Release);
+    VIRTIO_GPU_ACTIVE.store(true, Ordering::Release);
+    crate::slog!(
+        "EXPOS_DISPLAY_MODE width={} height={} bpp=32 stride={} bytes={} preset={} backend=virtio-gpu pageflip=false\r\n",
+        requested.width(),
+        requested.height(),
+        requested.stride_bytes(),
+        requested.scanout_bytes(),
+        requested.label()
+    );
+    log_cpu_acceleration();
+    clear(color::BACKGROUND);
+    if present(false) {
+        true
+    } else {
+        VIRTIO_GPU_ACTIVE.store(false, Ordering::Release);
+        crate::virtio_gpu::shutdown();
+        reset_presentation_state();
+        false
+    }
 }
 
 fn program_firmware_framebuffer() -> bool {
@@ -1088,6 +1198,7 @@ fn program_firmware_framebuffer() -> bool {
     LFB_DEVICE_BYTES.store(info.bytes as usize, Ordering::Relaxed);
     GOP_RGB_ORDER.store(info.format == 0, Ordering::Relaxed);
     GOP_ACTIVE.store(true, Ordering::Release);
+    VIRTIO_GPU_ACTIVE.store(false, Ordering::Release);
     crate::asl::claim_firmware_framebuffer();
     ACTIVE_DISPLAY_MODE.store(mode.persisted(), Ordering::Release);
     ACTIVE_WIDTH.store(width, Ordering::Release);
@@ -1111,8 +1222,17 @@ fn program_firmware_framebuffer() -> bool {
         required,
         height
     );
+    log_cpu_acceleration();
     clear(color::BACKGROUND);
     true
+}
+
+fn log_cpu_acceleration() {
+    if !CPU_ACCEL_LOGGED.swap(true, Ordering::AcqRel) {
+        crate::slog!(
+            "EXPOS_RENDER_CPU_ACCEL fill=rep-stosq copy=rep-movsq tail=dword simd-state=untouched\r\n"
+        );
+    }
 }
 
 fn reset_presentation_state() {
@@ -1140,11 +1260,15 @@ fn reset_presentation_state() {
     GOP_READBACK_FAILURES.store(0, Ordering::Release);
     GOP_RECOVERIES.store(0, Ordering::Release);
     GOP_PARTIAL_SINCE_FULL.store(0, Ordering::Release);
+    GOP_PARTIAL_SINCE_VERIFY.store(0, Ordering::Release);
     FORCE_FULL_RECONCILE.store(false, Ordering::Release);
     LAST_COPY_TICKS.store(0, Ordering::Release);
     MAX_COPY_TICKS.store(0, Ordering::Release);
     LAST_COPIED_REGIONS.store(0, Ordering::Release);
     LAST_COPIED_PIXELS.store(0, Ordering::Release);
+    BACKDROP_CACHE_HITS.store(0, Ordering::Release);
+    BACKDROP_CACHE_CAPTURES.store(0, Ordering::Release);
+    VIRTIO_SCATTER_LOGGED.store(false, Ordering::Release);
 }
 
 fn mode_fits_aperture(requested: DisplayMode, mode: Mode, aperture_bytes: usize) -> bool {
@@ -1165,6 +1289,12 @@ pub fn exit() {
     ACTIVE_WIDTH.store(0, Ordering::Release);
     ACTIVE_HEIGHT.store(0, Ordering::Release);
     ACTIVE_STRIDE_BYTES.store(0, Ordering::Release);
+    if VIRTIO_GPU_ACTIVE.swap(false, Ordering::AcqRel) {
+        FRONT_CONTENT_VISIBLE.store(false, Ordering::Release);
+        PAGE_FLIP_AVAILABLE.store(false, Ordering::Release);
+        crate::virtio_gpu::shutdown();
+        return;
+    }
     if GOP_ACTIVE.swap(false, Ordering::AcqRel) {
         FRONT_CONTENT_VISIBLE.store(false, Ordering::Release);
         PAGE_FLIP_AVAILABLE.store(false, Ordering::Release);
@@ -1220,6 +1350,62 @@ pub fn present_damage(vsync: bool, damage: &[DamageRegion]) -> bool {
         LAST_COPIED_REGIONS.store(0, Ordering::Release);
         LAST_COPIED_PIXELS.store(0, Ordering::Release);
         return FRONT_CONTENT_VISIBLE.load(Ordering::Acquire);
+    }
+    if VIRTIO_GPU_ACTIVE.load(Ordering::Acquire) {
+        let mut bounds = normalized.regions[0];
+        for region in &normalized.regions[1..normalized.len] {
+            bounds = bounds.union(*region);
+        }
+        let separate_pixels = normalized.copied_pixels();
+        let scatter =
+            should_scatter_virtio_damage(normalized.len, bounds.pixels() as u64, separate_pixels);
+        let mut gpu_regions = [crate::virtio_gpu::DamageRect::new(0, 0, 0, 0); MAX_DAMAGE_REGIONS];
+        let (regions, copied_regions, copied_pixels) = if scatter {
+            for (target, source) in gpu_regions
+                .iter_mut()
+                .zip(normalized.regions[..normalized.len].iter())
+            {
+                *target = crate::virtio_gpu::DamageRect::new(
+                    source.left,
+                    source.top,
+                    source.right,
+                    source.bottom,
+                );
+            }
+            if !VIRTIO_SCATTER_LOGGED.swap(true, Ordering::AcqRel) {
+                crate::slog!(
+                    "EXPOS_VIRTIO_GPU_DAMAGE strategy=scatter threshold=2x max_regions={}\r\n",
+                    MAX_DAMAGE_REGIONS
+                );
+            }
+            (
+                &gpu_regions[..normalized.len],
+                normalized.copied_regions(),
+                separate_pixels,
+            )
+        } else {
+            gpu_regions[0] = crate::virtio_gpu::DamageRect::new(
+                bounds.left,
+                bounds.top,
+                bounds.right,
+                bounds.bottom,
+            );
+            (&gpu_regions[..1], 1, bounds.pixels() as u64)
+        };
+        let started = crate::hardware::timestamp();
+        let visible = crate::virtio_gpu::present_regions(regions);
+        let elapsed = crate::hardware::timestamp().saturating_sub(started);
+        LAST_COPY_TICKS.store(elapsed, Ordering::Release);
+        MAX_COPY_TICKS.fetch_max(elapsed, Ordering::AcqRel);
+        COPIED_DAMAGE_REGIONS.fetch_add(copied_regions, Ordering::AcqRel);
+        COPIED_DAMAGE_PIXELS.fetch_add(copied_pixels, Ordering::AcqRel);
+        LAST_COPIED_REGIONS.store(copied_regions, Ordering::Release);
+        LAST_COPIED_PIXELS.store(copied_pixels, Ordering::Release);
+        FRONT_CONTENT_VISIBLE.store(visible, Ordering::Release);
+        if visible {
+            PRESENTED_FRAMES.fetch_add(1, Ordering::AcqRel);
+        }
+        return visible;
     }
     if GOP_ACTIVE.load(Ordering::Acquire) && should_promote_gop_damage(&normalized) {
         promote_to_full_damage(&mut normalized);
@@ -1294,6 +1480,14 @@ pub fn present_damage(vsync: bool, damage: &[DamageRegion]) -> bool {
     visible
 }
 
+const fn should_scatter_virtio_damage(
+    region_count: usize,
+    bounding_pixels: u64,
+    separate_pixels: u64,
+) -> bool {
+    region_count > 1 && bounding_pixels > separate_pixels.saturating_mul(2)
+}
+
 pub fn clear(value: u32) {
     let Some(pointer) = framebuffer_pointer() else {
         return;
@@ -1328,6 +1522,44 @@ pub fn read_pixel(x: i32, y: i32) -> u32 {
     let stride_pixels = stride_bytes() / BYTES_PER_PIXEL;
     let offset = draw_page_offset_pixels() + y as usize * stride_pixels + x as usize;
     decode_pixel(unsafe { core::ptr::read_volatile(pointer.add(offset)) })
+}
+
+fn shadow_backed() -> bool {
+    GOP_ACTIVE.load(Ordering::Relaxed) || VIRTIO_GPU_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Save the fully rasterized wallpaper in the unused half of the bounded
+/// shadow aperture. This is available for GOP and VirtIO-GPU modes because
+/// both compose into ordinary RAM and every supported mode fits twice.
+pub fn capture_backdrop() -> bool {
+    if !shadow_backed() {
+        return false;
+    }
+    let pixels = scanout_bytes() / BYTES_PER_PIXEL;
+    let page = draw_page_offset_pixels();
+    if page != 0 || pixels.saturating_mul(2) > LFB_APERTURE_BYTES / BYTES_PER_PIXEL {
+        return false;
+    }
+    let shadow = unsafe { core::ptr::addr_of_mut!(GOP_SHADOW.0).cast::<u32>() };
+    unsafe { copy_dwords(shadow, shadow.add(pixels), pixels) };
+    BACKDROP_CACHE_CAPTURES.fetch_add(1, Ordering::AcqRel);
+    true
+}
+
+/// Restore a cached wallpaper before composing windows and overlays.
+pub fn restore_backdrop() -> bool {
+    if !shadow_backed() {
+        return false;
+    }
+    let pixels = scanout_bytes() / BYTES_PER_PIXEL;
+    let page = draw_page_offset_pixels();
+    if page != 0 || pixels.saturating_mul(2) > LFB_APERTURE_BYTES / BYTES_PER_PIXEL {
+        return false;
+    }
+    let shadow = unsafe { core::ptr::addr_of_mut!(GOP_SHADOW.0).cast::<u32>() };
+    unsafe { copy_dwords(shadow.add(pixels), shadow, pixels) };
+    BACKDROP_CACHE_HITS.fetch_add(1, Ordering::AcqRel);
+    true
 }
 
 pub fn rect(x: i32, y: i32, width: i32, height: i32, value: u32) {
@@ -1378,9 +1610,9 @@ fn decode_pixel(value: u32) -> u32 {
     encode_pixel(value)
 }
 
-/// Fill exactly `count` dwords using an architecturally visible x86 string
-/// operation. Inline assembly has an implicit memory clobber here, preventing
-/// the compiler from removing or moving framebuffer writes across the call.
+/// Fill exactly `count` dwords with aligned 64-bit x86 string stores and a
+/// bounded dword head/tail. This doubles the width of the hot opaque-fill path
+/// without using SIMD state that Ring 3 context switching does not yet save.
 ///
 /// # Safety
 ///
@@ -1390,21 +1622,36 @@ unsafe fn fill_dwords(destination: *mut u32, value: u32, count: usize) {
     if count == 0 {
         return;
     }
-    unsafe {
-        core::arch::asm!(
-            "cld",
-            "rep stosd",
-            inout("rdi") destination => _,
-            inout("rcx") count => _,
-            in("eax") value,
-            options(nostack)
-        );
+    let mut destination = destination;
+    let mut count = count;
+    if destination.addr() & 7 != 0 {
+        unsafe { ptr::write_volatile(destination, value) };
+        destination = unsafe { destination.add(1) };
+        count -= 1;
+    }
+    let qwords = count / 2;
+    if qwords != 0 {
+        let value = value as u64 | ((value as u64) << 32);
+        unsafe {
+            core::arch::asm!(
+                "cld",
+                "rep stosq",
+                inout("rdi") destination => _,
+                inout("rcx") qwords => _,
+                in("rax") value,
+                options(nostack)
+            );
+        }
+        destination = unsafe { destination.add(qwords * 2) };
+    }
+    if count & 1 != 0 {
+        unsafe { ptr::write_volatile(destination, value) };
     }
 }
 
-/// Copy exactly `count` non-overlapping dwords using an x86 string operation.
-/// Unlike an ordinary Rust slice copy, the inline assembly is an explicit
-/// memory side effect suitable for the mapped framebuffer aperture.
+/// Copy exactly `count` non-overlapping dwords. Equal source/destination
+/// alignment uses 64-bit string moves; mismatched alignment retains the safe
+/// dword path.
 ///
 /// # Safety
 ///
@@ -1412,6 +1659,38 @@ unsafe fn fill_dwords(destination: *mut u32, value: u32, count: usize) {
 #[inline(always)]
 unsafe fn copy_dwords(source: *const u32, destination: *mut u32, count: usize) {
     if count == 0 {
+        return;
+    }
+    let mut source = source;
+    let mut destination = destination;
+    let mut count = count;
+    if (source.addr() & 7) == (destination.addr() & 7) {
+        if destination.addr() & 7 != 0 {
+            let value = unsafe { ptr::read_volatile(source) };
+            unsafe { ptr::write_volatile(destination, value) };
+            source = unsafe { source.add(1) };
+            destination = unsafe { destination.add(1) };
+            count -= 1;
+        }
+        let qwords = count / 2;
+        if qwords != 0 {
+            unsafe {
+                core::arch::asm!(
+                    "cld",
+                    "rep movsq",
+                    inout("rsi") source => _,
+                    inout("rdi") destination => _,
+                    inout("rcx") qwords => _,
+                    options(nostack)
+                );
+            }
+            source = unsafe { source.add(qwords * 2) };
+            destination = unsafe { destination.add(qwords * 2) };
+        }
+        if count & 1 != 0 {
+            let value = unsafe { ptr::read_volatile(source) };
+            unsafe { ptr::write_volatile(destination, value) };
+        }
         return;
     }
     unsafe {
@@ -1476,6 +1755,12 @@ fn copy_gop_damage(damage: &NormalizedDamage) -> bool {
         GOP_PARTIAL_PRESENTS.fetch_add(1, Ordering::AcqRel);
         GOP_PARTIAL_SINCE_FULL.fetch_add(1, Ordering::AcqRel);
     }
+    let verify = full
+        || GOP_PARTIAL_SINCE_VERIFY.fetch_add(1, Ordering::AcqRel) + 1 >= GOP_READBACK_INTERVAL;
+    if !verify {
+        return true;
+    }
+    GOP_PARTIAL_SINCE_VERIFY.store(0, Ordering::Release);
     if verify_gop_damage(shadow, scanout, damage) {
         return true;
     }
@@ -1685,15 +1970,44 @@ pub fn rounded_rect(x: i32, y: i32, width: i32, height: i32, radius: i32, value:
 }
 
 pub fn alpha_rect(x: i32, y: i32, width: i32, height: i32, value: u32, alpha: u8) {
+    if alpha == 0 || width <= 0 || height <= 0 {
+        return;
+    }
+    if alpha == u8::MAX {
+        rect(x, y, width, height, value);
+        return;
+    }
+    let Some(pointer) = framebuffer_pointer() else {
+        return;
+    };
     let mode_width = self::width() as i32;
     let mode_height = self::height() as i32;
     let left = x.max(0).min(mode_width);
     let top = y.max(0).min(mode_height);
     let right = x.saturating_add(width).max(0).min(mode_width);
     let bottom = y.saturating_add(height).max(0).min(mode_height);
-    for row in top..bottom {
-        for column in left..right {
-            pixel(column, row, blend(read_pixel(column, row), value, alpha));
+    if left >= right || top >= bottom {
+        return;
+    }
+    let stride_pixels = stride_bytes() / BYTES_PER_PIXEL;
+    let page = draw_page_offset_pixels();
+    let value = encode_pixel(value);
+    let volatile = !shadow_backed();
+    for row in top as usize..bottom as usize {
+        let mut target = unsafe { pointer.add(page + row * stride_pixels + left as usize) };
+        for _ in left..right {
+            let background = if volatile {
+                unsafe { ptr::read_volatile(target) }
+            } else {
+                unsafe { ptr::read(target) }
+            };
+            let output = blend(background, value, alpha);
+            if volatile {
+                unsafe { ptr::write_volatile(target, output) };
+            } else {
+                unsafe { ptr::write(target, output) };
+            }
+            target = unsafe { target.add(1) };
         }
     }
 }
@@ -1820,9 +2134,10 @@ fn lerp_color(from: u32, to: u32, step: u32, total: u32) -> u32 {
 fn blend(background: u32, foreground: u32, alpha: u8) -> u32 {
     let inverse = 255_u32 - alpha as u32;
     let mix = |shift: u32| {
-        ((((background >> shift) & 0xFF) * inverse + ((foreground >> shift) & 0xFF) * alpha as u32)
-            / 255)
-            << shift
+        let product = ((background >> shift) & 0xFF) * inverse
+            + ((foreground >> shift) & 0xFF) * alpha as u32;
+        let rounded = product + 128;
+        (((rounded + (rounded >> 8)) >> 8) & 0xFF) << shift
     };
     mix(16) | mix(8) | mix(0)
 }
@@ -2723,6 +3038,21 @@ mod tests {
         assert_eq!(normalized.copied_regions(), 2);
         assert_eq!(normalized.copied_pixels(), 135);
         assert!(!normalized.regions[0].touches_or_overlaps(normalized.regions[1]));
+    }
+
+    #[test]
+    fn virtio_scatter_upload_avoids_sparse_bounding_transfers() {
+        assert!(should_scatter_virtio_damage(2, 300_000, 2_000));
+        assert!(!should_scatter_virtio_damage(1, 300_000, 2_000));
+        assert!(!should_scatter_virtio_damage(2, 3_999, 2_000));
+        assert!(!should_scatter_virtio_damage(2, 4_000, 2_000));
+    }
+
+    #[test]
+    fn integer_alpha_blend_preserves_endpoints_and_rounds_midpoint() {
+        assert_eq!(blend(0x0012_3456, 0x00AB_CDEF, 0), 0x0012_3456);
+        assert_eq!(blend(0x0012_3456, 0x00AB_CDEF, 255), 0x00AB_CDEF);
+        assert_eq!(blend(0x0000_0000, 0x00FF_FFFF, 128), 0x0080_8080);
     }
 
     #[test]

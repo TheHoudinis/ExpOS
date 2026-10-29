@@ -1,4 +1,4 @@
-//! Native IPv4 admission and the confined RTL8139 register/DMA portal.
+//! Native IPv4 admission and bounded Ethernet transport backends.
 //!
 //! Release builds keep DHCP, ARP/IPv4, ICMP, UDP/DNS, TCP and TLS protocol
 //! state, polling driver state and DMA buffers in the restartable Ring 3
@@ -13,6 +13,9 @@ use alloc::boxed::Box;
 use core::sync::atomic::{compiler_fence, AtomicBool, Ordering};
 use expos_core::{CapabilityBroker, Fin, Operations};
 pub use expos_core::{HttpResponse, HTTP_BODY_CAPACITY};
+
+mod e1000;
+mod virtio_net;
 
 pub const NETWORK_FIN: Fin = Fin::from_u128(0x4E45_5457_4F52_4B00_0000_0000_0000_0001);
 #[cfg(not(test))]
@@ -115,7 +118,7 @@ const DNS_PACKET_CAPACITY: usize = 512;
 #[cfg(test)]
 const DNS_CACHE_HOST_CAPACITY: usize = 96;
 const HTTP_REQUEST_CAPACITY: usize = 768;
-const HTTP_WIRE_CAPACITY: usize = 16 * 1024;
+const HTTP_WIRE_CAPACITY: usize = 60 * 1024;
 const BROWSER_WIRE_CAPACITY: usize = HTTP_WIRE_CAPACITY;
 const HTTP_CONTENT_TYPE_CAPACITY: usize = 96;
 const HTTP_COOKIE_CAPACITY: usize = 384;
@@ -151,6 +154,8 @@ pub enum NetworkError {
     LinkDown,
     ArpTimeout,
     TransmitFailed,
+    ReceiveFailed,
+    PacketTooLarge,
     ReplyTimeout,
     DnsTimeout,
     #[cfg(test)]
@@ -181,10 +186,12 @@ impl NetworkError {
             Self::BadHostname => "invalid DNS hostname",
             Self::BadUrl => "invalid HTTP URL",
             Self::UnsupportedScheme => "URL scheme must be http:// or https://",
-            Self::NoDevice => "RTL8139 network device is unavailable",
-            Self::LinkDown => "RTL8139 link is down",
+            Self::NoDevice => "supported network device is unavailable",
+            Self::LinkDown => "Ethernet link is down",
             Self::ArpTimeout => "ARP neighbor resolution timed out",
-            Self::TransmitFailed => "RTL8139 transmit failed",
+            Self::TransmitFailed => "Ethernet transmit failed",
+            Self::ReceiveFailed => "Ethernet receive failed",
+            Self::PacketTooLarge => "Ethernet frame exceeds the bounded MTU buffer",
             Self::ReplyTimeout => "network reply timed out",
             Self::DnsTimeout => "DNS reply timed out",
             #[cfg(test)]
@@ -358,6 +365,7 @@ impl DmaBuffers {
 
 struct NetworkStack {
     initialized: bool,
+    backend: Backend,
     io_base: u16,
     pci_bus: u8,
     pci_slot: u8,
@@ -394,10 +402,39 @@ struct NetworkStack {
     dma: DmaBuffers,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Backend {
+    Unavailable,
+    Rtl8139,
+    E1000,
+    Virtio,
+}
+
+impl Backend {
+    const fn code(self) -> u8 {
+        match self {
+            Self::Unavailable => 0,
+            Self::Rtl8139 => 1,
+            Self::E1000 => 2,
+            Self::Virtio => 3,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::Rtl8139 => "rtl8139-ring3",
+            Self::E1000 => "e1000",
+            Self::Virtio => "virtio-net",
+        }
+    }
+}
+
 impl NetworkStack {
     const fn new() -> Self {
         Self {
             initialized: false,
+            backend: Backend::Unavailable,
             io_base: 0,
             pci_bus: 0,
             pci_slot: 0,
@@ -439,6 +476,21 @@ impl NetworkStack {
         if self.initialized {
             return true;
         }
+        #[cfg(not(test))]
+        {
+            if let Some(mac) = e1000::initialize() {
+                self.backend = Backend::E1000;
+                self.mac = mac;
+                self.initialized = true;
+                return true;
+            }
+            if let Some(mac) = virtio_net::initialize() {
+                self.backend = Backend::Virtio;
+                self.mac = mac;
+                self.initialized = true;
+                return true;
+            }
+        }
         let Some(device) = find_rtl8139() else {
             return false;
         };
@@ -471,6 +523,7 @@ impl NetworkStack {
             return false;
         }
         self.initialized = true;
+        self.backend = Backend::Rtl8139;
         if let Some(function) = crate::pci::function(crate::pci::Location {
             bus: device.bus,
             slot: device.slot,
@@ -576,6 +629,7 @@ impl NetworkStack {
         compiler_fence(Ordering::SeqCst);
 
         self.initialized = true;
+        self.backend = Backend::Rtl8139;
         if let Some(function) = crate::pci::function(crate::pci::Location {
             bus: device.bus,
             slot: device.slot,
@@ -587,7 +641,13 @@ impl NetworkStack {
     }
 
     fn link_up(&self) -> bool {
-        self.initialized && self.read8(MEDIA_STATUS) & (1 << 2) == 0
+        self.initialized
+            && match self.backend {
+                Backend::Rtl8139 => self.read8(MEDIA_STATUS) & (1 << 2) == 0,
+                Backend::E1000 => e1000::link_up(),
+                Backend::Virtio => virtio_net::link_up(),
+                Backend::Unavailable => false,
+            }
     }
 
     #[cfg(test)]
@@ -1747,9 +1807,13 @@ static DRIVER_ISOLATION_LOGGED: AtomicBool = AtomicBool::new(false);
 pub fn initialize(cfc: expos_core::CfcFin) -> bool {
     let ready = NETWORK.lock().discover();
     if ready {
-        let mac = NETWORK.lock().mac;
+        let network = NETWORK.lock();
+        let mac = network.mac;
+        let driver = network.backend.label();
+        drop(network);
         slog!(
-            "EXPOS_NET_READY driver=rtl8139-ring3 mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\r\n",
+            "EXPOS_NET_READY driver={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\r\n",
+            driver,
             mac[0],
             mac[1],
             mac[2],
@@ -1787,7 +1851,7 @@ pub fn initialize(cfc: expos_core::CfcFin) -> bool {
             }
         }
     } else {
-        slog!("EXPOS_NET_UNAVAILABLE driver=rtl8139\r\n");
+        slog!("EXPOS_NET_UNAVAILABLE drivers=e1000,virtio-net,rtl8139\r\n");
     }
     ready
 }
@@ -1856,8 +1920,8 @@ pub fn link_up() -> bool {
 pub fn print_configuration() {
     let network = NETWORK.lock();
     if !network.initialized {
-        println!("ether0: unavailable (no supported RTL8139 PCI device)");
-        println!("supported virtual NIC: Realtek RTL8139 (10ec:8139)");
+        println!("ether0: unavailable (no supported PCI Ethernet device)");
+        println!("supported NICs: Intel e1000, transitional VirtIO-net, RTL8139");
         return;
     }
     let configuration = network.configuration;
@@ -1892,13 +1956,14 @@ pub fn print_configuration() {
         configuration.lease_seconds
     );
     println!(
-        "        mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} mtu=1500 driver=rtl8139-ring3",
+        "        mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} mtu=1500 driver={}",
         network.mac[0],
         network.mac[1],
         network.mac[2],
         network.mac[3],
         network.mac[4],
-        network.mac[5]
+        network.mac[5],
+        network.backend.label()
     );
     println!("policy: restricted; network I/O requires Power or Operator authority");
 }
@@ -1911,13 +1976,29 @@ pub fn print_statistics() {
     }
     println!("DRIVER       LINK  TX-PACKETS  RX-PACKETS  DROPPED");
     println!(
-        "rtl8139-ring3 {:<4}  {:<10}  {:<10}  {}",
+        "{:<12} {:<4}  {:<10}  {:<10}  {}",
+        network.backend.label(),
         if network.link_up() { "up" } else { "down" },
         network.transmitted_packets,
         network.received_packets,
         network.dropped_packets
     );
     println!("transport: Ethernet + ARP + DHCP/IPv4 + ICMP + UDP/DNS + TCP");
+    let interrupt_events = match network.backend {
+        Backend::E1000 => e1000::interrupt_count(),
+        Backend::Virtio => virtio_net::interrupt_count(),
+        _ => 0,
+    };
+    println!(
+        "completion: {} events={} messages={}",
+        if matches!(network.backend, Backend::E1000 | Backend::Virtio) {
+            "interrupt"
+        } else {
+            "ring3-poll"
+        },
+        interrupt_events,
+        crate::interrupts::device_message_count()
+    );
     println!("application: HTTP/1.0 + verified TLS 1.3 HTTPS");
     println!("ipv6: not implemented");
 }
@@ -1955,7 +2036,7 @@ pub fn service_driver_acquire(
         return Err(NetworkError::EndpointDenied);
     }
     let network = NETWORK.lock();
-    if !network.initialized || network.io_base == 0 {
+    if !network.initialized || network.backend != Backend::Rtl8139 || network.io_base == 0 {
         return Err(NetworkError::NoDevice);
     }
     let mut portal = DRIVER_PORTAL.lock();
@@ -2121,7 +2202,7 @@ pub fn service_driver_release() {
 /// remains independent of Rust layout and the worker can decode it directly.
 pub fn service_configuration() -> Result<[u64; 4], NetworkError> {
     let network = NETWORK.lock();
-    if !network.initialized || network.io_base == 0 {
+    if !network.initialized {
         return Err(NetworkError::NoDevice);
     }
     let pack = |bytes: &[u8]| {
@@ -2136,8 +2217,59 @@ pub fn service_configuration() -> Result<[u64; 4], NetworkError> {
         pack(&network.mac),
         pack(&network.configuration.address) | (pack(&network.configuration.netmask) << 32),
         pack(&network.configuration.gateway) | (pack(&network.configuration.dns_server) << 32),
-        network.link_up() as u64,
+        network.link_up() as u64 | ((network.backend.code() as u64) << 8),
     ])
+}
+
+/// Copy one service-owned frame through a modern kernel transport. The Form
+/// ABI supplies only a validated service-memory slice; drivers never retain
+/// that address and DMA remains confined to their fixed static arenas.
+pub fn service_frame_send(frame: &[u8]) -> Result<(), NetworkError> {
+    if frame.len() > MAX_FRAME_SIZE {
+        return Err(NetworkError::PacketTooLarge);
+    }
+    let backend = NETWORK.lock().backend;
+    let result = match backend {
+        Backend::E1000 => e1000::send(frame),
+        Backend::Virtio => virtio_net::send(frame),
+        _ => Err(NetworkError::NoDevice),
+    };
+    let mut network = NETWORK.lock();
+    match result {
+        Ok(()) => network.transmitted_packets = network.transmitted_packets.saturating_add(1),
+        Err(_) => network.dropped_packets = network.dropped_packets.saturating_add(1),
+    }
+    result
+}
+
+pub fn service_frame_receive(frame: &mut [u8]) -> Result<usize, NetworkError> {
+    if frame.len() > MAX_FRAME_SIZE {
+        return Err(NetworkError::PacketTooLarge);
+    }
+    let backend = NETWORK.lock().backend;
+    let result = match backend {
+        Backend::E1000 => e1000::receive(frame),
+        Backend::Virtio => virtio_net::receive(frame),
+        _ => Err(NetworkError::NoDevice),
+    };
+    let mut network = NETWORK.lock();
+    match result {
+        Ok(length) if length != 0 => {
+            network.received_packets = network.received_packets.saturating_add(1)
+        }
+        Err(_) => network.dropped_packets = network.dropped_packets.saturating_add(1),
+        _ => {}
+    }
+    result
+}
+
+pub fn handle_legacy_interrupt(irq: u8) {
+    e1000::handle_legacy_interrupt(irq);
+    virtio_net::handle_legacy_interrupt(irq);
+}
+
+pub fn handle_message_interrupt() {
+    e1000::handle_message_interrupt();
 }
 
 pub fn ping_text(
@@ -2554,7 +2686,35 @@ pub fn http_get(
 ) -> Result<Box<HttpResponse>, NetworkError> {
     authorize_network(broker, handle_id, requester, dimension)?;
     let parsed = parse_http_url(url)?;
-    http_get_authorized(broker.cfc(), parsed, None, None, HTTP_WIRE_CAPACITY)
+    http_get_authorized(broker.cfc(), parsed, None, None, None, HTTP_WIRE_CAPACITY)
+}
+
+/// Fetch one exact byte range for a bounded web package transfer. Ayo uses
+/// repeated bounded responses so multi-megabyte media never crosses the Form
+/// ABI or Ring 3 reply boundary in one operation. The caller must require a
+/// 206 response and verify the complete artifact digest before publishing it.
+pub fn web_get_range(
+    broker: &CapabilityBroker,
+    handle_id: u32,
+    requester: Fin,
+    dimension: Fin,
+    url: &str,
+    start: usize,
+    end_exclusive: usize,
+) -> Result<Box<HttpResponse>, NetworkError> {
+    authorize_network(broker, handle_id, requester, dimension)?;
+    if start >= end_exclusive {
+        return Err(NetworkError::BadUrl);
+    }
+    let parsed = parse_http_url(url)?;
+    http_get_authorized(
+        broker.cfc(),
+        parsed,
+        None,
+        None,
+        Some((start, end_exclusive - 1)),
+        HTTP_WIRE_CAPACITY,
+    )
 }
 
 /// Perform a bounded GET with Browser-owned representation and cookie headers.
@@ -2579,6 +2739,7 @@ pub fn browser_get(
         parse_http_url(url)?,
         Some(accept),
         cookie,
+        None,
         BROWSER_WIRE_CAPACITY,
     )
 }
@@ -2599,7 +2760,38 @@ pub fn https_get_allowlisted(
     if !https_endpoint_allowed(parsed, allowed_hosts) {
         return Err(NetworkError::EndpointDenied);
     }
-    http_get_authorized(broker.cfc(), parsed, None, None, HTTP_WIRE_CAPACITY)
+    http_get_authorized(broker.cfc(), parsed, None, None, None, HTTP_WIRE_CAPACITY)
+}
+
+/// Fetch a registry resource only when both URLs are exact HTTPS same-origin
+/// peers. The signed manifest URL is supplied as `origin`; redirects never
+/// broaden the authority to a second host or port.
+pub fn https_get_same_origin(
+    broker: &CapabilityBroker,
+    handle_id: u32,
+    requester: Fin,
+    dimension: Fin,
+    origin: &str,
+    url: &str,
+) -> Result<Box<HttpResponse>, NetworkError> {
+    authorize_network(broker, handle_id, requester, dimension)?;
+    let origin = parse_http_url(origin)?;
+    let requested = parse_http_url(url)?;
+    if origin.scheme != HttpScheme::Https
+        || requested.scheme != HttpScheme::Https
+        || origin.port != requested.port
+        || !origin.host.eq_ignore_ascii_case(requested.host)
+    {
+        return Err(NetworkError::EndpointDenied);
+    }
+    http_get_authorized(
+        broker.cfc(),
+        requested,
+        None,
+        None,
+        None,
+        HTTP_WIRE_CAPACITY,
+    )
 }
 
 fn https_endpoint_allowed(parsed: HttpUrl<'_>, allowed_hosts: &[&str]) -> bool {
@@ -2615,6 +2807,7 @@ fn http_get_authorized(
     parsed: HttpUrl<'_>,
     accept: Option<&str>,
     cookie: Option<&str>,
+    range: Option<(usize, usize)>,
     wire_capacity: usize,
 ) -> Result<Box<HttpResponse>, NetworkError> {
     let mut request = [0_u8; HTTP_REQUEST_CAPACITY];
@@ -2630,7 +2823,7 @@ fn http_get_authorized(
     append_bytes(
         &mut request,
         &mut request_length,
-        b"\r\nUser-Agent: ExpOS/9.3\r\nAccept: ",
+        b"\r\nUser-Agent: ExpOS/9.8\r\nAccept: ",
     )?;
     append_bytes(
         &mut request,
@@ -2642,6 +2835,15 @@ fn http_get_authorized(
     if let Some(cookie) = cookie {
         append_bytes(&mut request, &mut request_length, b"\r\nCookie: ")?;
         append_bytes(&mut request, &mut request_length, cookie.as_bytes())?;
+    }
+    if let Some((start, end)) = range {
+        if start > end {
+            return Err(NetworkError::BadUrl);
+        }
+        append_bytes(&mut request, &mut request_length, b"\r\nRange: bytes=")?;
+        append_decimal_usize(&mut request, &mut request_length, start)?;
+        append_bytes(&mut request, &mut request_length, b"-")?;
+        append_decimal_usize(&mut request, &mut request_length, end)?;
     }
     append_bytes(
         &mut request,
@@ -2864,6 +3066,25 @@ fn append_decimal_u16(
     value: u16,
 ) -> Result<(), NetworkError> {
     let mut digits = [0_u8; 5];
+    let mut cursor = digits.len();
+    let mut remaining = value;
+    loop {
+        cursor -= 1;
+        digits[cursor] = b'0' + (remaining % 10) as u8;
+        remaining /= 10;
+        if remaining == 0 {
+            break;
+        }
+    }
+    append_bytes(output, length, &digits[cursor..])
+}
+
+fn append_decimal_usize(
+    output: &mut [u8],
+    length: &mut usize,
+    value: usize,
+) -> Result<(), NetworkError> {
+    let mut digits = [0_u8; 20];
     let mut cursor = digits.len();
     let mut remaining = value;
     loop {

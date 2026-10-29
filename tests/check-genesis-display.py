@@ -109,7 +109,8 @@ def main() -> None:
             "-vga", "std", "-global", "VGA.vgamem_mb=16", "-display", "none",
             "-drive", f"if=pflash,format=raw,readonly=on,file={os.environ.get('OVMF_CODE', '/usr/share/edk2/x64/OVMF_CODE.4m.fd')}",
             "-drive", f"if=pflash,format=raw,file={variables}",
-            "-drive", f"file={disk},format=raw,if=ide,index=0",
+            "-drive", f"file={disk},format=raw,if=none,id=target",
+            "-device", "ide-hd,drive=target,bus=ide.0,unit=0,model=ExpOS Genesis Target,serial=exposgenesistarget",
             "-cdrom", str(ROOT / "build/ExpOS-v9-x86_64.iso"), "-boot", "once=d",
             "-serial", f"file:{serial}", "-qmp", f"unix:{qmp_path},server=on,wait=off",
             "-no-reboot",
@@ -123,6 +124,13 @@ def main() -> None:
             wait_for(serial, "EXPOS_GENESIS_DISPLAY visible=true backend=uefi-gop", process, deadline)
             connection, wire, qmp = qmp_connect(qmp_path)
             qmp("send-key", keys=[{"type": "qcode", "data": "1"}], **{"hold-time": 30})
+            qmp("send-key", keys=[{"type": "qcode", "data": "ret"}], **{"hold-time": 30})
+            wait_for(serial, "Select the whole-disk target [1]:", process, deadline)
+            qmp("send-key", keys=[{"type": "qcode", "data": "1"}], **{"hold-time": 30})
+            qmp("send-key", keys=[{"type": "qcode", "data": "ret"}], **{"hold-time": 30})
+            wait_for(serial, "Type the target serial exactly:", process, deadline)
+            for key in "exposgenesistarget":
+                qmp("send-key", keys=[{"type": "qcode", "data": key}], **{"hold-time": 20})
             qmp("send-key", keys=[{"type": "qcode", "data": "ret"}], **{"hold-time": 30})
             wait_for(serial, "Installation mode [1/2]:", process, deadline)
             prompt = ARTIFACTS / "prompt.ppm"

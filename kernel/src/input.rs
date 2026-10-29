@@ -5,6 +5,13 @@ const PS2_STATUS: u16 = 0x64;
 const PS2_DATA: u16 = 0x60;
 const MAX_POINTER_BATCH: usize = 16;
 
+fn hardware_byte_waiting() -> bool {
+    if crate::serial::COM1.lock().input_ready() {
+        return true;
+    }
+    unsafe { port::inb(PS2_STATUS) & 0x01 != 0 }
+}
+
 pub const KEY_UP: u8 = 0x80;
 pub const KEY_DOWN: u8 = 0x81;
 pub const KEY_LEFT: u8 = 0x82;
@@ -91,7 +98,9 @@ impl Input {
         self.caps_lock = false;
         self.extended = false;
         self.super_key = false;
-        self.pending_event = None;
+        // Keep a fully decoded event retained by `prefetch_event`. Raw PS/2
+        // decoder state is reset below, but dropping a semantic event here
+        // would eat the first key typed after leaving the graphical session.
         #[cfg(not(test))]
         {
             self.ps2_keyboard_ready = initialize_ps2_keyboard();
@@ -184,6 +193,25 @@ impl Input {
         } else {
             self.decode_scancode(data).map(InputEvent::Key)
         }
+    }
+
+    /// Decode and retain one complete semantic event for the next loop turn.
+    /// Release scancodes, partial mouse packets and serial escape prefixes are
+    /// consumed but never mistaken for input that justifies deferring a frame.
+    pub fn prefetch_event(&mut self) -> bool {
+        if self.pending_event.is_some() {
+            return true;
+        }
+        for _ in 0..8 {
+            if let Some(event) = self.poll_event() {
+                self.pending_event = Some(event);
+                return true;
+            }
+            if !hardware_byte_waiting() {
+                break;
+            }
+        }
+        false
     }
 
     /// Collapse a bounded run of pure pointer-motion packets into one update.

@@ -404,13 +404,16 @@ pub fn seed_genesis_plan(
         NetworkPolicy::Disabled
     };
 
-    let mut plan_bytes = [0_u8; 12];
-    plan_bytes[..4].copy_from_slice(b"GNP2");
+    let mut plan_bytes = [0_u8; 16];
+    plan_bytes[..4].copy_from_slice(b"GNP3");
     plan_bytes[4] = plan.components;
     plan_bytes[5] = plan.sdks;
     plan_bytes[6] = plan.drivers;
     plan_bytes[7] = plan.encryption.persisted();
     plan_bytes[8..12].copy_from_slice(&plan.initial_apps.to_le_bytes());
+    plan_bytes[12] = plan.graphics as u8;
+    plan_bytes[13] = plan.display_mode;
+    plan_bytes[14] = plan.render_profile as u8;
     let mut plan_form = Form::new(PLAN_FIN, "GenesisPlan.state", FormKind::Policy);
     plan_form.revision = 1;
     snapshot.forms[0] = Some(StoredForm {

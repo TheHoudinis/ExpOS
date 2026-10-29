@@ -4,7 +4,7 @@
 //! current x86_64 bootstrap.  Completion is polled for now; the queue layout is
 //! already compatible with the MSI-X work started in `interrupts`.
 
-use super::{StorageError, SECTOR_SIZE};
+use super::{DeviceIdentity, StorageError, SECTOR_SIZE};
 use crate::{pci, sync::SpinMutex};
 use core::sync::atomic::{compiler_fence, Ordering};
 
@@ -43,11 +43,17 @@ static mut DATA: DataPage = DataPage([0; 4096]);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Device {
     sectors: u32,
+    identity: DeviceIdentity,
 }
 
 impl Device {
     pub const fn sectors(self) -> u32 {
         self.sectors
+    }
+
+    #[cfg_attr(not(feature = "genesis-installer"), allow(dead_code))]
+    pub const fn identity(self) -> DeviceIdentity {
+        self.identity
     }
 
     pub fn read_sector(self, lba: u32, output: &mut [u8; SECTOR_SIZE]) -> Result<(), StorageError> {
@@ -107,6 +113,7 @@ struct Controller {
     io_cq_head: u16,
     io_phase: bool,
     sectors: u32,
+    identity: DeviceIdentity,
 }
 
 impl Controller {
@@ -124,6 +131,7 @@ impl Controller {
             io_cq_head: 0,
             io_phase: true,
             sectors: 0,
+            identity: DeviceIdentity::new("nvme", None, 0, ([0; 40], 0), ([0; 20], 0), false),
         }
     }
 
@@ -131,6 +139,7 @@ impl Controller {
         if self.ready {
             return Ok(Device {
                 sectors: self.sectors,
+                identity: self.identity,
             });
         }
         let function = pci::find_class(0x01, 0x08, Some(0x02)).ok_or(StorageError::NoDevice)?;
@@ -204,6 +213,25 @@ impl Controller {
         let data = unsafe { dma_address(core::ptr::addr_of!(DATA.0))? };
         command = [0; 16];
         command[0] = ADMIN_IDENTIFY as u32;
+        command[6] = data as u32;
+        command[7] = (data >> 32) as u32;
+        command[10] = 1;
+        self.submit_admin(command)?;
+        let (serial, serial_len) = unsafe {
+            super::nvme_identity_text::<20>(core::slice::from_raw_parts(
+                core::ptr::addr_of!(DATA.0).cast::<u8>().add(4),
+                20,
+            ))
+        };
+        let (model, model_len) = unsafe {
+            super::nvme_identity_text::<40>(core::slice::from_raw_parts(
+                core::ptr::addr_of!(DATA.0).cast::<u8>().add(24),
+                40,
+            ))
+        };
+        unsafe { core::ptr::write_bytes(core::ptr::addr_of_mut!(DATA.0).cast::<u8>(), 0, 4096) };
+        command = [0; 16];
+        command[0] = ADMIN_IDENTIFY as u32;
         command[1] = 1;
         command[6] = data as u32;
         command[7] = (data >> 32) as u32;
@@ -227,6 +255,14 @@ impl Controller {
             return Err(StorageError::UnsupportedDevice);
         }
         self.sectors = namespace_size.min(u32::MAX as u64) as u32;
+        self.identity = DeviceIdentity::new(
+            "nvme",
+            Some(function.location),
+            self.sectors,
+            (model, model_len),
+            (serial, serial_len),
+            false,
+        );
         self.ready = true;
         let _ = crate::asl::claim(function, crate::asl::Owner::ExpStorage);
         if let Some(binding) = crate::interrupts::prepare(function) {
@@ -238,6 +274,7 @@ impl Controller {
         }
         Ok(Device {
             sectors: self.sectors,
+            identity: self.identity,
         })
     }
 

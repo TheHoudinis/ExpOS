@@ -180,8 +180,10 @@ most 768 HTTP request bytes to the worker. Plain TCP performs ARP, handshake,
 ordered receive, acknowledgements, retransmission and close. HTTPS additionally
 receives immutable trusted RTC time and a hostname, then performs TLS 1.3 SNI,
 certificate-chain/validity/signature verification and record protection before
-returning decrypted HTTP bytes. Both return a truncation flag and at most 16 KiB
-in 512-byte reply chunks. Generic UDP and ICMP echo use dedicated operations
+returning decrypted HTTP bytes. Both return a truncation flag and at most 60 KiB
+of wire data in 512-byte internal reply chunks; the decoded HTTP body is capped
+at 56 KiB. This is a sealed service boundary, not a change to the frozen 3840-byte
+Form ABI v1 payload window. Generic UDP and ICMP echo use dedicated operations
 with checksum and peer/sequence validation. The production kernel no longer
 constructs or parses DHCP, DNS, ICMP, UDP, TCP or TLS packets. The remaining
 network isolation boundary is the trusted PCI/page-validation and register

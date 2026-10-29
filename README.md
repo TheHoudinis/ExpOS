@@ -1,9 +1,9 @@
-# ExpOS v9.4 “Lose”
+# ExpOS v9.8 “Populis”
 
-**Lose** is the stable-release hardening line built on v9.3 **Loop**. Release
-scope and verified limitations are recorded in
-[`docs/LOSE_V9_4.md`](docs/LOSE_V9_4.md); the prior
-[`docs/LOOP_V9_3.md`](docs/LOOP_V9_3.md) remains as its engineering history.
+**Populis** is the in-development performance, physical-install safety and
+driver-growth line built on v9.4 **Lose**. Its local implementation scope and
+current evidence are recorded in [`docs/POPULIS_V9_8.md`](docs/POPULIS_V9_8.md);
+[`docs/LOSE_V9_4.md`](docs/LOSE_V9_4.md) remains the prior release record.
 The current system adds kernel section permissions, CPU-supported SMAP,
 stricter fault attribution and repeatable parser mutation campaigns. MicroPython and
 HTTP response parsing run in isolated Ring 3 workers. The sealed built-in
@@ -15,10 +15,16 @@ is revoked before the worker arena is released. There is no hardware IOMMU.
 Optional Ayo apps Cliptick and Writer add 32 KiB source editing,
 native Python, and bounded on-device C/Rust/Go profile compilation to EXF1.
 
-Lose adds chunked transactional Form blobs, EXF1 v2 multi-page address spaces,
+Lose added chunked transactional Form blobs, EXF1 v2 multi-page address spaces,
 lease-tracked physical frames, shell-idle background Forms, and a hardened
 ExpAudio ring with strict WAV validation, linear resampling and one queued
-playback request. Form ABI v1 remains frozen; large-object streaming is an
+playback request. Populis adds interrupt-driven AC'97 and Intel HDA, modern
+VirtIO Sound output, bounded streaming MP3 decode for Ayo-installed media, tickless
+shell/desktop idle, explicit multi-disk Genesis selection, Intel e1000/e1000e,
+shared transitional VirtIO queues for network/block, and pinned-signature Ayo
+registry downloads. It also adds modern VirtIO-GPU 2D QEMU scanout, 64-bit CPU
+framebuffer fill/copy paths, and Genesis graphics/resolution/rendering choices.
+Form ABI v1 remains frozen; large-object streaming is an
 additive, capability-checked ABI v2 contract.
 
 Mole's Browser/Weather request bounds, display-mode handling, desktop/session
@@ -28,7 +34,7 @@ ExpOS is the Form-native operating system described by
 [`docs/PHILOSOPHY.txt`](docs/PHILOSOPHY.txt). The current image contains:
 
 - an x86_64 kernel with native UEFI handoff and a separate Multiboot2 fallback,
-  UEFI GOP/Bochs framebuffer output, serial, PS/2 and xHCI boot-HID input;
+  UEFI GOP/Bochs framebuffer plus VirtIO-GPU 2D output, serial, PS/2 and xHCI boot-HID input;
 - Operator-authenticated single-user maintenance and normal multi-user startup;
 - ExpPython, a bounded embedded MicroPython interpreter, plus a host Python SDK;
 - FIN identity, Dimensions, PIMP/DIESE policy, capability-scoped Form Handles,
@@ -58,8 +64,10 @@ ExpOS is the Form-native operating system described by
   damage, presentation-complete frame events and alpha buffers; v3 adds stale
   pointer-event coalescing, event-overflow recovery, adaptive GOP publication,
   periodic full reconciliation, scanout readback/self-healing and live portal
-  diagnostics; native UEFI uses a validated shadow-backed GOP scanout, while
-  BIOS/QEMU retains bounded double-buffered Bochs output and selectable pacing;
+  diagnostics; Populis adds cached wallpaper layers, scanline alpha blending,
+  bounded latest-state input frame coalescing and sparse VirtIO-GPU uploads;
+  native UEFI uses a validated shadow-backed GOP scanout, while BIOS/QEMU
+  retains bounded double-buffered Bochs output and selectable pacing;
 - a flat dark desktop with list, grid, compact-grid and dashboard application
   menu layouts, a styled Power & session surface, direct entries for
   installed Ayo apps, menu density/content/category/motion controls, and a
@@ -96,10 +104,11 @@ ExpOS is the Form-native operating system described by
   Wikipedia article links use its live HTTPS summary endpoint and render as a
   scrollable reader; interactive transport retries and automatic subresources
   are capped so a failed or media-heavy site returns control to the desktop;
-- ExpAudio with an ASL-owned AC'97 PCI backend, a 32-descriptor 48 kHz stereo
-  DMA ring, double-buffered one-request queue, persistent volume/mute controls,
-  underrun diagnostics, a test tone, and strict PCM WAV conversion with linear
-  resampling from 8/16/24/32-bit mono or stereo sources;
+- ExpAudio with ASL-owned AC'97, Intel HDA and modern VirtIO Sound PCI backends,
+  bounded 48 kHz stereo DMA/virtqueue output, double-buffered streaming,
+  persistent volume/mute controls, completion and underrun diagnostics, a test
+  tone, strict PCM WAV conversion, and allocation-bounded VBR MP3 decoding for
+  the two supplied tracks after an explicit verified Ayo web install;
 - graphical and console login for Operator, Power and Guest authority;
 - a bright white-on-black native command deck with cyan/green identity
   accents, a structured startup banner, grouped help, and aligned system
@@ -172,9 +181,13 @@ PS/2 input. Installed UEFI boot uses the same visible console for encrypted-CFC
 unlock and fail-closed manifest errors before handing off to the normal chooser.
 `make run-genesis` creates or safely reuses only a regular virtual-disk image,
 automatically ejects the installer media before reboot, and directly boots an
-image that already contains a Genesis manifest. Safe physical-disk identity
-selection, VirtIO-block, USB mass storage, BIOS installation, Secure Boot, and
-a mouse-first graphical wizard remain open. Removable Genesis media now detects
+image that already contains a Genesis manifest. Populis shows the selected
+whole device's model, serial, capacity, controller and fingerprint, then
+requires an explicit inventory choice and exact serial re-entry before the
+later `ERASE` gate. The QEMU gate selects an ATA-slave target beside a protected
+decoy and proves the decoy prefix unchanged. Multi-port AHCI/multi-namespace
+NVMe expansion, USB mass storage, BIOS installation,
+Secure Boot, and a mouse-first graphical wizard remain open. Removable Genesis media now detects
 installed ExpOS metadata and offers read-only diagnostics, verified redundant
 metadata repair, authenticated protected-baseline restore, or double-confirmed
 annihilation. See `docs/GENESIS_V2.md` and `docs/SECURITY.md`.
@@ -221,6 +234,8 @@ make check          # boot and exercise the command environment
 make display-check  # verify desktop and window lifecycle
 make power-check    # verify lock, sleep, suspend and shutdown from the power menu
 make audio-check    # verify AC'97 discovery, DMA submission and controls in QEMU
+make hda-check      # verify Intel HDA stream setup and completion interrupts
+make modern-audio-check # web-install, reboot, and stream both MP3s through VirtIO Sound
 make network-check  # verify ICMP, TCP, HTTP and Browser against a local fixture
 make weather-check  # test shell/GUI Ayo installs and live Open-Meteo weather
 make internet-check # verify live DNS and public HTTP (requires Internet access)
@@ -395,6 +410,16 @@ and its animation is capped at four damage-only frames per second. These choices
 persist. With the keyboard, `7` selects Performance, `j`/`k`
 select a row, Enter or Space activates it, and `+`/`-` move choices.
 
+Populis also keeps compositor responsiveness independent of those preferences.
+GOP and VirtIO-GPU reuse a cached procedural wallpaper layer, translucent
+rectangles blend through clipped RAM scanlines, and a queued input burst defers
+at most seven obsolete intermediate compositions before rendering the newest
+state. This is bounded coalescing, not dropped input: keyboard and button state
+still execute in order. Full scene rebuilds whose wallpaper did not change
+publish the previous and current surface footprints instead of automatically
+uploading the whole scanout. Frame waits use the one-shot PIT with a short spin
+tail and a four-wake cap before falling back to the bounded spin path.
+
 ExpDisplay Portal adopts compositor concepts also used by Wayland—client-owned
 surfaces, pending state published by an atomic commit, explicit surface damage
 and frame completion after presentation—but it is a Form-native protocol, not
@@ -406,7 +431,8 @@ is sampled through hardware readback and a mismatch triggers a complete
 shadow-to-scanout recovery. `displaydebug on` shows live portal/scanout counters
 inside the graphical Terminal, `displayrepair` requests reconciliation, and the
 console `displaydiag` prints the same cost and recovery data. Keyboard input and
-mouse-button transitions remain ordered while obsolete pure motion is merged.
+mouse-button transitions remain ordered while obsolete pure motion and
+already-queued intermediate visual states are merged independently.
 
 ## Network and Browser
 
@@ -416,7 +442,8 @@ DHCP server replies. Network I/O and manual `dhcp` renewal are authorized at
 the Driver Form boundary with a requester-bound Network Handle.
 
 The native stack supports the following bounded protocols in a restartable
-Ring 3 worker, through the kernel's confined RTL8139 register/DMA portal:
+Ring 3 worker. RTL8139 uses its confined register/DMA portal; e1000/e1000e and
+transitional VirtIO-net use bounded kernel-owned rings with copied Form frames:
 
 - a Ring 3 RTL8139 polling driver with private writable/NX RX/TX DMA buffers;
 - Ethernet/ARP over that user-mode driver;
@@ -453,8 +480,8 @@ Bluetooth hardware presence, driver state and requested power state. ExpOS
 does not claim a connection when an adapter or driver is unavailable.
 
 The browser engine is deliberately bounded: the parser accepts at most 16 KiB
-per document, while native HTTP/HTTPS fetches retain at most the first 14 KiB of
-the response body. The live DOM/style/script arena and maximum-sized staging
+per document, while the shared native HTTP/HTTPS response envelope retains at
+most 56 KiB and Browser admits only its 16 KiB document budget. The live DOM/style/script arena and maximum-sized staging
 buffers are heap-backed instead of sharing the compositor stack. A candidate
 page is committed only after its full bounded parse succeeds, so a rejected page
 cannot replace the last valid document or close the desktop. A document contains
@@ -471,21 +498,32 @@ bridge supports GET-style `fetch`/`fetchText`, `document.cookie`, and
 origin-partitioned local/session storage set/get operations; local storage is
 persisted in `BrowserData.state`, while cookies and session storage end with the
 session. These are deliberate subsets, not general Web APIs. Compressed images,
-fonts, MP3/AAC/Opus, video decoding/output and GPU raster acceleration remain
-absent. The workflow is intentionally Chromium-like, but the engine is not
+fonts, browser-fetched MP3/AAC/Opus, video decoding/output and GPU raster
+acceleration remain absent. System MP3 packages are downloaded by Ayo, not by
+the Browser. VirtIO-GPU accelerates VM scanout, not Browser rasterization. The workflow is intentionally Chromium-like, but the engine is not
 Chromium/Blink/V8 compatible. YouTube addresses therefore open an immediate
 bounded compatibility notice instead of attempting unsupported playback.
 
-ExpAudio supports the QEMU/Intel-compatible AC'97 PCM-out interface. It converts
+ExpAudio supports QEMU's modern VirtIO Sound device plus Intel-compatible HDA
+and AC'97 PCM output. VirtIO Sound discovers a compatible output stream and
+uses the specified SET_PARAMS/PREPARE/START lifecycle with a bounded TX
+virtqueue and used-ring completion. HDA and AC'97 retain interrupt completion.
+The media layer converts
 strictly validated RIFF/WAVE integer PCM at 8-192 kHz, mono or stereo, and
 8/16/24/32-bit depth into 48 kHz stereo signed-16 DMA using linear interpolation.
-A 32-entry descriptor ring removes the old single-descriptor ceiling; separate
-active/pending sample banks allow one queued request without rewriting live DMA
-memory. Controller reset, FIFO/unexpected-halt diagnostics and ASL claim rollback
-provide bounded failure recovery. Settings and the
-graphical Terminal (`audio`, `audiotest`, `audiostop`) expose real backend and
-playback state. This is full end-to-end PCM output, not a claim of universal
-sound-card support, software mixing, capture or compressed-media/video codecs.
+A safe no-std Layer III decoder streams a fixed number of compressed frames at
+a time, supports VBR plus mono/stereo MPEG rates through bounded conversion,
+and never expands a complete song to PCM in memory. `ayo music install
+<imtq|dash> <web-url>` downloads exact byte ranges, retries transient failures,
+checks the pinned size and SHA-256, reads the inactive disk slot back, and only
+then atomically publishes the catalog. The MP3 files are not in the repository
+or ISO. This store uses the unpartitioned 32 MiB VM state image and refuses GPT
+or Genesis disks. Separate active/pending sample
+banks keep one request queued without rewriting live device memory. Settings
+and the graphical Terminal (`music`, `play imtq`, `play dash`, `audio`,
+`audiostop`) expose the tracks and live state. This is VM-verified playback,
+not a claim of physical-device support, capture, software mixing, arbitrary
+browser codecs, USB audio or video decoding.
 
 The worker cannot access kernel memory or ambient Handles. It can access only
 its private DMA arena and a narrow RTL8139 register/value allowlist; Ring 0
@@ -538,12 +576,17 @@ Ayo. Kernel-private Rust layouts are explicitly outside the ABI.
 The project driver supports fixed Rust, Go, and C recipes and emits a
 deterministic Ayo tar artifact plus SHA-256 receipt. `run` launches host builds.
 The freestanding C/Rust/Go target, `expos-x86_64`, produces real EXF1
-executables and bounded console import commands. The kernel validates and runs
-these images in CPL3 with requester-owned Handles. Frozen EXF1 v1 remains
+executables and bounded transactional Ayo import commands. Ayo stages the
+complete image privately, verifies its declared SHA-256 and EXF1 structure,
+then publishes one ExpFS revision. The kernel runs these images in CPL3 with
+requester-owned Handles. Frozen EXF1 v1 remains
 compatible; EXF1 v2 and chunked ExpFS raise the executable/Form quota to 32 KiB
 with capability-bound transactional streaming. The Go path is the documented
 freestanding ExpOS profile, not the upstream Go runtime or standard library.
-General buffer grants and native Ayo installation remain unfinished. See the
+`ayo registry install` can fetch a same-origin HTTPS manifest/artifact pair,
+verify a caller-pinned Ed25519 key plus artifact SHA-256, and feed that image
+through the same atomic EXF1 transaction. A production public endpoint/key and
+general buffer grants remain unfinished. See the
 [native executable guide](docs/NATIVE_IMAGES.md) and runnable
 [sample](sdk/examples/native-hello/hello.c).
 
@@ -628,9 +671,14 @@ The feature pass described above does not modify `legacy/alpha32/`.
 | `docs/ARCHITECTURE.md` | implementation and trust boundaries |
 | `docs/MIGRATION.md` | migration map |
 | `docs/FEATURE_COVERAGE.md` | implemented and missing features |
+| `docs/POPULIS_V9_8.md` | v9.8 local implementation scope, evidence and open boundaries |
 | `docs/LOSE_V9_4.md` | v9.4 release scope, evidence and residual limits |
 | `legacy/alpha32/` | preserved Diamond II source |
 
 ASL v1 now has a bounded boot inventory, exclusive driver claims, PCI/firmware
-classification and MSI/MSI-X discovery. Raw hardware is still kernel-only;
+classification, I/O-APIC/INTx and MSI/MSI-X foundations. AC'97, Intel HDA,
+Intel e1000/e1000e, transitional VirtIO block/network, NVMe, AHCI, ATA-PIO and
+xHCI boot HID are operational in their documented QEMU gates. Modern VirtIO PCI
+capabilities are operational for VirtIO-GPU 2D and VirtIO Sound PCM output;
+modern-only net/block remain probe-only. Raw hardware is still kernel-only;
 Handle-backed Form driver grants and non-x86 transports remain future work.

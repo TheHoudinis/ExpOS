@@ -33,6 +33,11 @@ def storage_arguments(backend: str, disk: Path) -> list[str]:
             "-device", "ich9-ahci,id=ahci", "-drive", drive,
             "-device", "ide-hd,drive=state,bus=ahci.0",
         ]
+    if backend == "virtio-block":
+        return [
+            "-drive", drive,
+            "-device", "virtio-blk-pci,drive=state,disable-modern=on",
+        ]
     raise ValueError(backend)
 
 
@@ -72,6 +77,8 @@ def storage_boot(backend: str, disk: Path, phase: str, commands: str) -> str:
     text = output.decode(errors="replace")
     assert process.returncode == 33, f"{backend} {phase} failed; see {log}"
     assert f"EXPOS_STORAGE_READY backend={backend}" in text, log
+    if backend == "virtio-block":
+        assert "EXPOS_VIRTIO_BLOCK_READY transport=legacy-pci" in text, log
     assert "EXPOS_COMMAND_OK shutdown" in text, log
     return text
 
@@ -237,6 +244,8 @@ def main() -> None:
     print("NVMe read/write persistence passed")
     check_storage("ahci")
     print("AHCI read/write persistence passed")
+    check_storage("virtio-block")
+    print("VirtIO block read/write persistence passed")
     check_usb_hid()
     print("xHCI boot keyboard and boot mouse input passed with i8042 disabled")
 

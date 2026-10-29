@@ -84,9 +84,10 @@ matching PCI location once; a different owner cannot replace that claim. The
 without disclosing BAR addresses. See `ASL_V1.md` for the exact first contract.
 
 PCI MSI/MSI-X discovery, vectors `0x40..0x7f`, message construction and the
-programming path have landed. Drivers currently reserve but do not arm those
-messages because device-specific IDT completion handlers have not landed; NVMe,
-AHCI, xHCI and RTL8139 therefore retain bounded polling.
+programming path have landed. Firmware PCI INTx is routed through the I/O APIC
+when present, with the PIC as fallback. AC'97, HDA and e1000/e1000e acknowledge
+real completion interrupts; NVMe and xHCI retain bounded polling. The PIT uses
+one-shot shell/desktop idle and restores 1 kHz periodic Ring 3 preemption.
 
 The boot handoff carries the ACPI RSDP. The x86_64 SMP layer validates the
 RSDT/XSDT and MADT, starts as many as seven application processors with
@@ -248,12 +249,19 @@ either and refuses to run without at least two online CPUs.
   configure, frame-complete, key and pointer events are routed back to the
   owning FIN. Native UEFI output consumes the validated GOP address, size,
   geometry, stride and RGB/BGR order without reprogramming a Bochs device.
-  Composition happens in a bounded shadow scanout; only a completed normalized
-  damage set is copied to GOP memory, so intermediate clearing and repaint
+  Composition happens in a bounded shadow scanout. On QEMU VirtIO-GPU, a modern
+  PCI capability transport creates one B8G8R8X8 2D resource backed by that
+  surface and submits bounded transfer/flush commands to scanout 0. Separated
+  damage stays separated when its bounding transfer would exceed twice the
+  exact pixel cost; all transfers share one device lock and one bounding flush.
+  Rasterization
+  remains CPU-side; there is no VirGL/Venus/3D path. On GOP, only a completed normalized
+  damage set is copied to firmware memory, so intermediate clearing and repaint
   steps cannot flicker on the physical display. Portal v3 promotes damage over
   two thirds of the visible frame to a sequential full copy and reconciles the
-  complete shadow after 120 partial publications. It samples every published
-  region through hardware readback; a mismatch triggers an immediate full
+  complete shadow after 120 partial publications. It samples every full GOP
+  publication and every sixteenth partial publication through hardware
+  readback; a mismatch triggers an immediate full
   shadow-to-scanout recovery instead of leaving corrupted pixels visible.
   BIOS fallback can program 640x480, 1280x720 or 1920x1080 XRGB scanout in
   QEMU standard VGA's 16 MiB linear framebuffer BAR. The bootstrap maps RAM
@@ -265,7 +273,14 @@ either and refuses to run without at least two online CPUs.
   page flipping is disabled. Before synchronization, scanout damage is clipped
   in a fixed 32-region stack buffer. A bounding merge is used only when it does
   not copy more pixels than the original regions; overflow collapses to one
-  safe bounding rectangle instead of losing pixels or allocating. After a
+  safe bounding rectangle instead of losing pixels or allocating. CPU opaque
+  fills and copies use aligned `rep stosq`/`rep movsq` with bounded dword
+  head/tail handling, widening the hot path without consuming SIMD state.
+  Alpha rectangles clip once and blend sequential RAM scanlines without
+  per-pixel geometry/atomic reloads. GOP and VirtIO-GPU use the unused bounded
+  half of the shadow aperture as a wallpaper cache; when that layer is unchanged,
+  a full scene composition publishes only previous/current surface footprints.
+  After a
   successful flip, only normalized damage
   is copied to the newly hidden page, keeping the two pages coherent without a
   full-screen copy for cursor and terminal updates. Submitted/copy region and
@@ -322,6 +337,11 @@ either and refuses to run without at least two online CPUs.
   only for damaged commits, while full redraws stay paced and VSync remains an
   independent presentation constraint. All three optional features persist and
   default off or Efficient so a fresh state starts on the least expensive path.
+  Independently of that preference, the compositor detects queued legacy input
+  and coalesces up to seven obsolete visual states while applying every event in
+  order; the eighth request always renders. It marks elapsed no-damage cadence
+  slots idle before rasterization and waits for frame deadlines through bounded
+  one-shot PIT sleeps with a short spin tail.
   Weather animation is capped at four damaged frames per second, and repeat
   refreshes reuse persisted coordinates instead of repeating geocoding.
   Weather network calls use an exact-host HTTPS allowlist, a requester-bound
@@ -416,7 +436,9 @@ either and refuses to run without at least two online CPUs.
   interrupt-IN reports into the same Form-native input events as PS/2. Hubs,
   mass storage, Bluetooth and arbitrary HID report descriptors are not claimed.
 - Network is a Driver Form protected by requester-bound Network Handles and
-  PIMP policy. Its current polling RTL8139 path implements Ethernet, ARP,
+  PIMP policy. RTL8139 uses a private Ring 3 register/DMA portal; kernel-owned
+  e1000/e1000e and transitional VirtIO-net rings copy bounded frames into the
+  same Ring 3 protocol worker. That worker implements Ethernet, ARP,
   DHCP-configured IPv4 with a conservative fallback, ICMP echo,
   checksum-validated UDP, DNS A lookup, one
   bounded synchronous TCP client and HTTP/1.0 GET over plain TCP or
@@ -427,8 +449,8 @@ either and refuses to run without at least two online CPUs.
   is not a general operating-system CA bundle: GlobalSign Root R1 is the
   default anchor, DigiCert Global Root G2 is selected only for
   `duckduckgo.com`, and ISRG Root X1 only for `wikipedia.org` and their
-  subdomains. IPv6, physical Wi-Fi, concurrent
-  sockets, TCP servers and interrupt-driven I/O are explicitly future work.
+  subdomains. IPv6, physical Wi-Fi, concurrent sockets and TCP servers remain
+  future work. QEMU e1000/e1000e completion is interrupt-driven.
 - Connectivity settings target a distinct Radio FIN through a requester-bound
   Configure Handle. The manager keeps software policy, PCI/USB presence, driver
   readiness and connection state separate. Disabling Network is checked by the
@@ -455,8 +477,8 @@ either and refuses to run without at least two online CPUs.
   downgrade. DuckDuckGo result wrappers are still unwrapped before the request;
   direct article URLs use Wikipedia's live HTTPS
   REST summary endpoint and render into a bounded scrollable document. The allocation-free
-  document core accepts at most 16 KiB, while the native HTTP client retains at
-  most the first 14 KiB of a response body; a document contains at most 48
+  document core accepts at most 16 KiB, while the shared native HTTP client
+  retains at most 56 KiB and Browser admits only its document budget; a document contains at most 48
   nodes, 32 CSS rules, 16 scripts, 24 statements per script and 12 click
   handlers. It decodes common HTML text entities, projects additional semantic
   text tags and unloaded image placeholders, and computes a bounded CSS subset
@@ -475,14 +497,21 @@ either and refuses to run without at least two online CPUs.
   extension compatible. A
   YouTube addresses open an immediate bounded compatibility notice; playback
   is not supported.
-- ExpAudio is a bounded kernel service owned through ASL. Its first backend
-  drives the Intel/QEMU-compatible AC'97 PCM-out bus-master interface with one
-  below-4-GiB DMA descriptor, persistent volume/mute policy and a 48 kHz stereo
-  signed-16 output format. RIFF/WAVE integer PCM inputs are validated and
-  converted from 8-192 kHz, mono/stereo and 8/16/24/32-bit depth. Settings,
-  Browser `<audio>` controls and graphical Terminal diagnostics share this
-  service. MP3/AAC/Opus, mixing, capture, HDA/USB audio and video codecs are not
-  implemented.
+- ExpAudio is a bounded kernel service owned through ASL. AC'97 and Intel HDA
+  provide interrupt-driven PCM output with below-4-GiB DMA; modern VirtIO
+  Sound adds stream discovery, control lifecycle and TX used-ring completion.
+  All three expose 48 kHz stereo signed-16 output and persistent volume/mute.
+  RIFF/WAVE integer PCM inputs are validated and converted from 8-192 kHz,
+  mono/stereo and 8/16/24/32-bit depth. A safe no-std MPEG Layer III decoder
+  incrementally fills the same two bounded sample banks from Ayo-installed VBR
+  MP3 media. Ayo performs bounded HTTP/HTTPS Range requests, validates the
+  pinned size and SHA-256, read-verifies an inactive raw-disk slot, then
+  publishes one redundant catalog header. Fresh boots have no tracks and
+  `play` fails closed until installation. The VM store rejects GPT disks so it
+  cannot overwrite a Genesis ESP. Settings and graphical Terminal expose both
+  supplied track identities. Browser `<audio>` remains a bounded WAV cache;
+  arbitrary Browser-fetched MP3/AAC/Opus,
+  mixing, capture, USB audio and video codecs are not implemented.
 - Form ABI v1 freezes language-neutral 72-byte requests, 40-byte responses,
   call/status numbers, FIN caller identity, and explicit Handles for identity,
   IPC, display, input/events, time, storage, networking, browser navigation,

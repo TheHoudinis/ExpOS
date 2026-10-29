@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Compile contributor C/Rust, import/persist it, and exercise real CPL3 failures."""
 from pathlib import Path
+import hashlib
 import os
 import re
 import selectors
@@ -17,6 +18,7 @@ subprocess.run([str(CLI), "--manifest", str(MANIFEST), "build"], check=True)
 script = subprocess.check_output([str(CLI), "--manifest", str(MANIFEST),
                                   "import-script", "--no-build"], text=True).splitlines()
 assert all(len(line) < 128 for line in script)
+native_payload = (ROOT / "sdk/examples/native-hello/.expos/build/NativeHello").read_bytes()
 
 RUST_MANIFEST = ROOT / "sdk/examples/native-rust/expos.toml"
 subprocess.run([str(CLI), "--manifest", str(RUST_MANIFEST), "build"], check=True)
@@ -85,6 +87,20 @@ def run(name, commands, cpu="max", reset=True):
 # Reuse one Form so the test checks the image boundary, not the Form quota.
 commands = ["expbudget set form-operations 512 1024", *script, *rust_script, *go_script,
             "mkform Probe executable", "grant Probe execute"]
+# A staged replacement is invisible until every byte and its digest validate.
+# Committing an interrupted upload must leave the old executable runnable.
+commands += [
+    f"ayo native begin NativeHello {len(native_payload)} {hashlib.sha256(native_payload).hexdigest()}",
+    f"ayo native write 0 {native_payload[:32].hex()}",
+    "ayo native commit",
+    "execute NativeHello",
+]
+# A complete artifact with the wrong catalog digest is also rejected without
+# disturbing the preceding installed revision.
+commands += [f"ayo native begin NativeHello {len(native_payload)} {'0' * 64}"]
+commands += [f"ayo native write {offset} {native_payload[offset:offset+32].hex()}"
+             for offset in range(0, len(native_payload), 32)]
+commands += ["ayo native commit", "execute NativeHello"]
 faults = [
     (bytes.fromhex("31c08ee8dbe3"), 7),                       # x87 with CR0.TS
     (bytes.fromhex("0f57c0"), 6),                     # XORPS: OSFXSR disabled on BIOS
@@ -127,8 +143,11 @@ assert "Hello from compiled Rust in Ring 3" in text
 assert "Executable Form 'NativeRust' exited with result 43 in Ring 3." in text
 assert "Hello from native Go in Ring 3" in text
 assert "Executable Form 'NativeGo' exited with result 43 in Ring 3." in text
-assert text.count("Hello from compiled C in Ring 3") == 2
-assert text.count("Executable Form 'NativeHello' exited with result 42 in Ring 3.") == 2
+assert text.count("Hello from compiled C in Ring 3") == 4
+assert text.count("Executable Form 'NativeHello' exited with result 42 in Ring 3.") == 4
+assert "Ayo rejected the staged native package: incomplete artifact." in text
+assert "Ayo rejected the staged native package: SHA-256 mismatch." in text
+assert "EXPOS_AYO_NATIVE_COMMIT name=NativeHello" in text
 observed = [int(v) for v in re.findall(r"EXPOS_FORM_FAULT[^\n]*vector=(\d+)", text)]
 assert len(observed) == len(faults), observed
 for actual, (_, expected) in zip(observed, faults):
