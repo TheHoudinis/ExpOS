@@ -750,7 +750,7 @@ fn prompt_plan(input: &mut crate::input::Input, encryption: EncryptionProfile) -
     crate::println!("Initial packages");
     crate::println!("1. Minimal - core desktop only");
     crate::println!("2. Essentials - Browser, Calculator, Clock, Calendar");
-    crate::println!("3. Everything - Browser and all 30 optional Ayo apps");
+    crate::println!("3. Everything - Browser and all 32 optional Ayo apps");
     crate::println!("4. Custom - select Browser, ExpPython and individual apps");
     match read_choice(input, "Package set [1/4]: ", 1, 4) {
         1 => plan.components = COMPONENT_DESKTOP,
@@ -846,7 +846,7 @@ fn customize_packages(
     loop {
         let choice = read_choice(
             input,
-            "Add app [0 done / 1-30]: ",
+            "Add app [0 done / 1-32]: ",
             0,
             crate::apps::PACKAGE_COUNT as u8,
         );
