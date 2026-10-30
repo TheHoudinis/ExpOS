@@ -88,7 +88,7 @@ ExpOS is the Form-native operating system described by
   rasterization, an expanded 8x16 VGA console font, and persisted English,
   Russian, Hebrew, German and Esperanto UI/Genesis locales;
 - Ayo v3 package installation, verification, ownership, rollback and recovery,
-  with a categorized 57-package built-in catalog;
+  with a categorized 59-package built-in catalog;
 - a frozen language-neutral Form ABI v1 plus Rust, Go, C, and Python SDK
   contracts and an `expos build/run/test/package` host-development workflow;
 - a capability-gated RTL8139 network path with Ethernet, ARP, DHCP IPv4,
@@ -294,11 +294,12 @@ These accounts and their short passwords are retained for development
 compatibility. Newly set passwords must contain 8-23 printable characters.
 Accounts and password changes persist when the state image is available.
 Passwords are never stored as plaintext or reversible ciphertext: ExpOS stores
-a per-account salt and a PBKDF2-HMAC-SHA256 verifier with 25,000 rounds.
+a per-account salt and a PBKDF2-HMAC-SHA256 verifier with 100,000 rounds.
 Password arguments are masked while typed and omitted from shell history.
 This describes the current account-login verifier only. It is distinct from the
-Argon2id KEK used by encrypted Basic CFCs to wrap a random per-CFC storage key.
-Development and Architect images remain unencrypted unless created as Basic.
+Argon2id KEK used by encrypted CFCs to wrap a random per-CFC storage key.
+Basic installs are always encrypted (Easy or Paranoid). Architect installs can
+choose Easy, Paranoid or Unencrypted; development images remain unencrypted.
 
 ## Desktop
 
